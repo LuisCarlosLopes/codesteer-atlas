@@ -303,6 +303,21 @@ Após salvar, abra o painel de MCP Servers do Copilot Chat (Command Palette → 
 
 > **Antes do primeiro uso:** indexe a raiz do **seu projeto** com `atlas-index --workspace .` (veja [Início rápido](#início-rápido-primeira-vez)). Só rode `./setup.sh`/`.\setup.ps1` se estiver usando o Atlas em modo local a partir deste repositório clonado.
 
+#### Plugin do GitHub Copilot CLI
+
+Este repositório também é um [plugin do Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) ([`plugin.json`](plugin.json) + [`.mcp.json`](.mcp.json)), em modo remoto (`uvx`, sem paths absolutos). Para instalar:
+
+```bash
+copilot plugin install LuisCarlosLopes/codesteer-atlas
+
+# ou, a partir de uma pasta local clonada
+copilot plugin install /caminho/para/codesteer-atlas
+```
+
+Para remover: `copilot plugin uninstall codesteer-atlas`.
+
+> **Antes do primeiro uso:** indexe a raiz do **seu projeto** com `atlas-index --workspace .` (veja [Início rápido](#início-rápido-primeira-vez)).
+
 ## Resolução do diretório de índice
 
 O diretório `.code-index` é resolvido nesta ordem:

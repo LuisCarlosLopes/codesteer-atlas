@@ -1,0 +1,8 @@
+{
+  "name": "codesteer-atlas",
+  "description": "Busca semântica híbrida (vetorial + BM25) em código-fonte via AST/Tree-sitter, embeddings locais e LanceDB. 100% local e offline.",
+  "version": "1.0.0",
+  "author": "CodeSteer Squad <squad@codesteer.ai>",
+  "license": "MIT",
+  "mcpServers": ".mcp.json"
+}
