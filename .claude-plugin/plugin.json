@@ -1,0 +1,22 @@
+{
+  "name": "codesteer-atlas",
+  "description": "Busca semântica híbrida (vetorial + BM25) em código-fonte via AST/Tree-sitter, embeddings locais e LanceDB. 100% local e offline.",
+  "version": "1.0.0",
+  "author": {
+    "name": "CodeSteer Squad",
+    "email": "squad@codesteer.ai"
+  },
+  "homepage": "https://github.com/LuisCarlosLopes/codesteer-atlas",
+  "license": "MIT",
+  "keywords": ["mcp", "code-search", "semantic-search", "rag", "lancedb", "tree-sitter"],
+  "mcpServers": {
+    "codesteer-atlas": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
+        "atlas-serve"
+      ]
+    }
+  }
+}

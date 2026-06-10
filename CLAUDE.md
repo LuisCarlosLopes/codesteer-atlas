@@ -1,0 +1,69 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+CodeSteer Atlas: a local MCP (Model Context Protocol) server providing semantic hybrid code search over a codebase. It indexes source files via Tree-sitter AST parsing into symbol-level chunks (classes/functions/methods), generates embeddings locally with `fastembed` (ONNX, `all-MiniLM-L6-v2`, 384 dims), and stores them in an embedded LanceDB database. Search combines vector similarity (cosine) and BM25 full-text search, fused via Reciprocal Rank Fusion (RRF).
+
+Everything runs 100% locally and offline — no source code is ever sent to external services (see `.memory-bank/constitution.md` for the full governing principles).
+
+## Commands
+
+```bash
+# Setup (idempotent bootstrap: uv sync + critical import check)
+./setup.sh          # macOS/Linux
+./setup.ps1         # Windows
+
+# Index a workspace (incremental by default; --full forces full rebuild)
+uv run atlas-index --workspace .
+uv run atlas-index --workspace . --full
+uv run atlas-index --workspace . --paths src --paths docs
+
+# Run the MCP server (stdio transport)
+uv run atlas-serve
+uv run atlas-serve --index-dir /path/to/.code-index
+
+# Run tests
+uv run --python 3.12 --with pytest python -m pytest
+uv run pytest -v
+uv run pytest tests/test_indexer.py::test_name   # single test
+
+# Lint
+uv run ruff check
+
+# Validate critical dependency imports (used by setup scripts)
+uv run python deploy_mcp.py --check
+
+# Deploy/register the MCP server with editors (Cursor, Claude Desktop, Cline, Claude Code CLI)
+uv run python deploy_mcp.py
+```
+
+## Architecture
+
+Source lives under `src/codesteer_atlas/`:
+
+- **`config.py`** — central constants: `SUPPORTED_EXTENSIONS` (languages parsed by Tree-sitter), `IGNORE_DIRS`, `MIN_INDEX_VERSION`, `RRF_K`, `CANDIDATES_LIMIT`, `MAX_TOKENS_PER_CHUNK`, `DEFAULT_INDEX_DIR` (`.code-index`).
+- **`chunker.py` (`ASTChunker`)** — parses files with `tree_sitter_language_pack`, walks the AST to extract `CodeChunk`s at class/function/method granularity (falling back to whole-module chunks when no parser/symbols are found), and truncates oversized chunks while preserving signatures.
+- **`embeddings.py` (`EmbeddingEngine`)** — singleton, lazy-loaded `fastembed.TextEmbedding` wrapper (`FASTEMBED_MODEL_NAME = sentence-transformers/all-MiniLM-L6-v2`). Loads the model only on first `encode`/`encode_single` call to keep server startup instant.
+- **`storage.py` (`StorageBackend`)** — all LanceDB interaction and `manifest.json` read/write. Owns hybrid search (`search_hybrid`): runs vector + FTS queries with prefilters, fuses results with RRF, and returns `SearchResult`s. Also handles incremental add/delete of chunks and manifest updates (`update_manifest_after_incremental`). Enforces `MIN_INDEX_VERSION` — manifests from older (sentence-transformers/torch) backends raise an actionable `RuntimeError` requiring reindex.
+- **`indexer.py`** — `index_workspace()` is the reusable indexing core (used by both the CLI and the MCP `atlas_index` tool): scans the workspace (or selected `paths` subtrees, with anti-traversal validation), hashes file contents (sha256) for incremental indexing, chunks/embeds only new-or-changed files, and decides between full overwrite vs. incremental delete+append persistence. Also exposes `get_git_head_sha()` and `should_ignore()`.
+- **`server.py`** — FastMCP server (`app = FastMCP("CodeSteer Atlas")`). Critically, `sys.stdout` is redirected to `stderr` at import time (before heavy deps like `lancedb`/`fastembed` load) and only restored to the real stdout in `main()` right before `app.run()`, to keep the stdio JSON-RPC channel clean. Exposes MCP tools `atlas_search`, `atlas_map`, `atlas_index` (with `dry_run` mode), `atlas_status`, and resource `atlas://status`.
+- **`models.py`** — Pydantic models: `CodeChunk`, `IndexManifest`, `SearchResult`, `IndexStats`.
+
+### Index directory resolution (DECISAO-002)
+
+The `.code-index` directory location is resolved in order: (1) `--index-dir` CLI arg, (2) `ATLAS_INDEX_DIR` env var, (3) ascending discovery from CWD looking for a `.code-index` folder (git-style), (4) fallback to `DEFAULT_INDEX_DIR` relative to CWD. See `resolve_index_dir()` in `server.py`.
+
+### Incremental indexing (DECISAO-005 / [J])
+
+`index_workspace()` compares per-file sha256 hashes against `manifest.files` to skip unchanged files. Changed/deleted files have their old chunks removed from LanceDB (`delete_by_file_paths`) before new chunks are appended (`append_chunks`). A full reindex (no existing manifest, or `--full` without `paths`) instead overwrites the table entirely via `store_chunks`.
+
+### `deploy_mcp.py`
+
+Standalone deployment script (separate from the package) that registers the MCP server in config files for Cursor, Claude Desktop, Cline, and Claude Code CLI across Windows/macOS/Linux. `--check` mode validates `CRITICAL_MODULES` import successfully and is used by `setup.sh`/`setup.ps1`.
+
+## Code conventions
+
+- Code comments and docstrings are written in Portuguese (pt-BR), per `.memory-bank/constitution.md`. Keep comments minimal — only document non-obvious logic, per the `codesteer-tagger` skill conventions (1-3 tags per logical unit, no redundant/process recap comments).
+- Any logic change to the indexer or MCP server must be accompanied by unit/integration tests.

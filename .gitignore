@@ -1,0 +1,12 @@
+.code-index/
+**/__pycache__/**
+_codesteer/**
+.agent/**
+.claude/**
+.kiro/**
+.cursor/**
+.vscode/**
+.memory-bank/adrs
+.memory-bank/plans
+.memory-bank/specs
+.memory-bank/review

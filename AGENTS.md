@@ -1,0 +1,1 @@
+Veja [CLAUDE.md](CLAUDE.md) para detalhes de arquitetura
