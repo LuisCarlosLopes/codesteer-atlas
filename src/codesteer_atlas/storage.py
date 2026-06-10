@@ -19,6 +19,13 @@ def _version_tuple(version: str) -> tuple:
     return tuple(parts)
 
 
+def _table_names(db) -> List[str]:
+    """Normaliza o retorno de `db.list_tables()` (lista ou ListTablesResponse) para nomes."""
+    response = db.list_tables()
+    tables = getattr(response, "tables", response)
+    return list(tables)
+
+
 class StorageBackend:
     """
     Abstração que encapsula toda a interação com o banco de dados vetorial LanceDB
@@ -100,7 +107,7 @@ class StorageBackend:
 
         data_to_insert = [chunk.model_dump() for chunk in chunks]
 
-        if "chunks" in db.list_tables():
+        if "chunks" in _table_names(db):
             table = db.open_table("chunks")
             table.add(data_to_insert)
         else:

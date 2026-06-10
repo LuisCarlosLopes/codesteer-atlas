@@ -2,6 +2,7 @@ import json
 from unittest.mock import patch
 from click.testing import CliRunner
 from codesteer_atlas.indexer import cli, index_workspace, should_ignore
+from codesteer_atlas.storage import StorageBackend
 
 
 def test_should_ignore_rules(tmp_path):
@@ -242,3 +243,46 @@ def test_index_workspace_partial_paths_preserves_other_folders(tmp_path):
         assert "docs/guide.md" in manifest_after["files"]
         assert manifest_after["files"]["docs/guide.md"] == manifest_before["files"]["docs/guide.md"]
         assert "src/main.py" in manifest_after["files"]
+
+        # Chunks de outras pastas devem permanecer no LanceDB (não só no manifest)
+        storage = StorageBackend(index_dir)
+        symbols_after = storage.get_symbols()
+        file_paths_after = {row["file_path"] for row in symbols_after}
+        assert "docs/guide.md" in file_paths_after
+        assert len(symbols_after) >= 2
+
+
+def test_index_workspace_partial_paths_preserves_lancedb_chunk_count(tmp_path):
+    """Indexação parcial incremental não deve sobrescrever chunks fora do escopo de `paths`."""
+    workspace_dir = tmp_path / "workspace"
+    src_dir = workspace_dir / "src"
+    docs_dir = workspace_dir / "docs"
+    src_dir.mkdir(parents=True)
+    docs_dir.mkdir(parents=True)
+
+    (src_dir / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    (docs_dir / "guide.md").write_text("# Guide\n\nSome content here.\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+        storage = StorageBackend(index_dir)
+        chunks_before = len(storage.get_symbols())
+        assert chunks_before >= 2
+
+        (src_dir / "main.py").write_text("def main():\n    print('changed')\n", encoding="utf-8")
+        stats = index_workspace(workspace_dir, index_dir, paths=["src"])
+
+        assert stats.files_processed == 1
+        chunks_after = len(storage.get_symbols())
+        assert chunks_after == chunks_before
+        assert {row["file_path"] for row in storage.get_symbols()} >= {
+            "src/main.py",
+            "docs/guide.md",
+        }

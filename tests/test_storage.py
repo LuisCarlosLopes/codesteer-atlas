@@ -62,6 +62,62 @@ def test_store_and_get_manifest(temp_storage):
     assert manifest.git_head_sha == "abcdef123456"
 
 
+def test_append_chunks_preserves_existing_rows(temp_storage):
+    """`append_chunks` deve inserir sem sobrescrever linhas já persistidas no LanceDB."""
+    base_chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main():\n    pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="c2",
+            file_path="docs/guide.md",
+            repo="test-project",
+            start_line=1,
+            end_line=3,
+            scope_type="section",
+            scope_name="Guide",
+            language="markdown",
+            content="# Guide\n\ncontent",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(base_chunks)
+
+    new_chunk = CodeChunk(
+        id="c3",
+        file_path="src/utils.py",
+        repo="test-project",
+        start_line=1,
+        end_line=3,
+        scope_type="function",
+        scope_name="helper",
+        language="python",
+        content="def helper():\n    pass",
+        indexed_at="2026-06-05T12:01:00Z",
+        vector=MOCK_VECTOR,
+    )
+    temp_storage.append_chunks([new_chunk])
+
+    symbols = temp_storage.get_symbols()
+    assert len(symbols) == 3
+    assert {row["file_path"] for row in symbols} == {
+        "src/main.py",
+        "docs/guide.md",
+        "src/utils.py",
+    }
+
+
 def test_hybrid_search_with_filters(temp_storage):
     """
     Testa se a busca híbrida RRF funciona com sucesso e se os filtros
