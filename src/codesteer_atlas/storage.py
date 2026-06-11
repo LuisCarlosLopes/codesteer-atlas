@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Dict, List, Optional
@@ -6,6 +7,21 @@ import lancedb
 from codesteer_atlas.config import CANDIDATES_LIMIT, DEFAULT_INDEX_DIR, MIN_INDEX_VERSION, RRF_K
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
 from codesteer_atlas.models import CodeChunk, IndexManifest, SearchResult
+
+
+def _write_manifest_atomic(manifest_path: Path, manifest: IndexManifest) -> None:
+    """
+    Escreve o manifest.json de forma atômica (escreve em arquivo temporário e
+    usa `os.replace`, atômico tanto em POSIX quanto no Windows).
+
+    Evita que `get_manifest()` (chamado pelo processo do servidor MCP a cada
+    `atlas_search`/`atlas_status`/`atlas_map`) leia um JSON parcial enquanto o
+    subprocesso de reindex em background está regravando o manifesto [GA-XX].
+    """
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(manifest.model_dump(), f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, manifest_path)
 
 
 def _version_tuple(version: str) -> tuple:
@@ -95,9 +111,8 @@ class StorageBackend:
             files_meta=files_meta or {},
         )
 
-        # Salva o arquivo de metadados manifest.json
-        with open(self.manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest.model_dump(), f, indent=2, ensure_ascii=False)
+        # Salva o arquivo de metadados manifest.json (escrita atômica)
+        _write_manifest_atomic(self.manifest_path, manifest)
 
     def append_chunks(self, chunks: List[CodeChunk]) -> None:
         """
@@ -159,8 +174,7 @@ class StorageBackend:
             files_meta=files_meta or {},
         )
 
-        with open(self.manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest.model_dump(), f, indent=2, ensure_ascii=False)
+        _write_manifest_atomic(self.manifest_path, manifest)
 
         return total_chunks
 

@@ -404,3 +404,57 @@ def test_get_manifest_incompatible_version_raises_runtime_error(temp_storage):
 
     with pytest.raises(RuntimeError):
         temp_storage.get_manifest()
+
+
+def test_store_chunks_writes_manifest_atomically_no_leftover_tmp(temp_storage):
+    """`store_chunks` não deixa arquivo `.json.tmp` residual e o manifest.json é válido."""
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="project-a",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        )
+    ]
+
+    temp_storage.store_chunks(chunks)
+
+    tmp_path = temp_storage.manifest_path.with_suffix(".json.tmp")
+    assert not tmp_path.exists()
+
+    manifest = temp_storage.get_manifest()
+    assert manifest.total_chunks == 1
+
+
+def test_update_manifest_after_incremental_writes_manifest_atomically(temp_storage):
+    """`update_manifest_after_incremental` regrava o manifest sem deixar `.json.tmp` residual."""
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="project-a",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        )
+    ]
+    temp_storage.store_chunks(chunks)
+
+    total = temp_storage.update_manifest_after_incremental(files={"src/main.py": "hash1"})
+
+    tmp_path = temp_storage.manifest_path.with_suffix(".json.tmp")
+    assert not tmp_path.exists()
+    assert total == 1
+    assert temp_storage.get_manifest().files == {"src/main.py": "hash1"}
