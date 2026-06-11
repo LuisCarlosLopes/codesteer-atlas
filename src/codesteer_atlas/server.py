@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import json
+import threading
 import time
 from pathlib import Path, PurePath
 from typing import Optional
@@ -487,6 +488,50 @@ def get_status_resource() -> str:
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
+def _background_reindex() -> None:
+    """
+    Roda uma reindexação incremental (full=False) em background no startup do MCP,
+    para manter o índice atualizado sem bloquear `app.run()`. Nunca propaga exceções [5].
+    """
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+
+    if not storage.exists():
+        print(
+            f"[atlas] Nenhum índice existente em {storage.index_dir.resolve()}; "
+            "pulando reindex automático no startup.",
+            file=sys.stderr,
+        )
+        return
+
+    workspace_path = _index_workspace_root()
+    if not workspace_path.exists():
+        print(
+            f"[atlas] Workspace '{workspace_path}' não encontrado; "
+            "pulando reindex automático.",
+            file=sys.stderr,
+        )
+        return
+
+    print(
+        f"[atlas] Reindex automático em background iniciado (workspace={workspace_path})...",
+        file=sys.stderr,
+    )
+
+    try:
+        stats = index_workspace(workspace_path, INDEX_DIR_PATH)
+    except Exception as e:
+        print(f"[atlas] Erro no reindex automático em background: {e}", file=sys.stderr)
+        return
+
+    print(
+        "[atlas] Reindex automático em background concluído: "
+        f"processed={stats.files_processed} skipped={stats.files_skipped_unchanged} "
+        f"removed={stats.files_removed} chunks={stats.chunks_persisted} "
+        f"duration={stats.duration_s}s",
+        file=sys.stderr,
+    )
+
+
 def main():
     # Faz o parsing de --index-dir ANTES de app.run() (DECISAO-002).
     # FastMCP/stdio não usa argv adicional, então é seguro interceptar aqui.
@@ -506,6 +551,11 @@ def main():
     # Restaura o stdout original no sys.stdout imediatamente antes do FastMCP rodar
     # O FastMCP capturará a stream stdout limpa para estabelecer o protocolo stdio JSON-RPC
     sys.stdout = original_stdout
+
+    # Dispara reindex incremental em background, sem bloquear o startup do MCP [GA-XX]
+    threading.Thread(
+        target=_background_reindex, daemon=True, name="atlas-startup-reindex"
+    ).start()
 
     # Roda o servidor MCP stdio de forma síncrona
     app.run()
