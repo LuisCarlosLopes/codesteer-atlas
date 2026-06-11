@@ -79,9 +79,35 @@ def test_indexer_cli_run(tmp_path):
         mock_encode.assert_called_once()
 
 
-def _patched_encode(texts, batch_size=32):
+def _patched_encode(texts, batch_size=32, on_progress=None):
     """Mock determinístico de embeddings: um vetor [0.1]*384 por texto."""
+    total = len(texts)
+    if on_progress is not None and total:
+        on_progress(total, total)
     return [[0.1] * 384 for _ in texts]
+
+
+def test_index_progress_reporter_emits_phases(tmp_path, capsys):
+    """Progresso por fase é emitido em stderr e só atinge 100% ao finalizar."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir, report_progress=True)
+
+    captured = capsys.readouterr()
+    assert "[atlas]" in captured.err
+    assert "Varredura do workspace" in captured.err
+    assert "Persistindo no LanceDB" in captured.err
+    assert captured.err.strip().endswith("[atlas] 100% — Indexação concluída")
 
 
 def test_index_workspace_second_run_skips_unchanged_files(tmp_path):

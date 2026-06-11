@@ -18,6 +18,58 @@ from codesteer_atlas.embeddings import EmbeddingEngine
 from codesteer_atlas.models import IndexStats
 from codesteer_atlas.storage import StorageBackend
 
+_PHASE_WEIGHTS = {
+    "scan": 0.05,
+    "hash": 0.10,
+    "chunk": 0.30,
+    "embed": 0.45,
+    "persist": 0.10,
+}
+
+_PHASE_LABELS = {
+    "scan": "Varredura do workspace",
+    "hash": "Verificando alterações",
+    "chunk": "Extraindo chunks (AST)",
+    "embed": "Gerando embeddings",
+    "persist": "Persistindo no LanceDB",
+}
+
+
+class IndexProgressReporter:
+    """Reporta progresso ponderado por fase; 100% só ao chamar `finish()`."""
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self._completed_weight = 0.0
+        self._last_pct = -1
+
+    def _overall_pct(self, phase: str, current: int, total: int) -> int:
+        phase_ratio = (current / total) if total > 0 else 1.0
+        raw = (self._completed_weight + _PHASE_WEIGHTS[phase] * phase_ratio) * 100
+        return min(int(raw), 99)
+
+    def tick(self, phase: str, current: int, total: int) -> None:
+        if not self.enabled:
+            return
+
+        pct = self._overall_pct(phase, current, total)
+        if pct == self._last_pct and current < total:
+            return
+
+        self._last_pct = pct
+        label = _PHASE_LABELS[phase]
+        suffix = f": {current}/{total}" if total > 1 else ""
+        print(f"[atlas] {pct}% — {label}{suffix}", file=sys.stderr, flush=True)
+
+    def phase_done(self, phase: str) -> None:
+        self._completed_weight += _PHASE_WEIGHTS[phase]
+        self._last_pct = -1
+
+    def finish(self) -> None:
+        if not self.enabled:
+            return
+        print("[atlas] 100% — Indexação concluída", file=sys.stderr, flush=True)
+
 
 def get_git_head_sha(workspace_path: Path) -> Optional[str]:
     """Obtém o hash SHA do commit HEAD atual do Git de forma segura."""
@@ -184,6 +236,7 @@ def index_workspace(
     index_path: Path,
     paths: Optional[List[str]] = None,
     full: bool = False,
+    report_progress: bool = True,
 ) -> IndexStats:
     """
     Núcleo reutilizável de indexação (DECISAO-005): varre o workspace (ou as
@@ -200,6 +253,7 @@ def index_workspace(
     se algum `path` resolvido estiver fora do workspace (anti-traversal).
     """
     start_time = time.time()
+    progress = IndexProgressReporter(enabled=report_progress)
 
     workspace_path = Path(workspace_path).resolve()
     index_path = Path(index_path).resolve()
@@ -227,9 +281,12 @@ def index_workspace(
             existing_manifest = None
 
     # Varre as subárvores selecionadas
+    progress.tick("scan", 0, 1)
     eligible_files, files_ignored_size, _files_ignored_unsupported = _scan_workspace(
         workspace_path, scan_roots, atlas_spec
     )
+    progress.tick("scan", 1, 1)
+    progress.phase_done("scan")
     if files_ignored_size:
         print(f"Arquivos ignorados (> 2MB): {files_ignored_size}", file=sys.stderr)
 
@@ -263,18 +320,26 @@ def index_workspace(
     files_skipped_unchanged = 0
     new_hashes: dict[str, str] = {}
 
-    for rel_posix, file_path in current_files.items():
+    hash_total = len(current_files)
+    if hash_total == 0:
+        progress.tick("hash", 1, 1)
+    for hash_index, (rel_posix, file_path) in enumerate(current_files.items(), start=1):
         file_hash = _hash_file_content(file_path)
         if file_hash is None:
+            progress.tick("hash", hash_index, hash_total)
             continue
 
         new_hashes[rel_posix] = file_hash
 
         if not full and files_in_scope_from_manifest.get(rel_posix) == file_hash:
             files_skipped_unchanged += 1
+            progress.tick("hash", hash_index, hash_total)
             continue
 
         files_to_process[rel_posix] = file_path
+        progress.tick("hash", hash_index, hash_total)
+
+    progress.phase_done("hash")
 
     # Arquivos que estavam no escopo do manifest mas não existem mais (deletados)
     deleted_files = set(files_in_scope_from_manifest.keys()) - set(current_files.keys())
@@ -290,7 +355,10 @@ def index_workspace(
     all_new_chunks = []
     files_processed = 0
 
-    for rel_posix, file_path in files_to_process.items():
+    chunk_total = len(files_to_process)
+    if chunk_total == 0:
+        progress.tick("chunk", 1, 1)
+    for chunk_index, (rel_posix, file_path) in enumerate(files_to_process.items(), start=1):
         try:
             file_chunks = chunker.chunk_file(file_path, repo_name)
             for chunk in file_chunks:
@@ -300,14 +368,27 @@ def index_workspace(
             files_processed += 1
         except Exception as e:
             print(f"Erro ao processar arquivo {file_path}: {e}", file=sys.stderr)
+        progress.tick("chunk", chunk_index, chunk_total)
+
+    progress.phase_done("chunk")
 
     # Gera embeddings em lote apenas para os chunks novos/alterados [GA-06]
     if all_new_chunks:
         chunk_texts = [chunk.content for chunk in all_new_chunks]
         embedding_engine = EmbeddingEngine()
-        vectors = embedding_engine.encode(chunk_texts, batch_size=32)
+
+        def _embed_progress(done: int, total: int) -> None:
+            progress.tick("embed", done, total)
+
+        vectors = embedding_engine.encode(
+            chunk_texts, batch_size=32, on_progress=_embed_progress
+        )
         for chunk, vector in zip(all_new_chunks, vectors):
             chunk.vector = vector
+    else:
+        progress.tick("embed", 1, 1)
+
+    progress.phase_done("embed")
 
     git_sha = get_git_head_sha(workspace_path)
 
@@ -316,6 +397,7 @@ def index_workspace(
     #   sobrescreve tudo com os chunks processados nesta execução.
     # - Caso contrário (incremental ou parcial): usa storage para deletar arquivos
     #   alterados/removidos e inserir os novos chunks, preservando o restante.
+    progress.tick("persist", 0, 1)
     if existing_manifest is None or (full and not paths):
         storage.store_chunks(all_new_chunks, git_head_sha=git_sha)
         chunks_persisted = len(all_new_chunks)
@@ -342,6 +424,10 @@ def index_workspace(
         chunks_persisted = storage.update_manifest_after_incremental(
             files=updated_files, git_head_sha=git_sha
         )
+
+    progress.tick("persist", 1, 1)
+    progress.phase_done("persist")
+    progress.finish()
 
     duration_s = time.time() - start_time
 
@@ -378,7 +464,14 @@ def index_workspace(
     help="Subpasta(s) relativa(s) ao workspace a indexar (pode ser usado múltiplas vezes)."
     " Quando omitido, indexa o workspace inteiro.",
 )
-def cli(workspace: str, index_dir: str, full: bool, paths: tuple):
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    default=False,
+    help="Suprime o progresso detalhado por fase durante a indexação.",
+)
+def cli(workspace: str, index_dir: str, full: bool, paths: tuple, quiet: bool):
     """
     CLI fino que delega para `index_workspace()`: varredura recursiva de arquivos,
     parsing AST, geração de embeddings locais em lote (incremental por hash) e
@@ -399,10 +492,15 @@ def cli(workspace: str, index_dir: str, full: bool, paths: tuple):
         click.echo(f"Pastas selecionadas: {', '.join(paths_list)}")
     if full:
         click.echo("Modo: reindexação completa (--full)")
-    click.echo("Gerando embeddings locais utilizando o modelo all-MiniLM-L6-v2 (fastembed)...")
 
     try:
-        stats = index_workspace(workspace_path, index_path, paths=paths_list, full=full)
+        stats = index_workspace(
+            workspace_path,
+            index_path,
+            paths=paths_list,
+            full=full,
+            report_progress=not quiet,
+        )
     except ValueError as e:
         click.echo(f"Erro: {e}", err=True)
         sys.exit(1)

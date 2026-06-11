@@ -1,4 +1,4 @@
-from typing import List
+from typing import Callable, List, Optional
 
 # Nome do modelo no formato esperado pelo fastembed (ONNX) - DECISAO-001
 # Mesmo modelo (all-MiniLM-L6-v2, 384 dims) usado anteriormente via sentence-transformers
@@ -32,7 +32,12 @@ class EmbeddingEngine:
             # O fastembed carrega do cache local (~/.cache/fastembed) se já estiver baixado
             self._model = TextEmbedding(model_name=FASTEMBED_MODEL_NAME)
 
-    def encode(self, texts: List[str], batch_size: int = 32) -> List[List[float]]:
+    def encode(
+        self,
+        texts: List[str],
+        batch_size: int = 32,
+        on_progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[List[float]]:
         """
         Gera embeddings vetoriais para uma lista de textos em lote (batch).
         Ideal para uso durante a indexação inicial.
@@ -43,8 +48,13 @@ class EmbeddingEngine:
         self._load_model()
 
         # fastembed.embed retorna um generator de numpy.ndarray (float32)
-        embeddings = self._model.embed(texts, batch_size=batch_size)
-        return [vector.tolist() for vector in embeddings]
+        total = len(texts)
+        results: List[List[float]] = []
+        for index, vector in enumerate(self._model.embed(texts, batch_size=batch_size), start=1):
+            results.append(vector.tolist())
+            if on_progress is not None and (index % batch_size == 0 or index == total):
+                on_progress(index, total)
+        return results
 
     def encode_single(self, text: str) -> List[float]:
         """
