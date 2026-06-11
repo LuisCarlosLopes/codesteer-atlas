@@ -1,7 +1,9 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-from codesteer_atlas.models import IndexManifest, IndexStats, SearchResult
+from unittest.mock import patch
+from codesteer_atlas.models import IndexManifest, SearchResult
 from codesteer_atlas.server import (
     atlas_status,
     atlas_search,
@@ -9,7 +11,7 @@ from codesteer_atlas.server import (
     atlas_index,
     main,
     resolve_index_dir,
-    _background_reindex,
+    _spawn_background_reindex,
 )
 
 # Mock do manifesto de índice de teste
@@ -323,57 +325,53 @@ def test_atlas_index_docstring_instructs_asking_user():
 
 
 def test_background_reindex_skips_when_no_index(tmp_path, capsys):
-    """Sem índice existente, `_background_reindex` não chama `index_workspace` e loga 'pulando'."""
+    """Sem índice existente, `_spawn_background_reindex` não inicia subprocesso e loga 'pulando'."""
     with (
         patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
         patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
-        patch("codesteer_atlas.server.index_workspace") as mock_index_workspace,
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
     ):
-        _background_reindex()
+        _spawn_background_reindex()
 
-    mock_index_workspace.assert_not_called()
+    mock_popen.assert_not_called()
     err = capsys.readouterr().err
     assert "[atlas]" in err
     assert "pulando reindex automático" in err
 
 
 def test_background_reindex_runs_incremental_when_index_exists(tmp_path, capsys):
-    """Com índice existente e workspace válido, roda `index_workspace` incremental e loga conclusão."""
+    """Com índice existente e workspace válido, inicia subprocesso de reindex incremental."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     index_dir = workspace / ".code-index"
     index_dir.mkdir()
 
-    mock_stats = IndexStats(
-        files_processed=2,
-        files_skipped_unchanged=8,
-        files_removed=0,
-        chunks_persisted=15,
-        duration_s=0.42,
-    )
-
     with (
         patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
         patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
         patch("codesteer_atlas.server._index_workspace_root", return_value=workspace),
-        patch("codesteer_atlas.server.index_workspace", return_value=mock_stats) as mock_iw,
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
     ):
-        _background_reindex()
+        _spawn_background_reindex()
 
-    # Garante chamada incremental (full=False, default) com workspace e índice corretos
-    mock_iw.assert_called_once_with(workspace, index_dir)
+    # Garante que o subprocesso de reindex foi iniciado com workspace e índice corretos,
+    # sem stdin (não bloqueia esperando input) e sem o flag --full
+    mock_popen.assert_called_once()
+    args, kwargs = mock_popen.call_args
+    cmd = args[0]
+    assert cmd[:3] == [sys.executable, "-m", "codesteer_atlas.indexer"]
+    assert "--workspace" in cmd and str(workspace) in cmd
+    assert "--index-dir" in cmd and str(index_dir) in cmd
+    assert "--full" not in cmd
+    assert kwargs["stdin"] == subprocess.DEVNULL
 
     err = capsys.readouterr().err
     assert "[atlas]" in err
-    assert "concluído" in err
-    assert "processed=2" in err
-    assert "skipped=8" in err
-    assert "removed=0" in err
-    assert "chunks=15" in err
+    assert "processo separado" in err
 
 
 def test_background_reindex_captures_exception_and_logs(tmp_path, capsys):
-    """Exceção em `index_workspace` é capturada, logada com prefixo `[atlas]` e não propaga."""
+    """Exceção ao iniciar o subprocesso é capturada, logada com prefixo `[atlas]` e não propaga."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     index_dir = workspace / ".code-index"
@@ -383,36 +381,25 @@ def test_background_reindex_captures_exception_and_logs(tmp_path, capsys):
         patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
         patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
         patch("codesteer_atlas.server._index_workspace_root", return_value=workspace),
-        patch("codesteer_atlas.server.index_workspace", side_effect=Exception("boom")),
+        patch("codesteer_atlas.server.subprocess.Popen", side_effect=Exception("boom")),
     ):
         # Não deve propagar
-        _background_reindex()
+        _spawn_background_reindex()
 
     err = capsys.readouterr().err
-    assert "[atlas] Erro no reindex automático em background: boom" in err
+    assert "[atlas] Erro ao iniciar reindex automático em background: boom" in err
 
 
-def test_main_starts_background_thread_without_blocking(monkeypatch, tmp_path):
-    """`main()` inicia a thread de reindex em background (daemon, sem join) e chama `app.run()`."""
+def test_main_spawns_background_reindex_without_blocking(monkeypatch, tmp_path):
+    """`main()` dispara o reindex em background (subprocesso, sem aguardar) e chama `app.run()`."""
     monkeypatch.setattr("sys.argv", ["atlas-serve"])
 
-    mock_thread_instance = MagicMock()
-
     with (
-        patch("codesteer_atlas.server.threading.Thread", return_value=mock_thread_instance) as mock_thread_cls,
+        patch("codesteer_atlas.server._spawn_background_reindex") as mock_spawn,
         patch("codesteer_atlas.server.app.run") as mock_app_run,
         patch("codesteer_atlas.server.resolve_index_dir", return_value=tmp_path / ".code-index"),
     ):
         main()
 
-    # Thread construída com o target correto e como daemon
-    _, kwargs = mock_thread_cls.call_args
-    assert kwargs["target"] is _background_reindex
-    assert kwargs["daemon"] is True
-
-    # .start() chamado (sem .join())
-    mock_thread_instance.start.assert_called_once()
-    mock_thread_instance.join.assert_not_called()
-
-    # app.run() chamado de forma síncrona, não bloqueado por join
-    mock_app_run.assert_called_once()
+    mock_spawn.assert_called_once_with()
+    mock_app_run.assert_called_once_with()

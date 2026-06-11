@@ -2,7 +2,7 @@ import sys
 import os
 import argparse
 import json
-import threading
+import subprocess
 import time
 from pathlib import Path, PurePath
 from typing import Optional
@@ -529,10 +529,18 @@ def get_status_resource() -> str:
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
-def _background_reindex() -> None:
+def _spawn_background_reindex() -> None:
     """
-    Roda uma reindexação incremental (full=False) em background no startup do MCP,
-    para manter o índice atualizado sem bloquear `app.run()`. Nunca propaga exceções [5].
+    Dispara uma reindexação incremental (full=False) em um processo separado no
+    startup do MCP, para manter o índice atualizado sem bloquear `app.run()`.
+
+    Roda como subprocesso (em vez de thread) porque, em workspaces grandes,
+    operações nativas do reindex (LanceDB/tantivy `create_fts_index`,
+    fastembed/onnxruntime) podem reter o GIL por longos períodos. Se isso
+    acontecesse em uma thread do mesmo processo, o event loop asyncio do
+    FastMCP ficaria sem CPU e o servidor MCP pararia de responder a qualquer
+    chamada até o reindex terminar. Em processo separado, o reindex não
+    compete pelo GIL com o servidor. Nunca propaga exceções [5].
     """
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
 
@@ -553,24 +561,36 @@ def _background_reindex() -> None:
         )
         return
 
+    log_path = INDEX_DIR_PATH / "background_reindex.log"
     print(
-        f"[atlas] Reindex automático em background iniciado (workspace={workspace_path})...",
+        f"[atlas] Reindex automático em background iniciado em processo separado "
+        f"(workspace={workspace_path}, log={log_path})...",
         file=sys.stderr,
     )
+
+    # No Windows, evita que o subprocesso abra/pisque uma janela de console
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
     try:
-        stats = index_workspace(workspace_path, INDEX_DIR_PATH)
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "codesteer_atlas.indexer",
+                    "--workspace",
+                    str(workspace_path),
+                    "--index-dir",
+                    str(INDEX_DIR_PATH),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                cwd=str(workspace_path),
+                creationflags=creationflags,
+            )
     except Exception as e:
-        print(f"[atlas] Erro no reindex automático em background: {e}", file=sys.stderr)
-        return
-
-    print(
-        "[atlas] Reindex automático em background concluído: "
-        f"processed={stats.files_processed} skipped={stats.files_skipped_unchanged} "
-        f"removed={stats.files_removed} chunks={stats.chunks_persisted} "
-        f"duration={stats.duration_s}s",
-        file=sys.stderr,
-    )
+        print(f"[atlas] Erro ao iniciar reindex automático em background: {e}", file=sys.stderr)
 
 
 def main():
@@ -593,10 +613,9 @@ def main():
     # O FastMCP capturará a stream stdout limpa para estabelecer o protocolo stdio JSON-RPC
     sys.stdout = original_stdout
 
-    # Dispara reindex incremental em background, sem bloquear o startup do MCP [GA-XX]
-    threading.Thread(
-        target=_background_reindex, daemon=True, name="atlas-startup-reindex"
-    ).start()
+    # Dispara reindex incremental em background (processo separado), sem bloquear
+    # o startup do MCP nem competir pelo GIL com o event loop [GA-XX]
+    _spawn_background_reindex()
 
     # Roda o servidor MCP stdio de forma síncrona
     app.run()
