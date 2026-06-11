@@ -189,6 +189,31 @@ src/auth/service.py
 
 Cada chunk vira um registro pesquisável por similaridade vetorial (cosseno) e BM25, fundidos via RRF na busca (`atlas_search`).
 
+### Excluindo arquivos com `.atlasignore`
+
+Para excluir arquivos/pastas adicionais da indexação sem editar o código do Atlas, crie um arquivo `.atlasignore` na raiz do workspace. A sintaxe é idêntica à do `.gitignore` (glob, `**`, ancoragem com `/`, negação com `!`, comentários `#`):
+
+```gitignore
+# Ignora todos os arquivos .log
+*.log
+
+# Ignora a pasta inteira (incl. arquivos dentro)
+fixtures/
+
+# Ignora apenas na raiz do workspace, não em subpastas
+/dist
+
+# Ignora em qualquer profundidade
+**/*.generated.py
+
+# Negação: reinclui um arquivo previamente ignorado
+!important.log
+```
+
+- O arquivo é opcional: workspaces sem `.atlasignore` continuam indexando exatamente como antes.
+- `.atlasignore` é um filtro **adicional** — pastas como `.git`, `node_modules`, `.venv`, `__pycache__` e `.code-index` continuam sempre ignoradas e não podem ser "reincluídas" via `!`.
+- O filtro é aplicado tanto na indexação real (`atlas-index` / `atlas_index`) quanto no preview (`atlas_index` com `dry_run=true`).
+
 ## Configuração manual em outros clientes
 
 O `deploy_mcp.py` automatiza Cursor, Claude Desktop, Cline e Claude Code CLI, em dois modos:

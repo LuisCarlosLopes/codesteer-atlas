@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch
 from click.testing import CliRunner
-from codesteer_atlas.indexer import cli, index_workspace, should_ignore
+from codesteer_atlas.indexer import cli, index_workspace, load_atlasignore_spec, should_ignore
 from codesteer_atlas.storage import StorageBackend
 
 
@@ -148,6 +148,128 @@ def test_index_workspace_deleted_file_removed_from_index(tmp_path):
 
         assert "b.py" not in manifest["files"]
         assert "a.py" in manifest["files"]
+
+
+def test_load_atlasignore_spec_returns_none_when_file_absent(tmp_path):
+    """Sem `.atlasignore` na raiz, retorna None (comportamento atual preservado)."""
+    assert load_atlasignore_spec(tmp_path) is None
+
+
+def test_load_atlasignore_spec_returns_pathspec_when_file_present(tmp_path):
+    """Com `.atlasignore` presente, retorna um PathSpec ignorando comentários/linhas em branco."""
+    (tmp_path / ".atlasignore").write_text(
+        "# comentário\n\n*.log\n\nbuild/\n", encoding="utf-8"
+    )
+
+    spec = load_atlasignore_spec(tmp_path)
+
+    assert spec is not None
+    assert spec.match_file("debug.log") is True
+    assert spec.match_file("src/main.py") is False
+
+
+def test_load_atlasignore_spec_returns_none_when_unreadable(tmp_path):
+    """`.atlasignore` ilegível (ex.: é um diretório) é tratado como ausente."""
+    (tmp_path / ".atlasignore").mkdir()
+
+    assert load_atlasignore_spec(tmp_path) is None
+
+
+def test_should_ignore_atlas_spec_simple_glob(tmp_path):
+    """Padrão glob simples (`*.log`) ignora arquivos correspondentes em qualquer pasta."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "*.log\n")
+
+    assert should_ignore(tmp_path / "debug.log", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "src" / "debug.log", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "main.py", tmp_path, spec) is False
+
+
+def test_should_ignore_atlas_spec_directory_pattern(tmp_path):
+    """Padrão de diretório (`pasta/`) ignora a árvore inteira, incl. arquivos dentro."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "fixtures/\n")
+
+    (tmp_path / "fixtures").mkdir()
+    (tmp_path / "src" / "fixtures").mkdir(parents=True)
+
+    assert should_ignore(tmp_path / "fixtures", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "fixtures" / "data.json", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "src" / "fixtures", tmp_path, spec) is True
+
+
+def test_should_ignore_atlas_spec_anchored_pattern(tmp_path):
+    """Padrão ancorado (`/output`) só casa na raiz do workspace, não em subpastas."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "/output\n")
+
+    (tmp_path / "output").mkdir()
+    (tmp_path / "src" / "output").mkdir(parents=True)
+
+    assert should_ignore(tmp_path / "output", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "src" / "output", tmp_path, spec) is False
+
+
+def test_should_ignore_atlas_spec_double_star(tmp_path):
+    """Padrão com `**` (`**/*.generated.py`) funciona em qualquer profundidade."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "**/*.generated.py\n")
+
+    assert should_ignore(tmp_path / "models.generated.py", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "a" / "b" / "c.generated.py", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "models.py", tmp_path, spec) is False
+
+
+def test_should_ignore_atlas_spec_negation(tmp_path):
+    """Negação (`!manter.log` após `*.log`) reinclui o arquivo previamente ignorado."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "*.log\n!manter.log\n")
+
+    assert should_ignore(tmp_path / "debug.log", tmp_path, spec) is True
+    assert should_ignore(tmp_path / "manter.log", tmp_path, spec) is False
+
+
+def test_should_ignore_atlas_spec_cannot_unignore_ignore_dirs(tmp_path):
+    """`IGNORE_DIRS` (.git) continua ignorado mesmo se `.atlasignore` tentar negar."""
+    spec = load_atlasignore_spec_from_text(tmp_path, "!.git\n!.git/**\n")
+
+    assert should_ignore(tmp_path / ".git", tmp_path, spec) is True
+    assert should_ignore(tmp_path / ".git" / "config", tmp_path, spec) is True
+
+
+def test_should_ignore_without_atlas_spec_is_unchanged(tmp_path):
+    """Sem `atlas_spec` (None), `should_ignore` mantém o comportamento de regressão."""
+    assert should_ignore(tmp_path / ".git", tmp_path) is True
+    assert should_ignore(tmp_path / "src" / "main.py", tmp_path) is False
+
+
+def load_atlasignore_spec_from_text(tmp_path, content: str):
+    """Helper: cria `.atlasignore` com `content` e retorna o PathSpec carregado."""
+    (tmp_path / ".atlasignore").write_text(content, encoding="utf-8")
+    return load_atlasignore_spec(tmp_path)
+
+
+def test_index_workspace_respects_atlasignore(tmp_path):
+    """Arquivos casados por `.atlasignore` não entram no manifest nem geram chunks."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    (workspace_dir / "ignored.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    (workspace_dir / ".atlasignore").write_text("ignored.py\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    assert stats.files_processed == 1
+
+    with open(index_dir / "manifest.json", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    assert "app.py" in manifest["files"]
+    assert "ignored.py" not in manifest["files"]
 
 
 def test_index_workspace_full_flag_rebuilds_everything(tmp_path):

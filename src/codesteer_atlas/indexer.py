@@ -5,7 +5,9 @@ import time
 from pathlib import Path, PurePath
 from typing import List, Optional
 import click
+import pathspec
 from codesteer_atlas.config import (
+    ATLASIGNORE_FILENAME,
     DEFAULT_INDEX_DIR,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
@@ -37,7 +39,25 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
         return None
 
 
-def should_ignore(path: Path, workspace_path: Path) -> bool:
+def load_atlasignore_spec(workspace_path: Path) -> Optional[pathspec.PathSpec]:
+    """
+    Carrega o `.atlasignore` da raiz do workspace (sintaxe gitignore).
+    Retorna None se o arquivo não existir ou não puder ser lido (fallback
+    silencioso, equivalente a "sem .atlasignore").
+    """
+    atlasignore_path = workspace_path / ATLASIGNORE_FILENAME
+    try:
+        with open(atlasignore_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    return pathspec.PathSpec.from_lines("gitignore", lines)
+
+
+def should_ignore(
+    path: Path, workspace_path: Path, atlas_spec: Optional[pathspec.PathSpec] = None
+) -> bool:
     """Verifica se o arquivo ou diretório deve ser ignorado na indexação."""
     # Ignora arquivos/pastas ocultos
     if path.name.startswith("."):
@@ -56,6 +76,17 @@ def should_ignore(path: Path, workspace_path: Path) -> bool:
     except ValueError:
         pass
 
+    # Filtro adicional opcional via .atlasignore (sintaxe .gitignore)
+    if atlas_spec is not None:
+        try:
+            rel = PurePath(path.relative_to(workspace_path)).as_posix()
+            # Diretórios precisam de "/" final para casar padrões como "build/"
+            check = rel + "/" if path.is_dir() else rel
+            if atlas_spec.match_file(check):
+                return True
+        except ValueError:
+            pass
+
     return False
 
 
@@ -72,7 +103,9 @@ def _hash_file_content(file_path: Path) -> Optional[str]:
 
 
 def _scan_workspace(
-    workspace_path: Path, scan_roots: List[Path]
+    workspace_path: Path,
+    scan_roots: List[Path],
+    atlas_spec: Optional[pathspec.PathSpec] = None,
 ) -> tuple[list[Path], int, int]:
     """
     Varre recursivamente as raízes informadas (subárvores do workspace) coletando
@@ -89,11 +122,13 @@ def _scan_workspace(
 
         for root, dirs, files in os.walk(scan_root):
             # Filtra os diretórios in-place para o os.walk não percorrê-los
-            dirs[:] = [d for d in dirs if not should_ignore(Path(root) / d, workspace_path)]
+            dirs[:] = [
+                d for d in dirs if not should_ignore(Path(root) / d, workspace_path, atlas_spec)
+            ]
 
             for file in files:
                 file_path = Path(root) / file
-                if should_ignore(file_path, workspace_path):
+                if should_ignore(file_path, workspace_path, atlas_spec):
                     continue
 
                 if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -173,6 +208,7 @@ def index_workspace(
         raise ValueError(f"O diretório do workspace '{workspace_path}' não existe.")
 
     scan_roots = _resolve_scan_roots(workspace_path, paths)
+    atlas_spec = load_atlasignore_spec(workspace_path)
 
     repo_name = workspace_path.name
     chunker = ASTChunker()
@@ -192,7 +228,7 @@ def index_workspace(
 
     # Varre as subárvores selecionadas
     eligible_files, files_ignored_size, _files_ignored_unsupported = _scan_workspace(
-        workspace_path, scan_roots
+        workspace_path, scan_roots, atlas_spec
     )
     if files_ignored_size:
         print(f"Arquivos ignorados (> 2MB): {files_ignored_size}", file=sys.stderr)

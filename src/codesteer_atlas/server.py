@@ -21,6 +21,7 @@ from codesteer_atlas.storage import StorageBackend  # noqa: E402
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
     index_workspace,
+    load_atlasignore_spec,
     should_ignore,
 )
 
@@ -409,6 +410,7 @@ def atlas_index(
     if dry_run:
         candidates = []
         total_eligible = 0
+        atlas_spec = load_atlasignore_spec(workspace_path)
 
         try:
             top_level_entries = sorted(workspace_path.iterdir())
@@ -416,17 +418,21 @@ def atlas_index(
             raise ValueError(f"Não foi possível listar o workspace '{workspace_path}': {e}")
 
         for entry in top_level_entries:
-            if should_ignore(entry, workspace_path):
+            if should_ignore(entry, workspace_path, atlas_spec):
                 continue
 
             if entry.is_dir():
                 eligible_count = 0
                 for root, dirs, files in os.walk(entry):
                     root_path = Path(root)
-                    dirs[:] = [d for d in dirs if not should_ignore(root_path / d, workspace_path)]
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not should_ignore(root_path / d, workspace_path, atlas_spec)
+                    ]
                     for f in files:
                         f_path = root_path / f
-                        if should_ignore(f_path, workspace_path):
+                        if should_ignore(f_path, workspace_path, atlas_spec):
                             continue
                         if f_path.suffix.lower() in SUPPORTED_EXTENSIONS:
                             eligible_count += 1

@@ -280,6 +280,26 @@ def test_atlas_index_dry_run_does_not_create_index(tmp_path):
     assert result["total_eligible_files"] == 3
 
 
+def test_atlas_index_dry_run_respects_atlasignore(tmp_path):
+    """`dry_run=true` exclui de candidates/total_eligible arquivos casados por `.atlasignore`."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "main.py").write_text("def main(): pass\n")
+    (workspace / "src" / "helper.py").write_text("def helper(): pass\n")
+    (workspace / "README.md").write_text("# Project\n")
+    (workspace / ".atlasignore").write_text("README.md\nsrc/helper.py\n", encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"):
+        result_json = atlas_index(workspace=str(workspace), dry_run=True)
+
+    result = json.loads(result_json)
+
+    paths = {c["path"]: c["eligible_files"] for c in result["candidates"]}
+    assert paths.get("src") == 1
+    assert "README.md" not in paths
+    assert result["total_eligible_files"] == 1
+
+
 def test_atlas_index_paths_outside_workspace_raises_value_error(tmp_path):
     """`paths` com traversal (ex: '../x') ou absoluto fora do workspace -> ValueError."""
     workspace = tmp_path / "workspace"

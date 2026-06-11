@@ -23,6 +23,9 @@ CANDIDATES_LIMIT = 50
 # de embeddings incompatível (sentence-transformers/torch) e exigem reindexação
 MIN_INDEX_VERSION = "2.0.0"
 
+# Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
+ATLASIGNORE_FILENAME = ".atlasignore"
+
 # Padrões de arquivos e pastas que devem ser ignorados durante a varredura
 IGNORE_DIRS = {
     ".git",
