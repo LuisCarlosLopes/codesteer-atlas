@@ -16,106 +16,11 @@ Tudo roda 100% local e offline — o código-fonte nunca é enviado para serviç
 ## Pré-requisitos
 
 - Python 3.11 a 3.13
-- [uv](https://github.com/astral-sh/uv) (gerenciador de pacotes/ambientes)
+- [uv](https://github.com/astral-sh/uv) (gerenciador de pacotes/ambientes) — fornece o `uvx`, usado para rodar o Atlas sem clonar o repositório.
 
 ## Instalação
 
-Se você for **desenvolver o Atlas** ou usar o servidor em **modo local** (a partir deste repositório clonado), instale as dependências aqui:
-
-```bash
-# macOS / Linux
-./setup.sh
-
-# Windows (PowerShell)
-.\setup.ps1
-```
-
-O script verifica o `uv`, sincroniza as dependências (`uv sync --group dev`) e valida os imports críticos via `deploy_mcp.py --check`.
-
-> Para **apenas indexar o seu projeto** e usar o Atlas via `uvx` (Cursor, Claude Code, etc.), você **não precisa** clonar nem rodar `setup.sh` neste repositório — veja [Início rápido](#início-rápido-primeira-vez) abaixo.
-
-## Início rápido (primeira vez)
-
-O Atlas indexa **o repositório do seu projeto** — o código que você quer pesquisar — e grava o índice em `.code-index/` na **raiz desse projeto**. Você não indexa o repositório `codesteer-atlas` a menos que esse seja o projeto em que você está trabalhando.
-
-### 1. Entre na raiz do seu projeto
-
-```bash
-cd /caminho/para/seu-projeto
-```
-
-### 2. Rode a indexação inicial
-
-Na primeira execução, todos os arquivos elegíveis são processados e o índice é criado do zero.
-
-**Opção recomendada** — sem clonar o Atlas (só precisa do `uv`/`uvx`):
-
-```bash
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
-```
-
-**Opção local** — se você clonou este repositório e rodou `setup.sh`:
-
-```bash
-uv --directory /caminho/para/codesteer-atlas run atlas-index --workspace .
-# ou, estando dentro do clone do Atlas com o projeto como alvo:
-uv run atlas-index --workspace /caminho/para/seu-projeto
-```
-
-Ao terminar, você deve ver `Indexação Concluída com Sucesso!` e a pasta `.code-index/` na raiz do **seu projeto**, contendo `manifest.json` e `lancedb/`.
-
-> **Git:** adicione `.code-index/` ao `.gitignore` do seu projeto se ainda não estiver lá — o índice é artefato local, não deve ir para o repositório.
-
-### 3. Conecte um cliente MCP
-
-Com o índice criado, configure o cliente (Cursor, Claude Code, Cline, etc.) para usar o servidor `codesteer-atlas`. A maioria dos exemplos deste README usa modo remoto (`uvx`) e **descobre automaticamente** a pasta `.code-index` na raiz do projeto aberto — não é necessário passar `--index-dir` manualmente.
-
-```bash
-# Instalador interativo (a partir do clone do Atlas)
-uv run python deploy_mcp.py
-```
-
-Ou copie um dos manifests prontos (ex.: [`.cursor/mcp.json`](.cursor/mcp.json)) para a raiz do **seu projeto** e reinicie o editor.
-
-### 4. Reindexar depois
-
-Nas execuções seguintes, rode o **mesmo comando** do passo 2. A indexação é **incremental**: só arquivos novos ou alterados são reprocessados.
-
-```bash
-# Reindexação incremental (padrão)
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
-
-# Forçar reconstrução completa do índice
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --full
-
-# Indexar apenas partes do projeto
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --paths src --paths docs
-```
-
-Também é possível reindexar pelo cliente MCP com a tool `atlas_index` (útil após mudanças grandes no código).
-
-## Uso
-
-Os comandos de indexação (primeira vez e reindexação) estão em [Início rápido](#início-rápido-primeira-vez). A seção abaixo cobre o servidor MCP e a integração com clientes.
-
-### Iniciar o servidor MCP
-
-```bash
-uv run atlas-serve
-
-# Apontando para um diretório de índice específico
-uv run atlas-serve --index-dir /caminho/para/.code-index
-```
-
-O servidor se comunica via stdio (JSON-RPC), pronto para ser usado por clientes MCP (Claude Code, Claude Desktop, Cursor, Cline, etc.).
-
-### Conectar a um cliente MCP
-
-```bash
-uv run python deploy_mcp.py
-```
-
-Instalador interativo que detecta clientes MCP disponíveis (Cursor, Claude Desktop, Cline, Claude Code CLI) e registra o servidor neles, em modo local (este repositório) ou remoto (via `uvx` direto do GitHub).
+Para usar o Atlas em um projeto você **não precisa clonar este repositório**: tudo roda via `uvx`, direto do GitHub. A instalação tem dois passos — registrar o servidor MCP no seu cliente (abaixo) e indexar o seu projeto (veja [Início rápido](#início-rápido-primeira-vez)).
 
 ### Plugin do Claude Code
 
@@ -138,6 +43,113 @@ O plugin registra o `codesteer-atlas` em modo remoto (`uvx`), sem caminhos absol
 uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
 ```
 
+### Outros clientes (Cursor, Claude Desktop, Cline, Copilot, Kiro, OpenCode...)
+
+- **Manifests prontos**: copie o arquivo de configuração do cliente (ex.: [`.cursor/mcp.json`](.cursor/mcp.json), [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json), [`.vscode/mcp.json`](.vscode/mcp.json)) para a raiz do seu projeto — veja [Configuração manual em outros clientes](#configuração-manual-em-outros-clientes).
+- **Instalador interativo** (a partir de um clone deste repositório):
+
+  ```bash
+  uv run python deploy_mcp.py
+  ```
+
+  Detecta clientes MCP disponíveis (Cursor, Claude Desktop, Cline, Claude Code CLI) e registra o servidor neles, em modo local (este repositório) ou remoto (via `uvx` direto do GitHub).
+- **Configuração manual**: veja os blocos JSON em [Configuração manual em outros clientes](#configuração-manual-em-outros-clientes).
+
+> **Vai contribuir com o desenvolvimento do Atlas?** Aí sim você precisa clonar o repositório e instalar as dependências de desenvolvimento — veja [Desenvolvimento](#desenvolvimento).
+
+## Início rápido (primeira vez)
+
+O Atlas indexa **o repositório do seu projeto** — o código que você quer pesquisar — e grava o índice em `.code-index/` na **raiz desse projeto**. Você não indexa o repositório `codesteer-atlas` a menos que esse seja o projeto em que você está trabalhando.
+
+### 1. Entre na raiz do seu projeto
+
+```bash
+cd /caminho/para/seu-projeto
+```
+
+### 2. Rode a indexação inicial
+
+Na primeira execução, todos os arquivos elegíveis são processados e o índice é criado do zero.
+
+**Opção recomendada** — sem clonar o Atlas (só precisa do `uv`/`uvx`):
+
+```bash
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
+```
+
+**Opção instalar via `uv`** — instala `atlas-index` e `atlas-serve` como ferramentas globais (sem clonar e sem baixar o pacote a cada execução):
+
+```bash
+uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git
+
+# uso
+atlas-index --workspace .
+
+# atualizar para a versão mais recente
+uv tool upgrade codesteer-atlas
+```
+
+**Opção local** — clone este repositório e instale as dependências:
+
+```bash
+git clone https://github.com/LuisCarlosLopes/codesteer-atlas.git
+cd codesteer-atlas
+
+# macOS / Linux
+./setup.sh
+
+# Windows (PowerShell)
+.\setup.ps1
+```
+
+Depois, rode a indexação apontando para o seu projeto:
+
+```bash
+uv --directory /caminho/para/codesteer-atlas run atlas-index --workspace /caminho/para/seu-projeto
+# ou, estando dentro do clone do Atlas com o projeto como alvo:
+uv run atlas-index --workspace /caminho/para/seu-projeto
+```
+
+Ao terminar, você deve ver `Indexação Concluída com Sucesso!` e a pasta `.code-index/` na raiz do **seu projeto**, contendo `manifest.json` e `lancedb/`.
+
+> **Git:** adicione `.code-index/` ao `.gitignore` do seu projeto se ainda não estiver lá — o índice é artefato local, não deve ir para o repositório.
+
+### 3. Conecte um cliente MCP
+
+Se ainda não tiver feito isso, configure o cliente (Cursor, Claude Code, Cline, etc.) para usar o servidor `codesteer-atlas` — veja [Instalação](#instalação). A maioria dos exemplos deste README usa modo remoto (`uvx`) e **descobre automaticamente** a pasta `.code-index` na raiz do projeto aberto — não é necessário passar `--index-dir` manualmente.
+
+### 4. Reindexar depois
+
+Nas execuções seguintes, rode o **mesmo comando** do passo 2. A indexação é **incremental**: só arquivos novos ou alterados são reprocessados.
+
+```bash
+# Reindexação incremental (padrão)
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
+
+# Forçar reconstrução completa do índice
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --full
+
+# Indexar apenas partes do projeto
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --paths src --paths docs
+```
+
+Também é possível reindexar pelo cliente MCP com a tool `atlas_index` (útil após mudanças grandes no código).
+
+## Uso
+
+Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto indexado (veja [Início rápido](#início-rápido-primeira-vez)), o Atlas expõe as seguintes tools ao agente:
+
+| Tool | Descrição |
+|---|---|
+| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF) por trechos de código relevantes. Suporta filtros por `repo`, `language` e `path_prefix`. |
+| `atlas_map` | Mapa hierárquico de classes/funções/métodos do workspace indexado. |
+| `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. |
+| `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness etc.). |
+
+Também expõe o recurso somente leitura `atlas://status`.
+
+Para reindexar após mudanças no código, rode novamente o comando de [indexação](#4-reindexar-depois) (incremental por padrão) ou peça ao agente para usar a tool `atlas_index`.
+
 ## Como o código é indexado
 
 O núcleo da indexação é `index_workspace()` (`src/codesteer_atlas/indexer.py`), compartilhado pelo CLI (`atlas-index`) e pela tool MCP `atlas_index`. O pipeline roda 100% local — nenhum código-fonte é enviado para serviços externos.
@@ -153,6 +165,7 @@ Varredura → Filtros → Hash SHA-256 → Chunking (AST) → Embeddings → Lan
 3. **Incremental** — calcula o hash SHA-256 de cada arquivo elegível e compara com o `manifest.json`. Arquivos inalterados são pulados; novos, alterados ou deletados são processados. `--full` ignora os hashes e força reindexação completa.
 4. **Chunking** — o `ASTChunker` divide cada arquivo em `CodeChunk`s:
    - **Código com AST** (Python, JS/TS, Go, Java, C#, etc.): parse via Tree-sitter; extrai classes, funções e métodos com nome hierárquico (ex.: `UserService.authenticate`). Se nenhum símbolo for encontrado, gera um chunk `module` com o arquivo inteiro.
+   - **SQL** (`.sql`): divide por statement (`CREATE TABLE`, `CREATE VIEW`, `SELECT`, etc.) via Tree-sitter; nomeia chunks pela tabela/view/função ou `select_<tabela>`; statements grandes são particionados por linhas (~1000 caracteres).
    - **Markdown** (`.md`): divide por cabeçalhos (`#`, `##`, …); seções grandes são quebradas por parágrafos.
    - **Texto / sem parser** (`.txt`, `.xml`, `.razor`, etc.): agrupa parágrafos em blocos de até ~1000 caracteres.
    - Chunks muito grandes são truncados preservando assinatura/docstring (primeiras linhas) e retorno (últimas linhas).
@@ -217,7 +230,22 @@ Para outros clientes (ou configuração manual), use um dos blocos abaixo, subst
 }
 ```
 
-Os exemplos por cliente abaixo usam o modo local; para usar o modo remoto, basta substituir o bloco `command`/`args` pelo equivalente acima.
+**Modo instalado** (após `uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git`, o comando `atlas-serve` fica disponível direto no PATH):
+
+```json
+{
+  "mcpServers": {
+    "codesteer-atlas": {
+      "command": "atlas-serve",
+      "env": {
+        "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
+      }
+    }
+  }
+}
+```
+
+Os exemplos por cliente abaixo usam o modo local; para usar o modo remoto ou instalado, basta substituir o bloco `command`/`args` pelo equivalente acima.
 
 ### Claude Code (CLI)
 
@@ -327,18 +355,32 @@ O diretório `.code-index` é resolvido nesta ordem:
 3. Busca ascendente a partir do diretório atual por uma pasta `.code-index` (estilo `.git`).
 4. Padrão `.code-index` relativo ao diretório atual.
 
-## Ferramentas MCP disponíveis
-
-| Tool | Descrição |
-|---|---|
-| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF) por trechos de código relevantes. Suporta filtros por `repo`, `language` e `path_prefix`. |
-| `atlas_map` | Mapa hierárquico de classes/funções/métodos do workspace indexado. |
-| `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. |
-| `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness etc.). |
-
-Também expõe o recurso somente leitura `atlas://status`.
-
 ## Desenvolvimento
+
+Para desenvolver o Atlas, clone este repositório e instale as dependências:
+
+```bash
+# macOS / Linux
+./setup.sh
+
+# Windows (PowerShell)
+.\setup.ps1
+```
+
+O script verifica o `uv`, sincroniza as dependências (`uv sync --group dev`) e valida os imports críticos via `deploy_mcp.py --check`.
+
+### Rodar o servidor MCP localmente
+
+```bash
+uv run atlas-serve
+
+# Apontando para um diretório de índice específico
+uv run atlas-serve --index-dir /caminho/para/.code-index
+```
+
+O servidor se comunica via stdio (JSON-RPC), pronto para ser usado por clientes MCP (Claude Code, Claude Desktop, Cursor, Cline, etc.).
+
+### Testes e lint
 
 ```bash
 # Rodar testes

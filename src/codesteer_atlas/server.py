@@ -168,6 +168,7 @@ def atlas_search(
     language: Optional[str] = None,
     path_prefix: Optional[str] = None,
     include_content: bool = True,
+    limit: Optional[int] = None,
 ) -> str:
     """
     Perform a semantic hybrid search on the indexed source code.
@@ -186,8 +187,12 @@ def atlas_search(
         include_content: When false, omits the 'content' field from results to save tokens,
             returning only metadata and location (file_path, lines, symbol, type, language, score).
             Defaults to true.
+        limit: Alias for 'top_k', accepted for compatibility. When provided, overrides 'top_k'.
     """
     start_time = time.time()
+
+    if limit is not None:
+        top_k = limit
 
     # Validação obrigatória da entrada [V01]
     if not query or not query.strip():

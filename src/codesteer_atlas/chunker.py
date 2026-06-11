@@ -7,6 +7,32 @@ from tree_sitter_language_pack import get_parser
 from codesteer_atlas.config import SUPPORTED_EXTENSIONS
 from codesteer_atlas.models import CodeChunk
 
+# Tamanho máximo de conteúdo por chunk (~256 tokens para all-MiniLM-L6-v2)
+_CHUNK_MAX_CHARS = 1000
+
+# Mapeamento de nós Tree-sitter SQL → tipo de escopo semântico
+_SQL_STATEMENT_SCOPE_TYPES = {
+    "create_table": "table",
+    "create_view": "view",
+    "create_function": "function",
+    "create_procedure": "procedure",
+    "create_index": "index",
+    "create_schema": "schema",
+    "create_type": "type",
+    "create_sequence": "sequence",
+    "alter_table": "alter",
+    "drop_table": "drop",
+    "drop_view": "drop",
+    "drop_function": "drop",
+    "drop_index": "drop",
+    "select": "query",
+    "insert": "query",
+    "update": "query",
+    "delete": "query",
+    "merge": "query",
+    "truncate": "query",
+}
+
 
 class ASTChunker:
     """
@@ -38,7 +64,7 @@ class ASTChunker:
         hasher.update(f"{start_line}-{end_line}".encode("utf-8"))
         return hasher.hexdigest()[:16]
 
-    def _truncate_content(self, content: str, max_chars: int = 1000) -> str:
+    def _truncate_content(self, content: str, max_chars: int = _CHUNK_MAX_CHARS) -> str:
         """
         Trunca o código preservando as primeiras e últimas linhas se exceder
         a estimativa de tamanho em caracteres (~4 caracteres por token).
@@ -198,6 +224,8 @@ class ASTChunker:
         # Desvia o fluxo para os métodos de chunking textual e markdown não-AST
         if language == "markdown":
             return self._chunk_markdown(file_path, repo_name)
+        elif language == "sql":
+            return self._chunk_sql(file_path, repo_name)
         elif language in ("text", "xml", "razor", "dart", "pascal", "vb6"):
             return self._chunk_text(file_path, repo_name, language)
 
@@ -276,6 +304,190 @@ class ASTChunker:
                     indexed_at=timestamp,
                 )
             )
+
+        return chunks
+
+    def _decode_node(self, node, source_bytes: bytes) -> str:
+        """Extrai o texto de um nó Tree-sitter a partir dos bytes do source original."""
+        return source_bytes[node.start_byte() : node.end_byte()].decode("utf-8", errors="ignore")
+
+    def _first_sql_statement_child(self, statement_node):
+        """Retorna o primeiro filho semântico de um nó `statement` (ignora ';')."""
+        for i in range(statement_node.child_count()):
+            child = statement_node.child(i)
+            if child.kind() != ";":
+                return child
+        return None
+
+    def _find_sql_identifier(self, node, source_bytes: bytes) -> str | None:
+        """Busca recursivamente o primeiro identifier dentro de object_reference ou relation."""
+        if node.kind() in ("object_reference", "relation"):
+            for i in range(node.child_count()):
+                child = node.child(i)
+                if child.kind() == "identifier":
+                    return source_bytes[child.start_byte() : child.end_byte()].decode(
+                        "utf-8", errors="ignore"
+                    )
+        for i in range(node.child_count()):
+            found = self._find_sql_identifier(node.child(i), source_bytes)
+            if found:
+                return found
+        return None
+
+    def _extract_sql_statement_name(
+        self, statement_node, stmt_kind: str, source_bytes: bytes, index: int
+    ) -> str:
+        """Deriva um nome legível para o statement SQL (tabela, view, query, etc.)."""
+        inner = self._first_sql_statement_child(statement_node)
+        if inner is None:
+            return f"statement_{index}"
+
+        if stmt_kind == "create_index":
+            for i in range(inner.child_count()):
+                child = inner.child(i)
+                if child.kind() == "identifier":
+                    return source_bytes[child.start_byte() : child.end_byte()].decode(
+                        "utf-8", errors="ignore"
+                    )
+
+        named = self._find_sql_identifier(inner, source_bytes)
+        if named:
+            if stmt_kind == "select":
+                return f"select_{named}"
+            return named
+
+        if stmt_kind == "select":
+            for i in range(statement_node.child_count()):
+                child = statement_node.child(i)
+                if child.kind() == "from":
+                    from_name = self._find_sql_identifier(child, source_bytes)
+                    if from_name:
+                        return f"select_{from_name}"
+
+        scope_type = _SQL_STATEMENT_SCOPE_TYPES.get(stmt_kind, "statement")
+        return f"{scope_type}_{index}"
+
+    def _split_oversized_lines(
+        self, content: str, base_start_line: int
+    ) -> List[Tuple[int, int, str]]:
+        """
+        Divide conteúdo SQL grande em blocos de até ~1000 caracteres,
+        preservando limites de linha (não corta linha ao meio).
+        """
+        if len(content) <= _CHUNK_MAX_CHARS:
+            return [(base_start_line, base_start_line + content.count("\n"), content)]
+
+        lines = content.splitlines(keepends=True)
+        if len(lines) == 1 and len(content) > _CHUNK_MAX_CHARS:
+            truncated = self._truncate_content(content)
+            return [
+                (
+                    base_start_line,
+                    base_start_line + truncated.count("\n"),
+                    truncated,
+                )
+            ]
+
+        parts: List[Tuple[int, int, str]] = []
+        current_parts: List[str] = []
+        current_len = 0
+        chunk_start_line = base_start_line
+
+        for line in lines:
+            if current_len + len(line) > _CHUNK_MAX_CHARS and current_parts:
+                chunk_text = "".join(current_parts)
+                stripped = chunk_text.rstrip("\n")
+                chunk_end_line = chunk_start_line + stripped.count("\n")
+                parts.append((chunk_start_line, chunk_end_line, stripped))
+                chunk_start_line = chunk_end_line + 1
+                current_parts = [line]
+                current_len = len(line)
+            else:
+                current_parts.append(line)
+                current_len += len(line)
+
+        if current_parts:
+            chunk_text = "".join(current_parts)
+            stripped = chunk_text.rstrip("\n")
+            chunk_end_line = chunk_start_line + stripped.count("\n")
+            parts.append((chunk_start_line, chunk_end_line, stripped))
+
+        return parts
+
+    def _chunk_sql(self, file_path: Path, repo_name: str) -> List[CodeChunk]:
+        """
+        Divide arquivos `.sql` em chunks por statement (DDL/DML) via Tree-sitter.
+        Statements grandes são particionados por linhas; fallback textual se o parse falhar.
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                source_text = f.read()
+        except Exception:
+            return []
+
+        if not source_text.strip():
+            return []
+
+        relative_path = PurePath(file_path).as_posix()
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        parser = self._get_parser("sql")
+        if not parser:
+            return self._chunk_text_content(source_text, file_path, repo_name, "sql")
+
+        tree = parser.parse(source_text)
+        if not tree:
+            return self._chunk_text_content(source_text, file_path, repo_name, "sql")
+
+        statement_nodes = [
+            tree.root_node().child(i)
+            for i in range(tree.root_node().child_count())
+            if tree.root_node().child(i).kind() == "statement"
+        ]
+
+        if not statement_nodes:
+            return self._chunk_text_content(source_text, file_path, repo_name, "sql")
+
+        source_bytes = source_text.encode("utf-8")
+        chunks: List[CodeChunk] = []
+
+        for index, statement_node in enumerate(statement_nodes, start=1):
+            content = self._decode_node(statement_node, source_bytes).strip()
+            if not content:
+                continue
+
+            inner = self._first_sql_statement_child(statement_node)
+            stmt_kind = inner.kind() if inner is not None else "statement"
+            scope_type = _SQL_STATEMENT_SCOPE_TYPES.get(stmt_kind, "statement")
+            scope_name = self._extract_sql_statement_name(
+                statement_node, stmt_kind, source_bytes, index
+            )
+            base_start_line = statement_node.start_position().row + 1
+
+            parts = self._split_oversized_lines(content, base_start_line)
+            for part_index, (start_line, end_line, part_content) in enumerate(parts, start=1):
+                part_name = (
+                    f"{scope_name} (Parte {part_index})"
+                    if len(parts) > 1
+                    else scope_name
+                )
+                chunk_id = self._generate_chunk_id(
+                    part_content, relative_path, start_line, end_line
+                )
+                chunks.append(
+                    CodeChunk(
+                        id=chunk_id,
+                        file_path=relative_path,
+                        repo=repo_name,
+                        start_line=start_line,
+                        end_line=end_line if end_line >= start_line else start_line,
+                        scope_type=scope_type,
+                        scope_name=part_name,
+                        language="sql",
+                        content=part_content,
+                        indexed_at=timestamp,
+                    )
+                )
 
         return chunks
 

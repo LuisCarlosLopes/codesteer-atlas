@@ -148,6 +148,26 @@ def test_atlas_search_include_content_false_omits_content():
         assert len(result_compact) <= len(result_full) * 0.5
 
 
+def test_atlas_search_limit_alias_overrides_top_k():
+    """`limit` é aceito como alias de `top_k` e sobrescreve seu valor."""
+    mock_results = []
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ) as mock_search,
+    ):
+        atlas_search(query="how to run app", top_k=5, limit=10)
+
+        mock_search.assert_called_once()
+        assert mock_search.call_args.kwargs["top_k"] == 10
+
+
 def test_atlas_map_generation():
     """
     Testa o retorno da ferramenta atlas_map formatando os chunks

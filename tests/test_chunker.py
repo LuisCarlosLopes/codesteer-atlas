@@ -1,4 +1,4 @@
-from codesteer_atlas.chunker import ASTChunker
+from codesteer_atlas.chunker import ASTChunker, _CHUNK_MAX_CHARS
 
 
 def test_chunk_python_file_with_classes_and_functions(tmp_path):
@@ -351,4 +351,68 @@ def test_chunk_xml_file(tmp_path):
     assert any("postgresql" in c.content for c in chunks)
 
 
+def test_chunk_sql_multiple_statements(tmp_path):
+    """Extrai um chunk por statement DDL/DML com nomes semânticos."""
+    sql_content = """
+CREATE TABLE users (
+    id INT PRIMARY KEY,
+    email VARCHAR(255)
+);
+
+CREATE VIEW active_users AS
+SELECT id, email FROM users WHERE active = true;
+
+SELECT id, email FROM users WHERE active = true;
+"""
+    test_file = tmp_path / "schema.sql"
+    test_file.write_text(sql_content, encoding="utf-8")
+
+    chunker = ASTChunker()
+    chunks = chunker.chunk_file(test_file, repo_name="test-repo")
+
+    assert len(chunks) == 3
+    assert all(c.language == "sql" for c in chunks)
+
+    table_chunk = next(c for c in chunks if c.scope_type == "table")
+    assert table_chunk.scope_name == "users"
+    assert "CREATE TABLE users" in table_chunk.content
+
+    view_chunk = next(c for c in chunks if c.scope_type == "view")
+    assert view_chunk.scope_name == "active_users"
+    assert "CREATE VIEW active_users" in view_chunk.content
+
+    query_chunk = next(c for c in chunks if c.scope_type == "query")
+    assert query_chunk.scope_name == "select_users"
+    assert "SELECT id, email" in query_chunk.content
+
+
+def test_chunk_sql_large_statement_splits_by_lines(tmp_path):
+    """Statements SQL grandes são particionados por linhas (~1000 chars)."""
+    body_lines = [f"    col_{i} INT," for i in range(120)]
+    sql_content = "CREATE TABLE wide_table (\n" + "\n".join(body_lines) + "\n    id INT\n);"
+
+    test_file = tmp_path / "wide.sql"
+    test_file.write_text(sql_content, encoding="utf-8")
+
+    chunker = ASTChunker()
+    chunks = chunker.chunk_file(test_file, repo_name="test-repo")
+
+    assert len(chunks) > 1
+    assert all(c.scope_type == "table" for c in chunks)
+    assert all(c.scope_name.startswith("wide_table") for c in chunks)
+    assert all(len(c.content) <= _CHUNK_MAX_CHARS + 100 for c in chunks)
+
+
+def test_chunk_sql_fallback_to_text_when_unparseable(tmp_path):
+    """Conteúdo sem statements reconhecíveis cai no chunking textual."""
+    sql_content = "this is not valid sql at all !!! ###"
+    test_file = tmp_path / "broken.sql"
+    test_file.write_text(sql_content, encoding="utf-8")
+
+    chunker = ASTChunker()
+    chunks = chunker.chunk_file(test_file, repo_name="test-repo")
+
+    assert len(chunks) >= 1
+    assert all(c.language == "sql" for c in chunks)
+    assert all(c.scope_type == "chunk" for c in chunks)
 
