@@ -21,6 +21,13 @@ original_stdout = os.fdopen(_real_stdout_fd, "w", closefd=True)
 # qualquer import de dependência pesada (como lancedb, torch, etc.) polua o stdout
 sys.stdout = sys.stderr
 
+# 3. Suprime logging nativo de bibliotecas Rust (lancedb/tantivy) que pode ser
+# escrito diretamente no fd 1/stdout do processo, contornando o redirecionamento
+# Python acima em alguns ambientes (ex: Windows, onde DLLs com CRT próprio podem
+# obter o handle original de STDOUT via GetStdHandle, ignorando os.dup2).
+os.environ.setdefault("RUST_LOG", "off")
+os.environ.setdefault("LANCE_LOG", "off")
+
 # Agora realizamos os imports de forma segura
 from fastmcp import FastMCP  # noqa: E402
 from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402

@@ -26,7 +26,13 @@ class EmbeddingEngine:
         """Lazy loading: carrega o modelo de embeddings apenas quando necessário."""
         if self._model is None:
             # Importação local tardia para evitar atraso síncrono no startup do servidor
+            import onnxruntime as ort
             from fastembed import TextEmbedding
+
+            # Suprime logs do ONNX Runtime (ex: avisos de provider/threads) que podem
+            # ser escritos diretamente no stdout nativo, corrompendo o protocolo
+            # JSON-RPC do MCP via stdio em alguns ambientes (ex: Windows) [GA-XX]
+            ort.set_default_logger_severity(3)
 
             # Carrega o modelo de embeddings (all-MiniLM-L6-v2) via ONNX Runtime em CPU local
             # O fastembed carrega do cache local (~/.cache/fastembed) se já estiver baixado
