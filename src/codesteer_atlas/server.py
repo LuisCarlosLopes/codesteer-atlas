@@ -7,8 +7,15 @@ import time
 from pathlib import Path, PurePath
 from typing import Optional
 
-# 1. Salva o stdout original para o transporte do MCP stdio
-original_stdout = sys.stdout
+# 1. Duplica o file descriptor real do stdout (fd 1) para uso exclusivo do
+# transporte stdio do MCP, e redireciona fd 1 (em nível de SO) para fd 2 (stderr).
+# Isso é necessário porque bibliotecas nativas usadas durante o embedding/indexação
+# (onnxruntime, lancedb/tantivy, etc.) podem escrever diretamente no fd 1, e essas
+# escritas correm em paralelo (thread de reindex em background) com as respostas
+# JSON-RPC que o FastMCP escreve no mesmo fd, corrompendo o protocolo stdio.
+_real_stdout_fd = os.dup(1)
+os.dup2(2, 1)
+original_stdout = os.fdopen(_real_stdout_fd, "w", closefd=True)
 
 # 2. Redireciona sys.stdout para stderr imediatamente para evitar que
 # qualquer import de dependência pesada (como lancedb, torch, etc.) polua o stdout
