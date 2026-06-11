@@ -1,3 +1,4 @@
+import threading
 from typing import Callable, List, Optional
 
 # Nome do modelo no formato esperado pelo fastembed (ONNX) - DECISAO-001
@@ -15,6 +16,7 @@ class EmbeddingEngine:
 
     _instance = None
     _model = None
+    _load_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         # Padrão Singleton: garante apenas uma instância em memória no processo
@@ -23,8 +25,21 @@ class EmbeddingEngine:
         return cls._instance
 
     def _load_model(self):
-        """Lazy loading: carrega o modelo de embeddings apenas quando necessário."""
-        if self._model is None:
+        """
+        Lazy loading: carrega o modelo de embeddings apenas quando necessário.
+
+        Protegido por lock porque chamadas de tools do FastMCP rodam em threads
+        de worker: sem o lock, duas chamadas concorrentes a `encode`/`encode_single`
+        antes do primeiro carregamento poderiam disparar duas inicializações
+        simultâneas do `TextEmbedding`/ONNX Runtime [GA-XX].
+        """
+        if self._model is not None:
+            return
+
+        with self._load_lock:
+            if self._model is not None:
+                return
+
             # Importação local tardia para evitar atraso síncrono no startup do servidor
             import onnxruntime as ort
             from fastembed import TextEmbedding
@@ -36,7 +51,12 @@ class EmbeddingEngine:
 
             # Carrega o modelo de embeddings (all-MiniLM-L6-v2) via ONNX Runtime em CPU local
             # O fastembed carrega do cache local (~/.cache/fastembed) se já estiver baixado
-            self._model = TextEmbedding(model_name=FASTEMBED_MODEL_NAME)
+            # threads=1 evita que o ONNX Runtime crie seu próprio thread pool interno:
+            # como o lazy loading ocorre dentro de uma thread de worker do FastMCP
+            # (não a thread principal), a criação desse thread pool pode travar
+            # (deadlock) em alguns ambientes Windows quando chamadas concorrentes
+            # ao modelo competem pela inicialização do pool global do ORT [GA-XX]
+            self._model = TextEmbedding(model_name=FASTEMBED_MODEL_NAME, threads=1)
 
     def encode(
         self,

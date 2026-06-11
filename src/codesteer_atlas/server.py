@@ -30,6 +30,7 @@ os.environ.setdefault("LANCE_LOG", "off")
 
 # Agora realizamos os imports de forma segura
 from fastmcp import FastMCP  # noqa: E402
+from mcp.shared.session import RequestResponder  # noqa: E402
 from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
@@ -39,6 +40,31 @@ from codesteer_atlas.indexer import (  # noqa: E402
     load_atlasignore_spec,
     should_ignore,
 )
+
+# 4. Patch defensivo no SDK do MCP: se um tool handler síncrono demorar o
+# suficiente para o cliente desistir (timeout) e enviar `notifications/cancelled`,
+# o `RequestResponder` é marcado como `_completed=True`. Quando o handler
+# finalmente termina e tenta responder, `respond()` levanta
+# `AssertionError: Request already responded to`, que não é capturada em
+# nenhum lugar do TaskGroup do anyio e derruba o processo inteiro (encerrando a
+# conexão MCP). Como nosso handler síncrono não pode observar o cancelamento
+# no meio da execução, simplesmente ignoramos a resposta tardia em vez de
+# travar o servidor inteiro [GA-XX].
+_original_responder_respond = RequestResponder.respond
+
+
+async def _safe_responder_respond(self, response):
+    if self._completed:
+        print(
+            f"[atlas] Ignorando resposta tardia para request {self.request_id} "
+            "(já cancelada/concluída pelo cliente, provável timeout).",
+            file=sys.stderr,
+        )
+        return
+    await _original_responder_respond(self, response)
+
+
+RequestResponder.respond = _safe_responder_respond
 
 # Inicializa o servidor FastMCP
 app = FastMCP("CodeSteer Atlas")

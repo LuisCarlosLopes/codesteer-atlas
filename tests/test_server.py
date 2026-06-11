@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from codesteer_atlas.server import (
     main,
     resolve_index_dir,
     _spawn_background_reindex,
+    _safe_responder_respond,
 )
 
 # Mock do manifesto de índice de teste
@@ -403,3 +405,35 @@ def test_main_spawns_background_reindex_without_blocking(monkeypatch, tmp_path):
 
     mock_spawn.assert_called_once_with()
     mock_app_run.assert_called_once_with()
+
+
+class _FakeResponder:
+    def __init__(self, completed: bool):
+        self._completed = completed
+        self.request_id = "req-123"
+
+
+def test_safe_responder_respond_ignores_late_response_when_completed(capsys):
+    """Resposta tardia a uma request já cancelada/concluída é ignorada (não levanta AssertionError)."""
+    responder = _FakeResponder(completed=True)
+
+    asyncio.run(_safe_responder_respond(responder, "result"))
+
+    err = capsys.readouterr().err
+    assert "[atlas]" in err
+    assert "Ignorando resposta tardia" in err
+    assert "req-123" in err
+
+
+def test_safe_responder_respond_delegates_when_not_completed():
+    """Quando a request ainda não foi concluída, delega normalmente para `respond()` original."""
+    responder = _FakeResponder(completed=False)
+    calls = []
+
+    async def fake_original(self, response):
+        calls.append((self, response))
+
+    with patch("codesteer_atlas.server._original_responder_respond", fake_original):
+        asyncio.run(_safe_responder_respond(responder, "result"))
+
+    assert calls == [(responder, "result")]
