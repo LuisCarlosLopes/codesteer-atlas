@@ -175,10 +175,14 @@ def atlas_search(
     """
     Perform a semantic hybrid search on the indexed source code.
 
-    This tool combines vector similarity (cosine) and full-text keyword search (BM25)
-    to find the most relevant code snippets (chunks) based on the user's query intent.
-    Use this tool when looking for specific implementations, where functions or features
-    are defined, or to locate code matching a certain concept or task.
+    Combines vector similarity (cosine) and full-text keyword search (BM25) over
+    pre-indexed code chunks (classes, functions, methods), fusing both rankings via
+    Reciprocal Rank Fusion (RRF). Use this to find specific implementations, where a
+    function/feature/concept is defined, or code matching a natural-language description
+    of a task. For a structural overview of the codebase instead, use `atlas_map`.
+
+    If the index does not exist yet, this raises an actionable error explaining how to
+    build it (see `atlas_index`).
 
     Args:
         query: The natural language search term or description of the code to find.
@@ -190,6 +194,11 @@ def atlas_search(
             returning only metadata and location (file_path, lines, symbol, type, language, score).
             Defaults to true.
         limit: Alias for 'top_k', accepted for compatibility. When provided, overrides 'top_k'.
+
+    Returns:
+        JSON string with `results` (list of matches, each with file_path, lines, symbol,
+        type, language, score, repo, and optionally content), `total_chunks_searched`,
+        and `query_time_ms`.
     """
     start_time = time.time()
 
@@ -263,15 +272,24 @@ def atlas_map(
     """
     Retrieve a structured hierarchical tree map of classes, methods, and functions in the workspace.
 
-    This tool provides a compact overview of the codebase's architecture and logical structure.
-    Use this tool to understand how the project is organized, list classes and methods within folders,
-    or find entrypoints without retrieving full file contents. This is extremely token-efficient.
+    Provides a compact, token-efficient overview of the codebase's architecture and
+    logical structure. Use this to understand how the project is organized, list
+    classes/functions/methods within folders, or find entrypoints without retrieving
+    full file contents. To find a specific implementation or concept instead, use
+    `atlas_search`.
+
+    If the index does not exist yet, this raises an actionable error explaining how to
+    build it (see `atlas_index`).
 
     Args:
         repo: Optional repository name to filter the map.
         path_prefix: Optional file path prefix to filter the map to a specific directory.
         max_depth: Maximum directory depth level in the hierarchical map. Defaults to 3.
         query: Optional search query (accepted for client compatibility and ignored).
+
+    Returns:
+        JSON string with `map` (indented text tree of files and their symbols),
+        `total_files`, `total_symbols`, and `repo`.
     """
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     if not storage.exists():
@@ -344,9 +362,15 @@ def atlas_status() -> str:
     """
     Get diagnostic metadata and health status of the local vector index.
 
-    This tool returns information such as whether the index exists, total indexed chunks,
-    indexed repositories, active embedding model, last indexing timestamp, git HEAD SHA,
-    and whether the index is stale compared to the current workspace code.
+    Use this to check whether the index exists and is up to date before relying on
+    `atlas_search`/`atlas_map`, or to decide whether `atlas_index` should be run.
+    Never indexes anything itself.
+
+    Returns:
+        JSON string with `index_exists`, `total_chunks`, `repos_indexed`,
+        `languages_indexed`, `embedding_model`, `embedding_backend`, `storage_backend`,
+        `index_path`, `last_indexed_at`, `git_head_sha`, and `is_stale` (true when the
+        indexed git HEAD differs from the workspace's current HEAD).
     """
     data = get_status_data()
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
@@ -362,14 +386,17 @@ def atlas_index(
     """
     Index (or re-index) source code into the local search index.
 
+    Use this to build the index for the first time, or to refresh it after
+    `atlas_status` reports `is_stale: true` or large code changes have been made.
+
     IMPORTANT: unless the user already specified what to index, call with
     dry_run=true first, show the candidate folders to the user and ASK whether
     to index everything or specific folders. Only then call again with the
     chosen 'paths' (or none for the full workspace).
 
-    Indexing is incremental by default: unchanged files are skipped on
-    subsequent calls, making re-runs fast. Use full=true to force a complete
-    rebuild ignoring cached file hashes.
+    Indexing is incremental by default: unchanged files (by content hash) are
+    skipped on subsequent calls, making re-runs fast. Use full=true to force a
+    complete rebuild ignoring cached file hashes.
 
     Args:
         workspace: Absolute path to the root directory to index. Defaults to the
@@ -384,6 +411,13 @@ def atlas_index(
             top-level candidate folders under 'workspace' with a count of
             eligible files in each, so the agent can present them to the user
             before deciding what to index. Defaults to false.
+
+    Returns:
+        When dry_run is true: JSON with `workspace`, `candidates` (list of
+        {path, eligible_files}), and `total_eligible_files`.
+        Otherwise: JSON with `workspace`, `indexed_paths`, `files_processed`,
+        `files_skipped_unchanged`, `files_removed`, `chunks_persisted`,
+        `duration_s`, and `git_head_sha`.
     """
     # Resolve o workspace: parâmetro -> pai do índice resolvido -> CWD
     if workspace:
