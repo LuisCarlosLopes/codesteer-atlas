@@ -41,7 +41,12 @@ class StorageBackend:
         """Verifica se o índice e o banco de dados LanceDB existem."""
         return self.manifest_path.exists() and self.db_path.exists()
 
-    def store_chunks(self, chunks: List[CodeChunk], git_head_sha: Optional[str] = None):
+    def store_chunks(
+        self,
+        chunks: List[CodeChunk],
+        git_head_sha: Optional[str] = None,
+        files_meta: Optional[Dict[str, list]] = None,
+    ):
         """
         Salva uma lista de chunks de código no LanceDB, gera o índice FTS
         e escreve o arquivo manifest.json (sobrescrita completa).
@@ -87,6 +92,7 @@ class StorageBackend:
             languages_indexed=languages,
             index_version="2.0.0",
             files=files,
+            files_meta=files_meta or {},
         )
 
         # Salva o arquivo de metadados manifest.json
@@ -116,7 +122,10 @@ class StorageBackend:
         table.create_fts_index("content", replace=True)
 
     def update_manifest_after_incremental(
-        self, files: Dict[str, str], git_head_sha: Optional[str] = None
+        self,
+        files: Dict[str, str],
+        git_head_sha: Optional[str] = None,
+        files_meta: Optional[Dict[str, list]] = None,
     ) -> int:
         """
         Recalcula `total_chunks`/`repos_indexed`/`languages_indexed` a partir da
@@ -147,6 +156,7 @@ class StorageBackend:
             languages_indexed=languages,
             index_version="2.0.0",
             files=files,
+            files_meta=files_meta or {},
         )
 
         with open(self.manifest_path, "w", encoding="utf-8") as f:

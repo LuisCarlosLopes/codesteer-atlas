@@ -158,15 +158,18 @@ def _scan_workspace(
     workspace_path: Path,
     scan_roots: List[Path],
     atlas_spec: Optional[pathspec.PathSpec] = None,
-) -> tuple[list[Path], int, int]:
+) -> tuple[list[Path], int, int, dict[Path, tuple[float, int]]]:
     """
     Varre recursivamente as raízes informadas (subárvores do workspace) coletando
     arquivos elegíveis para indexação. Retorna (arquivos, ignorados_por_tamanho,
-    ignorados_por_extensao_nao_suportada).
+    ignorados_por_extensao_nao_suportada, stats_by_path), onde `stats_by_path`
+    mapeia cada arquivo elegível para (mtime, size) já obtidos via `stat()`,
+    reaproveitados para evitar reler/hashear arquivos inalterados [P01].
     """
     eligible_files: List[Path] = []
     files_ignored_size = 0
     files_ignored_unsupported = 0
+    stats_by_path: dict[Path, tuple[float, int]] = {}
 
     for scan_root in scan_roots:
         if not scan_root.exists():
@@ -188,8 +191,8 @@ def _scan_workspace(
                     continue
 
                 try:
-                    file_size = file_path.stat().st_size
-                    if file_size > MAX_FILE_SIZE:
+                    st = file_path.stat()
+                    if st.st_size > MAX_FILE_SIZE:
                         print(
                             f"Aviso: Arquivo {file_path.relative_to(workspace_path)} "
                             "ignorado (excede limite de 2MB)",
@@ -201,8 +204,9 @@ def _scan_workspace(
                     continue
 
                 eligible_files.append(file_path)
+                stats_by_path[file_path] = (st.st_mtime, st.st_size)
 
-    return eligible_files, files_ignored_size, files_ignored_unsupported
+    return eligible_files, files_ignored_size, files_ignored_unsupported, stats_by_path
 
 
 def _resolve_scan_roots(workspace_path: Path, paths: Optional[List[str]]) -> List[Path]:
@@ -270,31 +274,38 @@ def index_workspace(
 
     # Carrega manifest existente (se houver) para indexação incremental
     existing_files: dict[str, str] = {}
+    existing_files_meta: dict[str, list] = {}
     existing_manifest = None
     if storage.exists():
         try:
             existing_manifest = storage.get_manifest()
             existing_files = dict(existing_manifest.files)
+            existing_files_meta = dict(existing_manifest.files_meta)
         except Exception:
             # Manifest incompatível/corrompido: trata como índice vazio (full rebuild)
             existing_files = {}
+            existing_files_meta = {}
             existing_manifest = None
 
     # Varre as subárvores selecionadas
     progress.tick("scan", 0, 1)
-    eligible_files, files_ignored_size, _files_ignored_unsupported = _scan_workspace(
-        workspace_path, scan_roots, atlas_spec
+    eligible_files, files_ignored_size, _files_ignored_unsupported, stats_by_path = (
+        _scan_workspace(workspace_path, scan_roots, atlas_spec)
     )
     progress.tick("scan", 1, 1)
     progress.phase_done("scan")
     if files_ignored_size:
         print(f"Arquivos ignorados (> 2MB): {files_ignored_size}", file=sys.stderr)
 
-    # Calcula caminhos relativos POSIX (chave do manifest 'files') de cada arquivo elegível
+    # Calcula caminhos relativos POSIX (chave do manifest 'files') de cada arquivo elegível,
+    # junto com [mtime, size] capturados durante o scan [P01]
     current_files: dict[str, Path] = {}
+    current_meta: dict[str, list] = {}
     for file_path in eligible_files:
         rel_posix = PurePath(file_path.relative_to(workspace_path)).as_posix()
         current_files[rel_posix] = file_path
+        mtime, size = stats_by_path[file_path]
+        current_meta[rel_posix] = [mtime, size]
 
     # Determina quais paths (do manifest) estão "sob escopo" desta execução,
     # para que a remoção de deletados não afete arquivos fora dos `paths` selecionados
@@ -324,6 +335,20 @@ def index_workspace(
     if hash_total == 0:
         progress.tick("hash", 1, 1)
     for hash_index, (rel_posix, file_path) in enumerate(current_files.items(), start=1):
+        # Fast path [P01]: se mtime+size não mudaram em relação ao manifest anterior,
+        # reaproveita o hash existente sem reler/hashear o conteúdo do arquivo.
+        # Reduz drasticamente o custo do reindex incremental em workspaces grandes.
+        old_hash = files_in_scope_from_manifest.get(rel_posix)
+        if (
+            not full
+            and old_hash is not None
+            and existing_files_meta.get(rel_posix) == current_meta[rel_posix]
+        ):
+            new_hashes[rel_posix] = old_hash
+            files_skipped_unchanged += 1
+            progress.tick("hash", hash_index, hash_total)
+            continue
+
         file_hash = _hash_file_content(file_path)
         if file_hash is None:
             progress.tick("hash", hash_index, hash_total)
@@ -331,7 +356,7 @@ def index_workspace(
 
         new_hashes[rel_posix] = file_hash
 
-        if not full and files_in_scope_from_manifest.get(rel_posix) == file_hash:
+        if not full and old_hash == file_hash:
             files_skipped_unchanged += 1
             progress.tick("hash", hash_index, hash_total)
             continue
@@ -399,7 +424,7 @@ def index_workspace(
     #   alterados/removidos e inserir os novos chunks, preservando o restante.
     progress.tick("persist", 0, 1)
     if existing_manifest is None or (full and not paths):
-        storage.store_chunks(all_new_chunks, git_head_sha=git_sha)
+        storage.store_chunks(all_new_chunks, git_head_sha=git_sha, files_meta=current_meta)
         chunks_persisted = len(all_new_chunks)
     else:
         # Remove do índice os chunks de arquivos alterados/removidos dentro do escopo
@@ -415,14 +440,19 @@ def index_workspace(
         # - atualiza/insere os processados
         # - mantém os inalterados
         updated_files = dict(existing_manifest.files)
+        updated_files_meta = dict(existing_manifest.files_meta)
         for rel in files_to_delete_from_index:
             updated_files.pop(rel, None)
+            updated_files_meta.pop(rel, None)
         for rel, file_hash in new_hashes.items():
             if rel in files_to_process:
                 updated_files[rel] = file_hash
+        # [mtime, size] de todos os arquivos atuais é sempre atualizado, mesmo
+        # para arquivos pulados via fast path [P01]
+        updated_files_meta.update(current_meta)
 
         chunks_persisted = storage.update_manifest_after_incremental(
-            files=updated_files, git_head_sha=git_sha
+            files=updated_files, git_head_sha=git_sha, files_meta=updated_files_meta
         )
 
     progress.tick("persist", 1, 1)

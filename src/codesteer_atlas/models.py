@@ -51,6 +51,11 @@ class IndexManifest(BaseModel):
         description="Mapa de path POSIX (relativo ao workspace) -> hash sha256 do conteúdo,"
         " usado para indexação incremental",
     )
+    files_meta: dict[str, list] = Field(
+        default_factory=dict,
+        description="Mapa de path POSIX -> [mtime, size] do arquivo no momento da indexação,"
+        " usado para evitar reler/hashear arquivos inalterados em workspaces grandes",
+    )
 
 
 class SearchResult(BaseModel):

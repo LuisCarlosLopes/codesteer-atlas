@@ -142,6 +142,44 @@ def test_index_workspace_second_run_skips_unchanged_files(tmp_path):
         mock_encode.assert_not_called()
 
 
+def test_index_workspace_unchanged_files_skip_hashing_via_mtime_size(tmp_path):
+    """2ª execução sem mudanças: o conteúdo dos arquivos não é relido/hasheado
+    (fast path por mtime+size [P01]), mas o hash persistido continua o mesmo."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        stats1 = index_workspace(workspace_dir, index_dir)
+        assert stats1.files_processed == 1
+
+        manifest_path = index_dir / "manifest.json"
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert "app.py" in manifest_data["files_meta"]
+        original_hash = manifest_data["files"]["app.py"]
+
+        # Segunda execução: nada mudou (mesmo mtime/size) — não deve reler o conteúdo
+        with patch(
+            "codesteer_atlas.indexer._hash_file_content"
+        ) as mock_hash_content:
+            stats2 = index_workspace(workspace_dir, index_dir)
+
+        mock_hash_content.assert_not_called()
+        assert stats2.files_processed == 0
+        assert stats2.files_skipped_unchanged == 1
+
+        manifest_data2 = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest_data2["files"]["app.py"] == original_hash
+
+
 def test_index_workspace_deleted_file_removed_from_index(tmp_path):
     """Arquivo deletado é removido do índice na execução seguinte."""
     workspace_dir = tmp_path / "workspace"
