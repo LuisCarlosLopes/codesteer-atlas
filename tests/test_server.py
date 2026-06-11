@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
-from codesteer_atlas.models import IndexManifest, SearchResult
+from codesteer_atlas.models import IndexManifest, IndexStats, SearchResult
 from codesteer_atlas.server import (
     atlas_status,
     atlas_search,
@@ -13,6 +13,7 @@ from codesteer_atlas.server import (
     main,
     resolve_index_dir,
     _spawn_background_reindex,
+    _spawn_index_subprocess,
     _safe_responder_respond,
 )
 
@@ -36,7 +37,10 @@ def test_atlas_status_endpoint_no_index():
     Testa o retorno da ferramenta atlas_status quando o índice ainda
     não foi criado no filesystem.
     """
-    with patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False):
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
         result_json = atlas_status()
         result = json.loads(result_json)
 
@@ -54,6 +58,7 @@ def test_atlas_status_endpoint_with_index():
         patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
         patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
         patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
     ):
         result_json = atlas_status()
         result = json.loads(result_json)
@@ -423,6 +428,202 @@ def test_safe_responder_respond_ignores_late_response_when_completed(capsys):
     assert "[atlas]" in err
     assert "Ignorando resposta tardia" in err
     assert "req-123" in err
+
+
+def test_atlas_index_full_true_returns_async_status_without_calling_index_workspace(tmp_path):
+    """`full=True` retorna status assíncrono via `_spawn_index_subprocess`,
+    sem chamar `index_workspace` diretamente."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch(
+            "codesteer_atlas.server._spawn_index_subprocess",
+            return_value={"status": "started", "pid": 1234, "log_path": "/tmp/log"},
+        ) as mock_spawn,
+        patch("codesteer_atlas.server.index_workspace") as mock_index_workspace,
+    ):
+        result_json = atlas_index(workspace=str(workspace), full=True, dry_run=False)
+
+    result = json.loads(result_json)
+    assert result["status"] == "started"
+    assert result["pid"] == 1234
+    assert "message" in result
+    mock_spawn.assert_called_once()
+    mock_index_workspace.assert_not_called()
+
+
+def test_atlas_index_paths_none_returns_async_status_without_calling_index_workspace(tmp_path):
+    """`paths=None` (com `full=False`, `dry_run=False`) retorna status assíncrono,
+    sem chamar `index_workspace` diretamente."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch(
+            "codesteer_atlas.server._spawn_index_subprocess",
+            return_value={"status": "skipped", "reason": "reindex_in_progress", "log_path": "/tmp/log"},
+        ) as mock_spawn,
+        patch("codesteer_atlas.server.index_workspace") as mock_index_workspace,
+    ):
+        result_json = atlas_index(workspace=str(workspace), paths=None, full=False, dry_run=False)
+
+    result = json.loads(result_json)
+    assert result["status"] == "skipped"
+    assert result["reason"] == "reindex_in_progress"
+    assert "message" in result
+    mock_spawn.assert_called_once()
+    mock_index_workspace.assert_not_called()
+
+
+def test_atlas_index_paths_non_empty_full_false_remains_synchronous(tmp_path):
+    """`paths=[...]` e `full=False` continua síncrono, retornando IndexStats completo."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+
+    mock_stats = IndexStats(
+        files_processed=2,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=5,
+        duration_s=0.1,
+        git_head_sha="sha123",
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.server.index_workspace", return_value=mock_stats) as mock_index,
+        patch("codesteer_atlas.server._spawn_index_subprocess") as mock_spawn,
+    ):
+        result_json = atlas_index(workspace=str(workspace), paths=["src"], full=False, dry_run=False)
+
+    result = json.loads(result_json)
+    assert result["files_processed"] == 2
+    assert result["chunks_persisted"] == 5
+    assert result["git_head_sha"] == "sha123"
+    assert "skipped_reason" not in result
+    mock_index.assert_called_once()
+    mock_spawn.assert_not_called()
+
+
+def test_atlas_index_sync_propagates_skipped_reason(tmp_path):
+    """Quando `index_workspace` retorna `skipped_reason`, a resposta inclui
+    `skipped_reason` e `message`."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+
+    mock_stats = IndexStats(
+        files_processed=0,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=0,
+        duration_s=0.0,
+        git_head_sha=None,
+        skipped_reason="reindex_in_progress",
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.server.index_workspace", return_value=mock_stats),
+    ):
+        result_json = atlas_index(workspace=str(workspace), paths=["src"], full=False, dry_run=False)
+
+    result = json.loads(result_json)
+    assert result["skipped_reason"] == "reindex_in_progress"
+    assert "message" in result
+
+
+def test_spawn_index_subprocess_skips_when_locked(tmp_path):
+    """Quando `is_reindex_locked=True`, NÃO chama `subprocess.Popen` e retorna status='skipped'."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=True),
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
+    ):
+        result = _spawn_index_subprocess(workspace, paths=None, full=False)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "reindex_in_progress"
+    mock_popen.assert_not_called()
+
+
+def test_spawn_index_subprocess_started_with_full_and_paths(tmp_path):
+    """Quando `is_reindex_locked=False`, chama `subprocess.Popen` com
+    --workspace/--index-dir/--full/--paths e retorna status='started' com pid."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value.pid = 4242
+        result = _spawn_index_subprocess(workspace, paths=["src", "docs"], full=True)
+
+    assert result["status"] == "started"
+    assert result["pid"] == 4242
+
+    args, kwargs = mock_popen.call_args
+    cmd = args[0]
+    assert cmd[:3] == [sys.executable, "-m", "codesteer_atlas.indexer"]
+    assert "--workspace" in cmd and str(workspace) in cmd
+    assert "--index-dir" in cmd and str(index_dir) in cmd
+    assert "--full" in cmd
+    assert cmd.count("--paths") == 2
+    assert "src" in cmd and "docs" in cmd
+    assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_spawn_index_subprocess_popen_raises_returns_error(tmp_path):
+    """Quando `Popen` lança exceção, retorna status='error' com a mensagem."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        patch("codesteer_atlas.server.subprocess.Popen", side_effect=Exception("boom")),
+    ):
+        result = _spawn_index_subprocess(workspace, paths=None, full=False)
+
+    assert result["status"] == "error"
+    assert "boom" in result["error"]
+
+
+def test_atlas_status_reindexing_true_when_locked():
+    """`atlas_status` retorna `reindexing=True` quando `is_reindex_locked` retorna True."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=True),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["reindexing"] is True
+
+
+def test_atlas_status_reindexing_false_when_unlocked():
+    """`atlas_status` retorna `reindexing=False` quando `is_reindex_locked` retorna False."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["reindexing"] is False
 
 
 def test_safe_responder_respond_delegates_when_not_completed():

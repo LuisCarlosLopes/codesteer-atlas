@@ -33,6 +33,7 @@ from fastmcp import FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
 from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
+from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
@@ -155,6 +156,7 @@ def _index_workspace_root() -> Path:
 def get_status_data() -> dict:
     """Função auxiliar para obter os metadados e status de diagnóstico do índice."""
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    reindexing = is_reindex_locked(INDEX_DIR_PATH)
 
     if not storage.exists():
         return {
@@ -169,6 +171,7 @@ def get_status_data() -> dict:
             "git_head_sha": None,
             "is_stale": False,
             "languages_indexed": [],
+            "reindexing": reindexing,
         }
 
     try:
@@ -193,10 +196,11 @@ def get_status_data() -> dict:
             "git_head_sha": manifest.git_head_sha,
             "is_stale": is_stale,
             "languages_indexed": manifest.languages_indexed,
+            "reindexing": reindexing,
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
-        return {"index_exists": True, "error": str(e)}
+        return {"index_exists": True, "error": str(e), "reindexing": reindexing}
 
 
 # --- MCP Tools ---
@@ -409,8 +413,9 @@ def atlas_status() -> str:
     Returns:
         JSON string with `index_exists`, `total_chunks`, `repos_indexed`,
         `languages_indexed`, `embedding_model`, `embedding_backend`, `storage_backend`,
-        `index_path`, `last_indexed_at`, `git_head_sha`, and `is_stale` (true when the
-        indexed git HEAD differs from the workspace's current HEAD).
+        `index_path`, `last_indexed_at`, `git_head_sha`, `is_stale` (true when the
+        indexed git HEAD differs from the workspace's current HEAD), and `reindexing`
+        (true when another process currently holds the reindex lock for this index).
     """
     data = get_status_data()
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
@@ -438,6 +443,12 @@ def atlas_index(
     skipped on subsequent calls, making re-runs fast. Use full=true to force a
     complete rebuild ignoring cached file hashes.
 
+    full=true or an empty/omitted 'paths' (whole-workspace indexing) run
+    asynchronously in a background subprocess and return immediately — use
+    `atlas_status` to check progress (`reindexing: true` while running).
+    A non-empty 'paths' with full=false runs synchronously and returns the
+    indexing stats directly.
+
     Args:
         workspace: Absolute path to the root directory to index. Defaults to the
             parent directory of the resolved index, or the current working
@@ -455,9 +466,14 @@ def atlas_index(
     Returns:
         When dry_run is true: JSON with `workspace`, `candidates` (list of
         {path, eligible_files}), and `total_eligible_files`.
-        Otherwise: JSON with `workspace`, `indexed_paths`, `files_processed`,
-        `files_skipped_unchanged`, `files_removed`, `chunks_persisted`,
-        `duration_s`, and `git_head_sha`.
+        When full=true or 'paths' is empty/omitted (dry_run=false): JSON with
+        `workspace`, `indexed_paths`, `status` ("started"|"skipped"|"error"),
+        `log_path`, optionally `pid`/`reason`/`error`, and `message`.
+        When 'paths' is non-empty and full=false: JSON with `workspace`,
+        `indexed_paths`, `files_processed`, `files_skipped_unchanged`,
+        `files_removed`, `chunks_persisted`, `duration_s`, `git_head_sha`, and
+        optionally `skipped_reason`/`message` if another process already holds
+        the reindex lock.
     """
     # Resolve o workspace: parâmetro -> pai do índice resolvido -> CWD
     if workspace:
@@ -535,6 +551,34 @@ def atlas_index(
         file=sys.stderr,
     )
 
+    if full or not paths:
+        result = _spawn_index_subprocess(workspace_path, paths, full)
+
+        response = {
+            "workspace": str(workspace_path),
+            "indexed_paths": list(paths) if paths else "all",
+            "status": result["status"],
+            "log_path": result["log_path"],
+        }
+        if result["status"] == "started":
+            response["pid"] = result["pid"]
+            response["message"] = (
+                "Reindexação iniciada em background (pid="
+                f"{result['pid']}). Consulte atlas_status para acompanhar o progresso "
+                "(reindexing: true enquanto estiver em andamento)."
+            )
+        elif result["status"] == "skipped":
+            response["reason"] = result["reason"]
+            response["message"] = (
+                "Outro processo já está reindexando este índice. "
+                "Consulte atlas_status para acompanhar o progresso."
+            )
+        else:
+            response["error"] = result["error"]
+            response["message"] = "Falha ao iniciar a reindexação em background."
+
+        return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
+
     stats = index_workspace(workspace_path, INDEX_DIR_PATH, paths=paths, full=full)
 
     response = {
@@ -547,6 +591,13 @@ def atlas_index(
         "duration_s": stats.duration_s,
         "git_head_sha": stats.git_head_sha,
     }
+    if stats.skipped_reason:
+        response["skipped_reason"] = stats.skipped_reason
+        response["message"] = (
+            "Outro processo já está reindexando este índice; esta chamada não "
+            "alterou o índice. Consulte atlas_status para acompanhar o progresso."
+        )
+
     return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -560,6 +611,63 @@ def get_status_resource() -> str:
     """
     data = get_status_data()
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+
+def _spawn_index_subprocess(
+    workspace_path: Path, paths: Optional[list[str]], full: bool
+) -> dict:
+    """
+    Inicia uma indexação em subprocesso separado (`codesteer_atlas.indexer` CLI),
+    generalizando o padrão de `_spawn_background_reindex` para aceitar
+    `paths`/`full` (DECISAO-002, DECISAO-004).
+
+    Faz pre-check de `is_reindex_locked` para evitar iniciar um subprocesso que
+    apenas seria pulado por `index_workspace` ao adquirir o lock.
+
+    Retorna `{"status": "started", "pid": int, "log_path": str}`,
+    `{"status": "skipped", "reason": "reindex_in_progress", "log_path": str}` ou
+    `{"status": "error", "error": str, "log_path": str}`. Nunca propaga exceções.
+    """
+    log_path = INDEX_DIR_PATH / "background_reindex.log"
+
+    if is_reindex_locked(INDEX_DIR_PATH):
+        return {
+            "status": "skipped",
+            "reason": "reindex_in_progress",
+            "log_path": str(log_path),
+        }
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "codesteer_atlas.indexer",
+        "--workspace",
+        str(workspace_path),
+        "--index-dir",
+        str(INDEX_DIR_PATH),
+    ]
+    if full:
+        cmd.append("--full")
+    for p in paths or []:
+        cmd.extend(["--paths", p])
+
+    # No Windows, evita que o subprocesso abra/pisque uma janela de console
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                cwd=str(workspace_path),
+                creationflags=creationflags,
+            )
+    except Exception as e:
+        return {"status": "error", "error": str(e), "log_path": str(log_path)}
+
+    return {"status": "started", "pid": process.pid, "log_path": str(log_path)}
 
 
 def _spawn_background_reindex() -> None:
@@ -601,29 +709,19 @@ def _spawn_background_reindex() -> None:
         file=sys.stderr,
     )
 
-    # No Windows, evita que o subprocesso abra/pisque uma janela de console
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=False)
 
-    try:
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "codesteer_atlas.indexer",
-                    "--workspace",
-                    str(workspace_path),
-                    "--index-dir",
-                    str(INDEX_DIR_PATH),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=log_file,
-                cwd=str(workspace_path),
-                creationflags=creationflags,
-            )
-    except Exception as e:
-        print(f"[atlas] Erro ao iniciar reindex automático em background: {e}", file=sys.stderr)
+    if result["status"] == "error":
+        print(
+            f"[atlas] Erro ao iniciar reindex automático em background: {result['error']}",
+            file=sys.stderr,
+        )
+    elif result["status"] == "skipped":
+        print(
+            "[atlas] Reindex automático pulado — outro processo já está "
+            "reindexando este índice.",
+            file=sys.stderr,
+        )
 
 
 def main():

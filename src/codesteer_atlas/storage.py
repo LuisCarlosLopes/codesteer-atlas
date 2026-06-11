@@ -131,10 +131,16 @@ class StorageBackend:
         if "chunks" in _table_names(db):
             table = db.open_table("chunks")
             table.add(data_to_insert)
+
+            # Atualiza o índice FTS incrementalmente em vez de recriá-lo do zero (DECISAO-003)
+            has_fts = any("content" in idx.columns for idx in table.list_indices())
+            if has_fts:
+                table.optimize()
+            else:
+                table.create_fts_index("content", replace=False)
         else:
             table = db.create_table("chunks", data=data_to_insert, mode="overwrite")
-
-        table.create_fts_index("content", replace=True)
+            table.create_fts_index("content", replace=True)
 
     def update_manifest_after_incremental(
         self,
@@ -358,6 +364,6 @@ class StorageBackend:
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
 
-        for file_path in file_paths:
-            escaped = file_path.replace("'", "''")
-            table.delete(f"file_path = '{escaped}'")
+        escaped_paths = [file_path.replace("'", "''") for file_path in file_paths]
+        in_clause = ", ".join(f"'{path}'" for path in escaped_paths)
+        table.delete(f"file_path IN ({in_clause})")

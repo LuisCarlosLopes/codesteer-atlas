@@ -93,3 +93,7 @@ class IndexStats(BaseModel):
     git_head_sha: Optional[str] = Field(
         None, description="SHA do commit HEAD no momento da indexação"
     )
+    skipped_reason: Optional[str] = Field(
+        None,
+        description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",
+    )

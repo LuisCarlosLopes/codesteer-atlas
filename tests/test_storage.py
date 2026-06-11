@@ -433,6 +433,103 @@ def test_store_chunks_writes_manifest_atomically_no_leftover_tmp(temp_storage):
     assert manifest.total_chunks == 1
 
 
+def test_append_chunks_updates_fts_index_for_new_content(temp_storage):
+    """`append_chunks` em tabela com FTS já existente atualiza o índice (optimize/fallback),
+    permitindo que a busca FTS encontre o conteúdo do chunk recém-adicionado."""
+    base_chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main():\n    pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(base_chunks)
+
+    new_chunk = CodeChunk(
+        id="c2",
+        file_path="src/payments.py",
+        repo="test-project",
+        start_line=1,
+        end_line=3,
+        scope_type="function",
+        scope_name="charge_card",
+        language="python",
+        content="def charge_card():\n    return 'zorbflex_unique_token'",
+        indexed_at="2026-06-05T12:01:00Z",
+        vector=MOCK_VECTOR,
+    )
+    temp_storage.append_chunks([new_chunk])
+
+    results = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR,
+        query_text="zorbflex_unique_token",
+        filters={},
+        top_k=5,
+    )
+
+    assert any(r.scope_name == "charge_card" for r in results)
+
+
+def test_delete_by_file_paths_removes_multiple_in_single_call(temp_storage):
+    """`delete_by_file_paths` remove múltiplos paths (incluindo aspas simples) em uma chamada."""
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="project-a",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="c2",
+            file_path="src/it's_a_dir/file.py",
+            repo="project-a",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="c3",
+            file_path="src/keep.py",
+            repo="project-a",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="keep",
+            language="python",
+            content="def keep(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(chunks)
+
+    temp_storage.delete_by_file_paths(["src/main.py", "src/it's_a_dir/file.py"])
+
+    symbols = temp_storage.get_symbols()
+    remaining_paths = {row["file_path"] for row in symbols}
+    assert remaining_paths == {"src/keep.py"}
+
+
 def test_update_manifest_after_incremental_writes_manifest_atomically(temp_storage):
     """`update_manifest_after_incremental` regrava o manifest sem deixar `.json.tmp` residual."""
     chunks = [

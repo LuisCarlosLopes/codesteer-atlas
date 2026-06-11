@@ -1,6 +1,8 @@
 import json
 from unittest.mock import patch
 from click.testing import CliRunner
+from filelock import FileLock
+from codesteer_atlas.config import REINDEX_LOCK_FILENAME
 from codesteer_atlas.indexer import cli, index_workspace, load_atlasignore_spec, should_ignore
 from codesteer_atlas.storage import StorageBackend
 
@@ -361,6 +363,70 @@ def test_index_workspace_full_flag_rebuilds_everything(tmp_path):
         assert stats2.files_processed == 1
         assert stats2.files_skipped_unchanged == 0
         mock_encode.assert_called_once()
+
+
+def test_index_workspace_skips_when_lock_held_externally(tmp_path):
+    """Com `.reindex.lock` já detido externamente, retorna IndexStats com
+    `skipped_reason="reindex_in_progress"`, sem alterar manifest/tabela."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    # Primeira execução normal, gera manifest/tabela
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        stats1 = index_workspace(workspace_dir, index_dir)
+        assert stats1.skipped_reason is None
+
+    storage = StorageBackend(index_dir=index_dir)
+    manifest_before = storage.get_manifest().model_dump()
+
+    external_lock = FileLock(str(index_dir / REINDEX_LOCK_FILENAME), timeout=0)
+    external_lock.acquire()
+    try:
+        with patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ) as mock_encode:
+            stats2 = index_workspace(workspace_dir, index_dir)
+    finally:
+        external_lock.release()
+
+    assert stats2.skipped_reason == "reindex_in_progress"
+    assert stats2.files_processed == 0
+    assert stats2.files_skipped_unchanged == 0
+    assert stats2.files_removed == 0
+    assert stats2.chunks_persisted == 0
+    assert stats2.duration_s == 0.0
+    assert stats2.git_head_sha is None
+    mock_encode.assert_not_called()
+
+    manifest_after = storage.get_manifest().model_dump()
+    assert manifest_after == manifest_before
+
+
+def test_index_workspace_normal_call_unaffected_by_lock_module(tmp_path):
+    """Sem lock concorrente, `index_workspace` continua produzindo IndexStats
+    completo (regressão), com `skipped_reason=None`."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    assert stats.skipped_reason is None
+    assert stats.files_processed == 1
+    assert stats.chunks_persisted >= 1
+    assert stats.git_head_sha == "git_sha_1"
 
 
 def test_index_workspace_file_path_always_posix(tmp_path):

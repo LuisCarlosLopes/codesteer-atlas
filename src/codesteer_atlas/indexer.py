@@ -15,6 +15,7 @@ from codesteer_atlas.config import (
 )
 from codesteer_atlas.chunker import ASTChunker
 from codesteer_atlas.embeddings import EmbeddingEngine
+from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
 from codesteer_atlas.storage import StorageBackend
 
@@ -255,15 +256,54 @@ def index_workspace(
 
     Levanta `ValueError` se `workspace_path` não existir/não for diretório, ou
     se algum `path` resolvido estiver fora do workspace (anti-traversal).
-    """
-    start_time = time.time()
-    progress = IndexProgressReporter(enabled=report_progress)
 
+    Adquire `reindex_lock(index_path)` (DECISAO-001): se outro processo já
+    detém o lock, retorna imediatamente um `IndexStats` zerado com
+    `skipped_reason="reindex_in_progress"`, sem alterar manifest/tabela.
+    """
     workspace_path = Path(workspace_path).resolve()
     index_path = Path(index_path).resolve()
 
     if not workspace_path.exists() or not workspace_path.is_dir():
         raise ValueError(f"O diretório do workspace '{workspace_path}' não existe.")
+
+    # Validação de paths (anti-traversal) ocorre antes do lock para falhar cedo
+    _resolve_scan_roots(workspace_path, paths)
+
+    with reindex_lock(index_path) as acquired:
+        if not acquired:
+            print(
+                f"[atlas] Reindex de '{index_path}' já em andamento por outro "
+                "processo; pulando esta execução.",
+                file=sys.stderr,
+            )
+            return IndexStats(
+                files_processed=0,
+                files_skipped_unchanged=0,
+                files_removed=0,
+                chunks_persisted=0,
+                duration_s=0.0,
+                git_head_sha=None,
+                skipped_reason="reindex_in_progress",
+            )
+
+        return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress)
+
+
+def _index_workspace_locked(
+    workspace_path: Path,
+    index_path: Path,
+    paths: Optional[List[str]],
+    full: bool,
+    report_progress: bool,
+) -> IndexStats:
+    """
+    Corpo da indexação executado sob `reindex_lock` (DECISAO-001). Mesma lógica
+    de `index_workspace` antes da introdução do lock — varredura, hashing
+    incremental, chunking, embeddings e persistência.
+    """
+    start_time = time.time()
+    progress = IndexProgressReporter(enabled=report_progress)
 
     scan_roots = _resolve_scan_roots(workspace_path, paths)
     atlas_spec = load_atlasignore_spec(workspace_path)
@@ -534,6 +574,10 @@ def cli(workspace: str, index_dir: str, full: bool, paths: tuple, quiet: bool):
     except ValueError as e:
         click.echo(f"Erro: {e}", err=True)
         sys.exit(1)
+
+    if stats.skipped_reason:
+        click.echo("Reindex pulado: outro processo já está reindexando este índice.")
+        return
 
     if stats.files_processed == 0 and stats.chunks_persisted == 0 and stats.files_removed == 0:
         click.echo("Nenhum fragmento de código elegível encontrado para indexação.")

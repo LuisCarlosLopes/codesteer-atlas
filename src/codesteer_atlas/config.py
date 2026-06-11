@@ -26,6 +26,9 @@ MIN_INDEX_VERSION = "2.0.0"
 # Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
 ATLASIGNORE_FILENAME = ".atlasignore"
 
+# Nome do arquivo de lock entre processos para coordenar reindexações concorrentes (DECISAO-001)
+REINDEX_LOCK_FILENAME = ".reindex.lock"
+
 # Padrões de arquivos e pastas que devem ser ignorados durante a varredura
 IGNORE_DIRS = {
     ".git",
