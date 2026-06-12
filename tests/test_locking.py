@@ -66,3 +66,20 @@ def test_is_reindex_locked_true_when_externally_held(tmp_path):
     # Após liberar o lock externo, deve poder ser adquirido normalmente
     with reindex_lock(tmp_path) as acquired:
         assert acquired is True
+
+
+def test_is_reindex_locked_false_and_logs_when_probe_raises_oserror(
+    monkeypatch, tmp_path, capsys
+):
+    """`is_reindex_locked` não propaga OSError do probe (ex.: PermissionError no
+    Windows com lockfile read-only ou antivírus segurando o handle) — retorna
+    False best-effort e loga em stderr, para o `atlas_status` nunca quebrar."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    def raise_permission_error(self, *args, **kwargs):
+        raise PermissionError("lockfile read-only")
+
+    monkeypatch.setattr(FileLock, "acquire", raise_permission_error)
+
+    assert is_reindex_locked(tmp_path) is False
+    assert "Probe do reindex lock falhou" in capsys.readouterr().err

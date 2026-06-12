@@ -76,19 +76,34 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
     """Obtém o hash SHA do commit HEAD atual do Git de forma segura."""
     import subprocess
 
+    # No Windows: CREATE_NO_WINDOW evita janela de console piscando a cada chamada
+    # (hosts MCP GUI), e stdin=DEVNULL evita herdar um handle de stdin inválido em
+    # processos sem console (OSError WinError 6)
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
     try:
-        # Executa git rev-parse HEAD no diretório do workspace
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(workspace_path),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=True,
+            timeout=10,
+            creationflags=creationflags,
         )
         return result.stdout.strip()
-    except Exception:
-        # Retorna None caso o git não esteja inicializado ou não existam commits ainda
+    except subprocess.CalledProcessError:
+        # Esperado: workspace fora de um repositório git ou sem commits ainda
+        return None
+    except Exception as e:
+        # Inesperado (git fora do PATH, handle inválido, timeout): loga para não
+        # mascarar o motivo de `git_head_sha: null`/`is_stale: false` no status
+        print(
+            f"[atlas] git rev-parse HEAD falhou em '{workspace_path}': {e}",
+            file=sys.stderr,
+        )
         return None
 
 

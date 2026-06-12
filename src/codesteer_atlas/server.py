@@ -15,7 +15,9 @@ from typing import Optional
 # JSON-RPC que o FastMCP escreve no mesmo fd, corrompendo o protocolo stdio.
 _real_stdout_fd = os.dup(1)
 os.dup2(2, 1)
-original_stdout = os.fdopen(_real_stdout_fd, "w", closefd=True)
+# encoding/newline explícitos: no Windows o default seria cp1252 + tradução \r\n,
+# o que corromperia o JSON-RPC se o SDK escrever direto em sys.stdout
+original_stdout = os.fdopen(_real_stdout_fd, "w", encoding="utf-8", newline="\n", closefd=True)
 
 # 2. Redireciona sys.stdout para stderr imediatamente para evitar que
 # qualquer import de dependência pesada (como lancedb, torch, etc.) polua o stdout
@@ -74,6 +76,11 @@ app = FastMCP("CodeSteer Atlas")
 # resolução do workspace pai do índice)
 INDEX_DIR_NAME = ".code-index"
 
+# Origem da última resolução do índice (cli-arg | env | discovery | cwd-fallback),
+# exposta em `atlas_status` para autodiagnóstico de configuração do cliente MCP
+# (ex.: Windows GUI lança o servidor com CWD arbitrário e a discovery falha)
+INDEX_RESOLUTION_SOURCE = "cwd-fallback"
+
 
 def resolve_index_dir(
     cli_arg: Optional[str] = None,
@@ -89,9 +96,14 @@ def resolve_index_dir(
 
     Se nenhum mecanismo resolver, retorna `DEFAULT_INDEX_DIR` relativo ao CWD
     (o caller decide como reportar a ausência do índice).
+
+    Como efeito colateral, registra a origem usada em `INDEX_RESOLUTION_SOURCE`.
     """
+    global INDEX_RESOLUTION_SOURCE
+
     if cli_arg:
         resolved = Path(cli_arg)
+        INDEX_RESOLUTION_SOURCE = "cli-arg"
         print(f"[atlas] Índice resolvido via --index-dir: {resolved}", file=sys.stderr)
         return resolved
 
@@ -99,6 +111,7 @@ def resolve_index_dir(
     env_value = env.get("ATLAS_INDEX_DIR")
     if env_value:
         resolved = Path(env_value)
+        INDEX_RESOLUTION_SOURCE = "env"
         print(f"[atlas] Índice resolvido via ATLAS_INDEX_DIR: {resolved}", file=sys.stderr)
         return resolved
 
@@ -107,12 +120,14 @@ def resolve_index_dir(
     for candidate in [current, *current.parents]:
         candidate_index = candidate / INDEX_DIR_NAME
         if candidate_index.exists():
+            INDEX_RESOLUTION_SOURCE = "discovery"
             print(
                 f"[atlas] Índice resolvido via discovery ascendente: {candidate_index}",
                 file=sys.stderr,
             )
             return candidate_index
 
+    INDEX_RESOLUTION_SOURCE = "cwd-fallback"
     print(
         "[atlas] AVISO: não foi possível resolver o diretório do índice "
         f"(--index-dir, ATLAS_INDEX_DIR e discovery a partir de {current} falharam). "
@@ -167,6 +182,7 @@ def get_status_data() -> dict:
             "embedding_backend": "fastembed",
             "storage_backend": "lancedb",
             "index_path": str(storage.index_dir.resolve()),
+            "index_resolution": INDEX_RESOLUTION_SOURCE,
             "last_indexed_at": None,
             "git_head_sha": None,
             "is_stale": False,
@@ -192,6 +208,7 @@ def get_status_data() -> dict:
             "embedding_backend": manifest.embedding_backend,
             "storage_backend": manifest.storage_backend,
             "index_path": str(storage.index_dir.resolve()),
+            "index_resolution": INDEX_RESOLUTION_SOURCE,
             "last_indexed_at": manifest.last_indexed_at,
             "git_head_sha": manifest.git_head_sha,
             "is_stale": is_stale,
@@ -200,7 +217,12 @@ def get_status_data() -> dict:
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
-        return {"index_exists": True, "error": str(e), "reindexing": reindexing}
+        return {
+            "index_exists": True,
+            "error": str(e),
+            "index_resolution": INDEX_RESOLUTION_SOURCE,
+            "reindexing": reindexing,
+        }
 
 
 # --- MCP Tools ---
@@ -413,9 +435,12 @@ def atlas_status() -> str:
     Returns:
         JSON string with `index_exists`, `total_chunks`, `repos_indexed`,
         `languages_indexed`, `embedding_model`, `embedding_backend`, `storage_backend`,
-        `index_path`, `last_indexed_at`, `git_head_sha`, `is_stale` (true when the
-        indexed git HEAD differs from the workspace's current HEAD), and `reindexing`
-        (true when another process currently holds the reindex lock for this index).
+        `index_path`, `index_resolution` (how the index directory was resolved:
+        "cli-arg" | "env" | "discovery" | "cwd-fallback" — useful to diagnose client
+        misconfiguration when `index_exists` is unexpectedly false), `last_indexed_at`,
+        `git_head_sha`, `is_stale` (true when the indexed git HEAD differs from the
+        workspace's current HEAD), and `reindexing` (true when another process
+        currently holds the reindex lock for this index).
     """
     data = get_status_data()
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)

@@ -1,3 +1,4 @@
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -47,3 +48,12 @@ def is_reindex_locked(index_dir: Path) -> bool:
         return False
     except Timeout:
         return True
+    except OSError as e:
+        # No Windows o probe pode falhar com PermissionError/OSError (lockfile
+        # read-only, antivírus segurando o handle) em vez de Timeout; o status
+        # não deve quebrar por causa do probe — assume não bloqueado e loga
+        print(
+            f"[atlas] Probe do reindex lock falhou em '{index_dir}': {e}",
+            file=sys.stderr,
+        )
+        return False

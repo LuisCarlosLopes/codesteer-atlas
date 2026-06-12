@@ -3,7 +3,13 @@ from unittest.mock import patch
 from click.testing import CliRunner
 from filelock import FileLock
 from codesteer_atlas.config import REINDEX_LOCK_FILENAME
-from codesteer_atlas.indexer import cli, index_workspace, load_atlasignore_spec, should_ignore
+from codesteer_atlas.indexer import (
+    cli,
+    get_git_head_sha,
+    index_workspace,
+    load_atlasignore_spec,
+    should_ignore,
+)
 from codesteer_atlas.storage import StorageBackend
 
 
@@ -538,3 +544,53 @@ def test_index_workspace_partial_paths_preserves_lancedb_chunk_count(tmp_path):
             "src/main.py",
             "docs/guide.md",
         }
+
+
+def test_get_git_head_sha_returns_none_and_logs_on_oserror(monkeypatch, tmp_path, capsys):
+    """`get_git_head_sha` retorna None e loga em stderr em falhas inesperadas do
+    subprocess (ex.: git fora do PATH, handle inválido no Windows), em vez de
+    engolir o erro silenciosamente."""
+
+    def raise_oserror(*args, **kwargs):
+        raise OSError("The handle is invalid")
+
+    monkeypatch.setattr("subprocess.run", raise_oserror)
+
+    assert get_git_head_sha(tmp_path) is None
+    assert "git rev-parse HEAD falhou" in capsys.readouterr().err
+
+
+def test_get_git_head_sha_silent_none_when_not_a_git_repo(monkeypatch, tmp_path, capsys):
+    """Fora de um repositório git (CalledProcessError), retorna None sem log —
+    cenário esperado, não é falha de ambiente."""
+    import subprocess
+
+    def raise_called_process_error(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+
+    monkeypatch.setattr("subprocess.run", raise_called_process_error)
+
+    assert get_git_head_sha(tmp_path) is None
+    assert capsys.readouterr().err == ""
+
+
+def test_get_git_head_sha_uses_windows_safe_subprocess_kwargs(monkeypatch, tmp_path):
+    """O subprocess do git deve redirecionar stdin, ter timeout e passar
+    creationflags (CREATE_NO_WINDOW no Windows; 0 em POSIX)."""
+    import subprocess
+
+    captured_kwargs = {}
+
+    class _FakeResult:
+        stdout = "abc123\n"
+
+    def fake_run(cmd, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert get_git_head_sha(tmp_path) == "abc123"
+    assert captured_kwargs["stdin"] == subprocess.DEVNULL
+    assert captured_kwargs["timeout"] == 10
+    assert "creationflags" in captured_kwargs

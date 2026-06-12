@@ -10,3 +10,4 @@ _codesteer/**
 .memory-bank/plans
 .memory-bank/specs
 .memory-bank/review
+.coverage

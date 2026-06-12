@@ -638,3 +638,51 @@ def test_safe_responder_respond_delegates_when_not_completed():
         asyncio.run(_safe_responder_respond(responder, "result"))
 
     assert calls == [(responder, "result")]
+
+
+def test_atlas_status_includes_index_resolution_source():
+    """`atlas_status` expõe `index_resolution` com a origem registrada pela última
+    chamada de `resolve_index_dir` (autodiagnóstico de configuração do cliente)."""
+    import codesteer_atlas.server as server_module
+
+    original_source = server_module.INDEX_RESOLUTION_SOURCE
+    try:
+        resolve_index_dir(cli_arg=None, env={"ATLAS_INDEX_DIR": "/tmp/fake-index"})
+        with (
+            patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+            patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        ):
+            result = json.loads(atlas_status())
+
+        assert result["index_resolution"] == "env"
+    finally:
+        server_module.INDEX_RESOLUTION_SOURCE = original_source
+
+
+def test_resolve_index_dir_records_resolution_source(tmp_path):
+    """`resolve_index_dir` registra a origem usada em `INDEX_RESOLUTION_SOURCE`
+    para cada mecanismo da cadeia DECISAO-002."""
+    import codesteer_atlas.server as server_module
+
+    original_source = server_module.INDEX_RESOLUTION_SOURCE
+    try:
+        resolve_index_dir(cli_arg=str(tmp_path / "cli"))
+        assert server_module.INDEX_RESOLUTION_SOURCE == "cli-arg"
+
+        resolve_index_dir(cli_arg=None, env={"ATLAS_INDEX_DIR": str(tmp_path / "env")})
+        assert server_module.INDEX_RESOLUTION_SOURCE == "env"
+
+        # Fallback é verificado antes de criar `.code-index`, para a discovery
+        # ascendente a partir de tmp_path não encontrar nada
+        isolated = tmp_path / "isolated"
+        isolated.mkdir()
+        resolve_index_dir(cli_arg=None, env={}, start_dir=isolated)
+        assert server_module.INDEX_RESOLUTION_SOURCE == "cwd-fallback"
+
+        (tmp_path / ".code-index").mkdir()
+        sub_dir = tmp_path / "a" / "b"
+        sub_dir.mkdir(parents=True)
+        resolve_index_dir(cli_arg=None, env={}, start_dir=sub_dir)
+        assert server_module.INDEX_RESOLUTION_SOURCE == "discovery"
+    finally:
+        server_module.INDEX_RESOLUTION_SOURCE = original_source
