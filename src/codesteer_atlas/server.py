@@ -437,8 +437,10 @@ def atlas_status() -> str:
     """
     Get diagnostic metadata and health status of the local vector index.
 
-    Use this to check whether the index exists and is up to date before relying on
-    `atlas_search`/`atlas_map`, or to decide whether `atlas_index` should be run.
+    Use this only for explicit diagnostics (e.g. the user asks about index health,
+    staleness, or which repos/languages are indexed) or to decide whether `atlas_index`
+    should be run. It is NOT a precondition for `atlas_search`/`atlas_map` — call those
+    directly; they raise an actionable error themselves if the index is missing.
     Never indexes anything itself.
 
     Returns:
