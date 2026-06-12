@@ -6,7 +6,7 @@ Tudo roda 100% local e offline — o código-fonte nunca é enviado para serviç
 
 ### Documentação Visual
 
-Para entender de forma visual os conceitos do Model Context Protocol (MCP), o pipeline de indexação incremental por AST, e o funcionamento da busca híbrida semântica do Atlas, consulte a [Documentação Visual & Conceitos](docs/index.html).
+Para entender de forma visual os conceitos do Model Context Protocol (MCP), o pipeline de indexação incremental por AST, e o funcionamento da busca híbrida semântica do Atlas, consulte a 📖 [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/)
 
 ## Funcionalidades
 
