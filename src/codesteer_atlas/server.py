@@ -252,11 +252,12 @@ def atlas_search(
 
     Use it to find specific implementations, where a function/feature/concept is defined,
     relevant documentation, or code/docs matching a description of a task. For a
-    structural overview of the codebase instead, use `atlas_map`. To check the index is
-    present and up to date, use `atlas_status`.
+    structural overview of the codebase instead, use `atlas_map`.
 
-    If the index does not exist yet, this raises an actionable error explaining how to
-    build it (see `atlas_index`).
+    Call this directly — do NOT call `atlas_status` first "just to check". If the index
+    does not exist yet, this raises an actionable error explaining how to build it (see
+    `atlas_index`); `atlas_status` is only for explicit diagnostics, not a precondition
+    for search.
 
     Args:
         query: The natural language search term or description of the code to find.
