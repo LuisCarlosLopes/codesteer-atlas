@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CodeSteer Atlas — Documentação Visual & Conceitos</title>
+  <meta name="description" content="Aprenda sobre o Model Context Protocol (MCP), a busca híbrida semântica local e como o CodeSteer Atlas indexa código-fonte e documentos de forma inteligente.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Hero Section -->
+  <header class="hero">
+    <div class="hero-glow"></div>
+    <div class="container">
+      <div class="badge">Constituição Local-First</div>
+      <h1>CodeSteer Atlas</h1>
+      <p class="subtitle">Servidor MCP local para busca semântica híbrida em código e documentos</p>
+      <div class="hero-actions">
+        <a href="#mcp" class="btn btn-primary">Começar a Explorar</a>
+        <a href="https://github.com/LuisCarlosLopes/codesteer-atlas" target="_blank" rel="noopener" class="btn btn-secondary">
+          <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.48 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.577.688.479C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
+          </svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Sticky Navigation -->
+  <nav class="navbar">
+    <div class="container nav-container">
+      <a href="#" class="nav-brand">Atlas Docs</a>
+      <ul class="nav-links">
+        <li><a href="#mcp">O que é MCP</a></li>
+        <li><a href="#como-funciona">Como Funciona</a></li>
+        <li><a href="#indexacao">Indexação</a></li>
+        <li><a href="#codigo-ast">Código (AST)</a></li>
+        <li><a href="#texto-docs">Texto & Docs</a></li>
+        <li><a href="#busca-hibrida">Busca Hibrida</a></li>
+        <li><a href="#tools">Tools</a></li>
+        <li><a href="#local-first">Local-First</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="container content-grid">
+
+    <!-- 1. O QUE É MCP -->
+    <section id="mcp" class="card-section">
+      <div class="section-header">
+        <span class="section-num">01</span>
+        <h2>O que é o Model Context Protocol (MCP)?</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          O <strong>Model Context Protocol (MCP)</strong> é um protocolo aberto de comunicação bidirecional criado para padronizar a forma como Modelos de Linguagem (LLMs), rodando em clientes como editores de código (Cursor, VS Code, Claude Desktop, Cline), interagem de forma segura com fontes de dados e ferramentas locais ou remotas.
+        </p>
+        <p>
+          Em vez de cada LLM ou IDE escrever integrações proprietárias para ler arquivos, pesquisar em bancos de dados ou executar comandos, eles atuam como <strong>Clientes MCP</strong> genéricos que se conectam a um ou mais <strong>Servidores MCP</strong> por canais estruturados.
+        </p>
+
+        <div class="diagram-container">
+          <div class="diagram-title">Arquitetura de Comunicação do CodeSteer Atlas</div>
+          <svg class="diagram-svg" viewBox="0 0 800 240" xmlns="http://www.w3.org/2000/svg">
+            <!-- Defs for markers and gradients -->
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+              </marker>
+              <linearGradient id="gradient-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#1e1b4b" />
+                <stop offset="100%" stop-color="#312e81" />
+              </linearGradient>
+              <linearGradient id="gradient-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#0f172a" />
+                <stop offset="100%" stop-color="#1e293b" />
+              </linearGradient>
+              <linearGradient id="gradient-green" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#064e3b" />
+                <stop offset="100%" stop-color="#065f46" />
+              </linearGradient>
+            </defs>
+
+            <!-- Background grid lines -->
+            <path d="M 0 120 L 800 120" stroke="#1e293b" stroke-dasharray="4,4" />
+
+            <!-- Client Node -->
+            <rect x="30" y="50" width="180" height="140" rx="10" fill="url(#gradient-blue)" stroke="#4f46e5" stroke-width="2" />
+            <text x="120" y="85" fill="#f8fafc" font-size="14" font-weight="bold" text-anchor="middle">Cliente IA (IDE)</text>
+            <text x="120" y="115" fill="#94a3b8" font-size="12" text-anchor="middle">Cursor / Claude Code</text>
+            <text x="120" y="135" fill="#94a3b8" font-size="12" text-anchor="middle">VS Code / Cline / Cline</text>
+            <rect x="50" y="155" width="140" height="22" rx="4" fill="#312e81" />
+            <text x="120" y="170" fill="#38bdf8" font-size="11" font-weight="bold" text-anchor="middle">Orquestra Chamadas</text>
+
+            <!-- Connection 1 -->
+            <path d="M 210 120 L 320 120" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)" />
+            <text x="265" y="105" fill="#38bdf8" font-size="11" font-weight="bold" text-anchor="middle">stdio (JSON-RPC)</text>
+            <text x="265" y="142" fill="#64748b" font-size="10" text-anchor="middle">Canal Isolado</text>
+
+            <!-- Atlas Server Node -->
+            <rect x="330" y="50" width="200" height="140" rx="10" fill="url(#gradient-cyan)" stroke="#0ea5e9" stroke-width="2" />
+            <text x="430" y="85" fill="#f8fafc" font-size="14" font-weight="bold" text-anchor="middle">CodeSteer Atlas (Servidor)</text>
+            <text x="430" y="115" fill="#e2e8f0" font-size="12" text-anchor="middle">FastMCP Python Server</text>
+            <rect x="350" y="140" width="160" height="35" rx="6" fill="#0f172a" stroke="#1e293b" />
+            <text x="430" y="155" fill="#06b6d4" font-size="10" font-weight="bold" text-anchor="middle">Fastembed (all-MiniLM-L6)</text>
+            <text x="430" y="167" fill="#64748b" font-size="9" text-anchor="middle">ONNX Runtime 100% Local</text>
+
+            <!-- Connection 2 -->
+            <path d="M 530 120 L 610 120" stroke="#34d399" stroke-width="2" marker-end="url(#arrow)" />
+            <text x="570" y="105" fill="#34d399" font-size="11" font-weight="bold" text-anchor="middle">Embeddings</text>
+            <text x="570" y="142" fill="#64748b" font-size="10" text-anchor="middle">Busca Híbrida</text>
+
+            <!-- Database Node -->
+            <rect x="620" y="50" width="150" height="140" rx="10" fill="url(#gradient-green)" stroke="#10b981" stroke-width="2" />
+            <text x="695" y="90" fill="#f8fafc" font-size="14" font-weight="bold" text-anchor="middle">LanceDB Local</text>
+            <text x="695" y="120" fill="#a7f3d0" font-size="12" text-anchor="middle">Tabela 'chunks'</text>
+            <text x="695" y="140" fill="#64748b" font-size="11" text-anchor="middle">Vetor + FTS (Tantivy)</text>
+            <text x="695" y="165" fill="#34d399" font-size="10" font-weight="bold" text-anchor="middle">.code-index/</text>
+          </svg>
+        </div>
+
+        <div class="note-box info">
+          <strong>Detalhe técnico crucial:</strong> O transporte oficial do CodeSteer Atlas utiliza <strong>stdio</strong> (Standard Input/Output) e mensagens serializadas em <strong>JSON-RPC 2.0</strong>, não requisições HTTP tradicionais. Isso elimina overhead de conexões de rede e simplifica o ciclo de vida do processo local.
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. COMO FUNCIONA O PROTOCOLO -->
+    <section id="como-funciona" class="card-section">
+      <div class="section-header">
+        <span class="section-num">02</span>
+        <h2>Como o protocolo funciona na prática?</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          O ciclo de vida de uma conexão MCP local é simples, robusto e estruturado em 3 fases principais controladas pelo host (a IDE):
+        </p>
+
+        <div class="flow-steps">
+          <div class="flow-step">
+            <div class="step-badge">1</div>
+            <h4>Inicialização (Handshake)</h4>
+            <p>O cliente inicia o processo do servidor e troca informações de capacidades (versão do protocolo, ferramentas e recursos disponíveis).</p>
+          </div>
+          <div class="flow-step">
+            <div class="step-badge">2</div>
+            <h4>Descoberta (Listing)</h4>
+            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 4 ferramentas (ex: <code>atlas_search</code>).</p>
+          </div>
+          <div class="flow-step">
+            <div class="step-badge">3</div>
+            <h4>Execução (Tool Call)</h4>
+            <p>Quando a IA precisa de informações do repositório, envia um JSON-RPC chamando uma tool. O Atlas processa, consulta o LanceDB localmente e retorna o JSON estruturado.</p>
+          </div>
+        </div>
+
+        <h3>Conceitos Primitivos do MCP</h3>
+        <ul class="concept-list">
+          <li><strong>Tools (Ações):</strong> Funções executáveis com argumentos declarados que a IA pode invocar. Possuem schemas definidos via Pydantic para validação automática de entrada.</li>
+          <li><strong>Resources (Dados passivos):</strong> URIs que servem como arquivos ou streams somente-leitura de dados (ex: o Atlas expõe o resource <code>atlas://status</code> contendo metadados de diagnóstico).</li>
+          <li><strong>Prompts (Templates):</strong> Modelos de prompts pré-configurados que ajudam o usuário a estruturar fluxos complexos de chat.</li>
+        </ul>
+
+        <div class="code-example">
+          <div class="code-title">Exemplo de Mensagem JSON-RPC 2.0 — Tool Call para atlas_search</div>
+          <pre><code>{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "atlas_search",
+    "arguments": {
+      "query": "sistema de autenticação JWT",
+      "top_k": 3
+    }
+  },
+  "id": 42
+}</code></pre>
+        </div>
+
+        <div class="note-box warning">
+          <strong>Isolamento da Stream de Stdout:</strong> Como o protocolo JSON-RPC usa a saída padrão (stdout) para as respostas, o Atlas <strong>redireciona imediatamente todo o sys.stdout para o sys.stderr no momento do import das bibliotecas</strong>. Apenas no momento final de inicialização do FastMCP a stream limpa do stdout é restaurada. Logs de debug ou saídas nativas de C/Rust (onnxruntime, tantivy) vão para <code>stderr</code>, impedindo a corrupção do JSON-RPC!
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. PIPELINE DE INDEXAÇÃO -->
+    <section id="indexacao" class="card-section">
+      <div class="section-header">
+        <span class="section-num">03</span>
+        <h2>O Pipeline de Indexação do Atlas</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          Para responder a buscas semânticas instantâneas sem gastar tokens, o CodeSteer Atlas constrói um índice vetorial e textual local chamado <code>.code-index</code>. O processo de indexação segue <strong>6 etapas factuais e lineares</strong> executadas pelo <code>indexer.py</code>:
+        </p>
+
+        <div class="pipeline-grid">
+          <div class="pipeline-card">
+            <span class="step-num">1</span>
+            <h4>Varredura</h4>
+            <p>Busca recursiva de arquivos no workspace baseado em <code>SUPPORTED_EXTENSIONS</code>.</p>
+          </div>
+          <div class="pipeline-card">
+            <span class="step-num">2</span>
+            <h4>Filtros</h4>
+            <p>Descarta caminhos ignorados pela configuração interna, <code>.gitignore</code> ou arquivo local <code>.atlasignore</code>.</p>
+          </div>
+          <div class="pipeline-card">
+            <span class="step-num">3</span>
+            <h4>Hash SHA-256</h4>
+            <p>Calcula o hash do conteúdo do arquivo para comparar com o <code>manifest.json</code> e permitir indexação incremental.</p>
+          </div>
+          <div class="pipeline-card">
+            <span class="step-num">4</span>
+            <h4>Chunking</h4>
+            <p>Quebra o arquivo em blocos lógicos autossuficientes (~256 tokens) dependendo da extensão (AST ou Texto).</p>
+          </div>
+          <div class="pipeline-card">
+            <span class="step-num">5</span>
+            <h4>Embeddings</h4>
+            <p>Gera o vetor semântico de 384 dimensões usando o modelo <code>all-MiniLM-L6-v2</code> através da biblioteca <code>fastembed</code>.</p>
+          </div>
+          <div class="pipeline-card">
+            <span class="step-num">6</span>
+            <h4>LanceDB</h4>
+            <p>Salva os chunks, vetores e metadados no banco e reconstrói o índice FTS Tantivy na coluna de conteúdo.</p>
+          </div>
+        </div>
+
+        <div class="grid-2col">
+          <div>
+            <h3>Indexação Incremental</h3>
+            <p>
+              A indexação padrão é 100% incremental baseada em arquivos. Ela compara o hash SHA-256 atual de cada arquivo com o mapa persistido em <code>manifest.json</code>.
+            </p>
+            <ul>
+              <li><strong>Novo arquivo:</strong> Chunking → Embeddings → Salva no banco.</li>
+              <li><strong>Arquivo alterado:</strong> Remove chunks antigos associados ao caminho no LanceDB → Gera novos chunks → Salva.</li>
+              <li><strong>Arquivo deletado:</strong> Apenas remove os chunks antigos correspondentes no LanceDB.</li>
+              <li><strong>Forçar Reconstrução:</strong> O parâmetro <code>--full</code> reconstrói completamente a tabela, sobrescrevendo todo o banco.</li>
+            </ul>
+          </div>
+          <div class="diagram-mini-container">
+            <div class="diagram-title">Composição dos Componentes Internos</div>
+            <svg viewBox="0 0 360 220" xmlns="http://www.w3.org/2000/svg" class="mini-svg">
+              <rect x="10" y="10" width="340" height="200" rx="8" fill="#111827" stroke="#1f2937" stroke-width="2"/>
+              
+              <!-- CLI / MCP Client -->
+              <rect x="25" y="25" width="130" height="40" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="1.5" />
+              <text x="90" y="49" fill="#e2e8f0" font-size="11" font-weight="bold" text-anchor="middle">CLI: atlas-index</text>
+              
+              <rect x="205" y="25" width="130" height="40" rx="5" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5" />
+              <text x="270" y="49" fill="#e2e8f0" font-size="11" font-weight="bold" text-anchor="middle">MCP: atlas_index</text>
+              
+              <!-- Core Indexer -->
+              <rect x="75" y="90" width="210" height="40" rx="5" fill="#0f172a" stroke="#f43f5e" stroke-width="2" />
+              <text x="180" y="114" fill="#f8fafc" font-size="12" font-weight="bold" text-anchor="middle">indexer.py / index_workspace()</text>
+              
+              <!-- Helpers -->
+              <rect x="25" y="155" width="90" height="40" rx="4" fill="#022c22" stroke="#10b981" />
+              <text x="70" y="179" fill="#a7f3d0" font-size="10" text-anchor="middle">ASTChunker</text>
+              
+              <rect x="135" y="155" width="90" height="40" rx="4" fill="#180c2e" stroke="#8b5cf6" />
+              <text x="180" y="179" fill="#ddd6fe" font-size="10" text-anchor="middle">EmbeddingEngine</text>
+              
+              <rect x="245" y="155" width="90" height="40" rx="4" fill="#0c2540" stroke="#0284c7" />
+              <text x="290" y="179" fill="#bae6fd" font-size="10" text-anchor="middle">StorageBackend</text>
+
+              <!-- Connection lines -->
+              <path d="M 90 65 L 90 90" stroke="#64748b" stroke-width="1" />
+              <path d="M 270 65 L 270 90" stroke="#64748b" stroke-width="1" />
+              <path d="M 180 130 L 70 155" stroke="#f43f5e" stroke-width="1" />
+              <path d="M 180 130 L 180 155" stroke="#f43f5e" stroke-width="1" />
+              <path d="M 180 130 L 290 155" stroke="#f43f5e" stroke-width="1" />
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. INDEXAÇÃO DE CÓDIGO (AST) -->
+    <section id="codigo-ast" class="card-section">
+      <div class="section-header">
+        <span class="section-num">04</span>
+        <h2>Indexação de Código com parsing AST</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          Diferente de sistemas ingênuos de busca que quebram o código baseados em números de linhas fixas (o que pode cortar uma função ao meio e quebrar sua coerência lógica), o CodeSteer Atlas utiliza um analisador sintático completo: o <strong>Tree-sitter</strong>.
+        </p>
+        <p>
+          O analisador lê o código-fonte de linguagens como Python, JavaScript, TypeScript, Go, Java, C#, C++, Rust, Kotlin, etc., e monta uma <strong>Árvore Sintática Abstrata (AST)</strong>.
+        </p>
+
+        <div class="grid-2col">
+          <div>
+            <h3>Características da indexação AST</h3>
+            <ul>
+              <li><strong>Granularidade Semântica:</strong> O gerador de chunks (<code>ASTChunker</code>) extrai apenas nós relevantes de escopo como classes (<code>class</code>), funções (<code>function</code>) e métodos (<code>method</code>).</li>
+              <li><strong>Nomes Hierárquicos:</strong> Chunks aninhados recebem nomenclatura estruturada refletindo o escopo, facilitando a identificação (ex: um método dentro de uma classe vira <code>ClasseExemplo.nome_do_metodo</code>).</li>
+              <li><strong>Fallback Seguro:</strong> Se o arquivo não contiver símbolos identificáveis (scripts sequenciais, arquivos de configuração), o módulo cria um único chunk do tipo <code>module</code> contendo todo o arquivo.</li>
+              <li><strong>Truncamento Inteligente:</strong> Quando um chunk excede o limite estimado do modelo (~1000 caracteres), o Atlas preserva as 7 primeiras linhas (contendo assinatura e docstring) e as 3 últimas linhas (retorno), inserindo uma marcação de truncamento no meio. Isso economiza contexto e mantém a assinatura visível para a IA.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="diagram-title">Estrutura de Chunks AST de um Arquivo Python</div>
+            <div class="code-tree">
+              <span class="tree-root">📁 auth_service.py (Arquivo de Código)</span>
+              <div class="tree-branch">
+                <span class="tree-node class">📦 class AuthService (Linhas 5-42)</span>
+                <div class="tree-leaf">
+                  <span class="tree-node method">⚙️ method AuthService.__init__ (Linhas 6-8)</span>
+                </div>
+                <div class="tree-leaf">
+                  <span class="tree-node method">⚙️ method AuthService.login (Linhas 10-25)</span>
+                </div>
+                <div class="tree-leaf">
+                  <span class="tree-node method">⚙️ method AuthService.logout (Linhas 27-42) [Truncado]</span>
+                </div>
+              </div>
+              <div class="tree-branch">
+                <span class="tree-node function">⚙️ function hash_password (Linhas 45-50)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. INDEXAÇÃO DE TEXTO E DOCUMENTOS -->
+    <section id="texto-docs" class="card-section">
+      <div class="section-header">
+        <span class="section-num">05</span>
+        <h2>Indexação de Texto e Documentos</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          Arquivos de documentação (como Markdown ou arquivos de texto puro) ou scripts sem estrutura orientada a objetos (como arquivos SQL ou JSON) não possuem uma hierarquia clássica de classes e métodos. Por isso, o <code>ASTChunker</code> adota estratégias específicas e otimizadas para cada tipo de formato:
+        </p>
+
+        <h3>Estratégias de Chunking por Formato</h3>
+        <div class="table-responsive">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>Tipo de Arquivo</th>
+                <th>Estratégia Principal</th>
+                <th>Tipo de Escopo</th>
+                <th>Comportamento em Blocos Grandes (>1000 caracteres)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Código AST</strong><br><code>.py, .js, .go, .java, .cs...</code></td>
+                <td>Nós da árvore sintática (Classes, Funções, Métodos) via Tree-sitter</td>
+                <td><code>class</code>, <code>method</code>, <code>function</code></td>
+                <td>Truncamento inteligente: preserva 7 linhas iniciais + 3 finais, cortando o meio.</td>
+              </tr>
+              <tr>
+                <td><strong>Markdown</strong><br><code>.md</code></td>
+                <td>Divisão estrutural baseada em cabeçalhos (<code>#</code>, <code>##</code>, <code>###</code>)</td>
+                <td><code>section</code></td>
+                <td>Quebra recursiva em múltiplos sub-chunks divididos por parágrafos (<code>\n\n</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>SQL</strong><br><code>.sql</code></td>
+                <td>Identificação de declarações (Statements) via parser Tree-sitter SQL</td>
+                <td><code>table</code>, <code>view</code>, <code>query</code>...</td>
+                <td>Statements imensos são cortados em múltiplos blocos respeitando as quebras de linha.</td>
+              </tr>
+              <tr>
+                <td><strong>Texto / Outros</strong><br><code>.txt, .xml, .json, .yaml...</code></td>
+                <td>Quebra baseada em parágrafos ou linhas estruturadas</td>
+                <td><code>chunk</code></td>
+                <td>Agrupamento sequencial de parágrafos acumulando até o limite de 1000 caracteres.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="supported-langs">
+          <h3>Amostra de Extensões Suportadas (SUPPORTED_EXTENSIONS)</h3>
+          <div class="lang-tags">
+            <span class="tag">python (.py)</span>
+            <span class="tag">javascript (.js, .jsx)</span>
+            <span class="tag">typescript (.ts, .tsx)</span>
+            <span class="tag">go (.go)</span>
+            <span class="tag">rust (.rs)</span>
+            <span class="tag">csharp (.cs)</span>
+            <span class="tag">java (.java)</span>
+            <span class="tag">c/c++ (.c, .cpp, .h)</span>
+            <span class="tag">sql (.sql)</span>
+            <span class="tag">markdown (.md)</span>
+            <span class="tag">text (.txt)</span>
+            <span class="tag">yaml (.yaml, .yml)</span>
+            <span class="tag">json (.json)</span>
+            <span class="tag">toml (.toml)</span>
+            <span class="tag">html/css (.html, .css)</span>
+            <span class="tag">xml (.xml)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. BUSCA HÍBRIDA E EMBEDDINGS -->
+    <section id="busca-hibrida" class="card-section">
+      <div class="section-header">
+        <span class="section-num">06</span>
+        <h2>Busca Híbrida e Embeddings Locais</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          Para obter a máxima precisão nas respostas sem perder a velocidade e o contexto sintático, o CodeSteer Atlas utiliza um motor de <strong>Busca Híbrida</strong> de dois braços paralelos. A busca combina o melhor de duas abordagens:
+        </p>
+
+        <div class="search-arms">
+          <div class="arm-card vector">
+            <h4>1. Braço Semântico (Vetor)</h4>
+            <p><strong>Conceito:</strong> Busca por similaridade de cosseno nos embeddings gerados.</p>
+            <p><strong>Modelo:</strong> <code>all-MiniLM-L6-v2</code> local via biblioteca <code>fastembed</code> (ONNX Runtime, 384 dimensões).</p>
+            <p><strong>Vantagem:</strong> Encontra conceitos equivalentes mesmo sem palavras-chave idênticas (ex: busca por "inicializar banco" encontra o método <code>Database.connect()</code>).</p>
+          </div>
+          <div class="arm-card lexical">
+            <h4>2. Braço Léxico (Full-Text Search)</h4>
+            <p><strong>Conceito:</strong> Busca de texto completo baseada no algoritmo tradicional BM25 (via Tantivy integrado ao LanceDB).</p>
+            <p><strong>Mecanismo:</strong> Índice invertido clássico construído na coluna de conteúdo dos chunks.</p>
+            <p><strong>Vantagem:</strong> Encontra termos específicos, siglas de métodos ou strings exatas (ex: buscar por um código de erro específico como <code>ERR_AUTH_FAILED</code>).</p>
+          </div>
+        </div>
+
+        <h3>Fusão de Rankings: Reciprocal Rank Fusion (RRF)</h3>
+        <p>
+          Após coletar de forma independente as listas de melhores candidatos de cada braço (configurado pela constante <code>CANDIDATES_LIMIT = 50</code>), o Atlas funde os resultados em um único ranking unificado usando o algoritmo matemático <strong>RRF (Reciprocal Rank Fusion)</strong>:
+        </p>
+        
+        <div class="formula-box">
+          <div class="formula">Score RRF = &sum; <sub>m &in; M</sub> &frac;1;{rank<sub>m</sub>(c) + k}</div>
+          <p>Onde <strong>c</strong> é o chunk de código, <strong>M</strong> representa os sistemas de busca (Vetorial e FTS), <strong>rank<sub>m</sub>(c)</strong> é a posição do chunk no ranking daquele sistema (1-indexed), e <strong>k</strong> é a constante de suavização configurada como <code>60</code> (<code>RRF_K = 60</code>).</p>
+        </div>
+
+        <p>
+          Dessa forma, arquivos que aparecem bem posicionados em ambos os motores ganham prioridade absoluta, garantindo um resultado final superior a qualquer um dos métodos isolados.
+        </p>
+      </div>
+    </section>
+
+    <!-- 7. TOOLS MCP DO ATLAS -->
+    <section id="tools" class="card-section">
+      <div class="section-header">
+        <span class="section-num">07</span>
+        <h2>As 4 Ferramentas (Tools) do Atlas</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          O servidor MCP do Atlas expõe quatro ações principais que a IA consome automaticamente para gerenciar o contexto do projeto:
+        </p>
+
+        <div class="tools-grid">
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-name">atlas_search</span>
+              <span class="tool-type">Busca Híbrida</span>
+            </div>
+            <p class="tool-desc">
+              Realiza a busca semântica híbrida (vetorial + léxica) no índice de chunks locais. A IA utiliza isso sempre que precisa localizar códigos, conceitos ou regras no repositório.
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-name">atlas_map</span>
+              <span class="tool-type">Arquitetura</span>
+            </div>
+            <p class="tool-desc">
+              Retorna um mapa estruturado em árvore (hierárquico) contendo apenas os nomes das classes e métodos declarados no projeto até certa profundidade. Ideal para dar um panorama geral sem estourar limite de tokens.
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> <code>repo</code>, <code>path_prefix</code>, <code>max_depth</code>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-name">atlas_status</span>
+              <span class="tool-type">Diagnóstico</span>
+            </div>
+            <p class="tool-desc">
+              Retorna metadados de diagnóstico sobre o índice local: se existe, total de chunks, repositórios indexados, modelo ativo, data da última indexação, hash HEAD do Git correspondente, e se o índice está obsoleto (stale).
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> Sem parâmetros
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-name">atlas_index</span>
+              <span class="tool-type">Indexador</span>
+            </div>
+            <p class="tool-desc">
+              Solicita a indexação ou reindexação incremental ou completa do workspace ativo. Pode ser rodado com <code>dry_run=true</code> para apresentar uma prévia dos arquivos elegíveis antes de iniciar o processo de embeddings.
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> <code>workspace</code>, <code>paths</code>, <code>full</code>, <code>dry_run</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. PRINCÍPIO LOCAL-FIRST -->
+    <section id="local-first" class="card-section">
+      <div class="section-header">
+        <span class="section-num">08</span>
+        <h2>Princípio Constitucional: 100% Local-First</h2>
+      </div>
+      <div class="section-body">
+        <div class="local-first-box">
+          <div class="shield-icon">🛡️</div>
+          <div class="local-first-text">
+            <h3>Soberania e Privacidade de Código</h3>
+            <p>
+              Em conformidade absoluta com o artigo I da constituição do CodeSteer Atlas (<code>.memory-bank/constitution.md</code>), <strong>todo o processamento de código-fonte e documentação é realizado de forma local e offline na máquina do usuário</strong>.
+            </p>
+            <p>
+              Nenhum fragmento de código, nome de classe ou comentário é enviado para APIs de terceiros para fins de vetorização ou persistência. O modelo de embeddings (<code>all-MiniLM-L6-v2</code>) é executado localmente via runtime ONNX na CPU da máquina, e o banco de dados LanceDB opera de forma embutida, salvando arquivos puramente locais na pasta <code>.code-index/</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="cta-box">
+          <h3>Pronto para integrar ao seu fluxo de trabalho?</h3>
+          <p>Instale o CodeSteer Atlas localmente, registre-o no seu cliente MCP predileto e explore o poder da busca híbrida rápida e privada.</p>
+          <div class="cta-actions">
+            <a href="https://github.com/LuisCarlosLopes/codesteer-atlas#readme" target="_blank" rel="noopener" class="btn btn-primary">Ver Guia de Instalação</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="main-footer">
+    <div class="container">
+      <p>CodeSteer Atlas — Documentação Viva. Rodando 100% local-first.</p>
+      <p class="footer-sub">Criado em inglês com comentários internos e documentação oficial em português.</p>
+    </div>
+  </footer>
+
+</body>
+</html>

@@ -11,3 +11,4 @@ _codesteer/**
 .memory-bank/specs
 .memory-bank/review
 .coverage
+.DS_Store

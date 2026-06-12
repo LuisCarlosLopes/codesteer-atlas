@@ -239,13 +239,21 @@ def atlas_search(
     limit: Optional[int] = None,
 ) -> str:
     """
-    Perform a semantic hybrid search on the indexed source code.
+    Search code AND documents in the project's local index — your primary tool whenever
+    you need to find, explore or investigate ANYTHING in this project.
 
-    Combines vector similarity (cosine) and full-text keyword search (BM25) over
-    pre-indexed code chunks (classes, functions, methods), fusing both rankings via
-    Reciprocal Rank Fusion (RRF). Use this to find specific implementations, where a
-    function/feature/concept is defined, or code matching a natural-language description
-    of a task. For a structural overview of the codebase instead, use `atlas_map`.
+    Reach for this FIRST, before broad file reads or grep, any time you need to locate
+    where something lives, understand an unfamiliar area, or gather context for a task.
+    It runs a semantic hybrid search (vector cosine similarity + BM25 full-text), fused
+    via Reciprocal Rank Fusion (RRF), over pre-indexed chunks of both source code
+    (classes, functions, methods) and documents (Markdown, text, config files such as
+    JSON/YAML/TOML). Pass a natural-language description of what you're looking for or
+    exact symbols/strings.
+
+    Use it to find specific implementations, where a function/feature/concept is defined,
+    relevant documentation, or code/docs matching a description of a task. For a
+    structural overview of the codebase instead, use `atlas_map`. To check the index is
+    present and up to date, use `atlas_status`.
 
     If the index does not exist yet, this raises an actionable error explaining how to
     build it (see `atlas_index`).
@@ -341,8 +349,8 @@ def atlas_map(
     Provides a compact, token-efficient overview of the codebase's architecture and
     logical structure. Use this to understand how the project is organized, list
     classes/functions/methods within folders, or find entrypoints without retrieving
-    full file contents. To find a specific implementation or concept instead, use
-    `atlas_search`.
+    full file contents. To find a specific implementation, concept, or document instead
+    — or to explore/investigate any area of the project — use `atlas_search`.
 
     If the index does not exist yet, this raises an actionable error explaining how to
     build it (see `atlas_index`).

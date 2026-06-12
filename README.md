@@ -4,6 +4,10 @@ Servidor MCP (Model Context Protocol) local para busca semântica em bases de c�
 
 Tudo roda 100% local e offline — o código-fonte nunca é enviado para serviços externos.
 
+### Documentação Visual
+
+Para entender de forma visual os conceitos do Model Context Protocol (MCP), o pipeline de indexação incremental por AST, e o funcionamento da busca híbrida semântica do Atlas, consulte a [Documentação Visual & Conceitos](docs/index.html).
+
 ## Funcionalidades
 
 - **Indexação por AST (Tree-sitter)**: extrai classes, funções e métodos como chunks de contexto coerentes, em vez de blocos arbitrários de linhas.
@@ -147,6 +151,8 @@ Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto ind
 | `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness etc.). |
 
 Também expõe o recurso somente leitura `atlas://status`.
+
+
 
 Para reindexar após mudanças no código, rode novamente o comando de [indexação](#4-reindexar-depois) (incremental por padrão) ou peça ao agente para usar a tool `atlas_index`.
 

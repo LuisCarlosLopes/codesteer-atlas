@@ -331,6 +331,15 @@ def test_atlas_index_docstring_instructs_asking_user():
     assert "dry_run" in doc
 
 
+def test_atlas_search_docstring_instructs_proactive_use():
+    """Regressão de contrato: a docstring deve orientar uso proativo e citar documentos."""
+    doc = (atlas_search.__doc__ or "").lower()
+    # orientação de uso proativo (explorar/investigar/primeiro)
+    assert any(k in doc for k in ("explore", "investigate", "first"))
+    # escopo cobre documentos, não só código-fonte
+    assert "document" in doc
+
+
 def test_background_reindex_skips_when_no_index(tmp_path, capsys):
     """Sem índice existente, `_spawn_background_reindex` não inicia subprocesso e loga 'pulando'."""
     with (
