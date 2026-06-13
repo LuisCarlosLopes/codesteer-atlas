@@ -1,6 +1,6 @@
 [project]
 name = "codesteer-atlas"
-version = "1.3.0"
+version = "1.4.0"
 description = "Servidor MCP local para busca semântica em bases de código usando LanceDB e Tree-sitter"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

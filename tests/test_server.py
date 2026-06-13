@@ -399,6 +399,192 @@ def test_atlas_search_include_content_false_still_includes_references():
         ]
 
 
+def test_atlas_search_wikilink_resolved_via_manifest_files():
+    """[[mcp-server]] com manifest.files contendo 1 mcp-server.md resolve file_path."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="Ver [[mcp-server]] para detalhes.",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"docs/mcp-server.md": "sha_1"}}
+    )
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {"file_path": "docs/mcp-server.md", "anchor": None, "resolved_section": None}
+        ]
+
+
+def test_atlas_search_wikilink_ambiguous_returns_candidates():
+    """[[mcp-server]] com 2 arquivos mcp-server.md em manifest.files retorna candidates e file_path=null."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="[[mcp-server]]",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={
+            "files": {
+                "docs/a/mcp-server.md": "sha_1",
+                "docs/b/mcp-server.md": "sha_2",
+            }
+        }
+    )
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": None,
+                "anchor": None,
+                "resolved_section": None,
+                "candidates": ["docs/a/mcp-server.md", "docs/b/mcp-server.md"],
+            }
+        ]
+
+
+def test_atlas_search_wikilink_with_alias_includes_alias_field():
+    """[[mcp-server|Servidor MCP]] inclui o campo alias em markdown_references."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="[[mcp-server|Servidor MCP]]",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"docs/mcp-server.md": "sha_1"}}
+    )
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": "docs/mcp-server.md",
+                "anchor": None,
+                "resolved_section": None,
+                "alias": "Servidor MCP",
+            }
+        ]
+
+
+def test_atlas_search_wikilink_with_anchor_resolves_section():
+    """[[mcp-server#Visão Geral]] com seção indexada resolve resolved_section."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="[[mcp-server#Visão Geral]]",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"docs/mcp-server.md": "sha_1"}}
+    )
+    mock_sections = [
+        {"scope_type": "section", "scope_name": "Visão Geral"},
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
+            return_value=mock_sections,
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": "docs/mcp-server.md",
+                "anchor": "Visão Geral",
+                "resolved_section": "Visão Geral",
+            }
+        ]
+
+
 def test_atlas_map_generation():
     """
     Testa o retorno da ferramenta atlas_map formatando os chunks

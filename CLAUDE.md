@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Codebase Search with Codesteer-Atlas (MCP)
+
+This repository is indexed with `codesteer-atlas`. Use MCP **before** `grep`, `rg`, `find`, `Glob`, or bulk file reading to locate or explore code.
+
+| Purpose | Tool |
+| --- | --- |
+| Find where a function, class, method, or concept is implemented | `atlas_search` |
+| Understand the project structure without reading entire files | `atlas_map` |
+| Check if the index exists and is up-to-date | `atlas_status` |
+| Reindex after major changes or outdated index | `atlas_index` |
+
+### Best practices in `atlas_search`
+- Use `path_prefix` to restrict to the relevant subdirectory (e.g., `src/services`).
+- Use `language` to filter by language when the context allows.
+- Use `include_content=false` to save tokens in discovery searches.
+- Reserve `grep`/`Read` for exact literal matches (symbol names, error strings) **after** Atlas indicates the correct files.
+
+### When to use terminal / Read / Grep directly
+- Git, CI, running tests (`jest`, `tsc`), installing deps.
+- File already indicated with exact path by the user — direct `Read`.
+- Editing, diffing, committing — normal file tools.
+- MCP unavailable, authentication error, or empty/outdated index.
+
+### Outdated index
+
+1. Run `atlas_status` to confirm.
+2. If necessary, reindex with `atlas_index`.
+3. Only then use `grep`/`Read` as a point-in-time fallback and reindex after the session.
+
 ## Project
 
 CodeSteer Atlas: a local MCP (Model Context Protocol) server providing semantic hybrid code search over a codebase. It indexes source files via Tree-sitter AST parsing into symbol-level chunks (classes/functions/methods), generates embeddings locally with `fastembed` (ONNX, `all-MiniLM-L6-v2`, 384 dims), and stores them in an embedded LanceDB database. Search combines vector similarity (cosine) and BM25 full-text search, fused via Reciprocal Rank Fusion (RRF).
@@ -12,12 +41,12 @@ Everything runs 100% locally and offline — no source code is ever sent to exte
 
 **Always use the `codesteer-atlas` MCP server** when you need to search or explore this codebase — do not rely on broad file reads, `grep`, or built-in semantic search as the primary discovery path.
 
-| Goal | Tool |
-|------|------|
+| Goal                                                            | Tool           |
+| --------------------------------------------------------------- | -------------- |
 | Find where a function, class, method, or concept is implemented | `atlas_search` |
-| Understand project structure without reading full files | `atlas_map` |
-| Check whether the index exists and is up to date | `atlas_status` |
-| Reindex after large changes or when status reports stale | `atlas_index` |
+| Understand project structure without reading full files         | `atlas_map`    |
+| Check whether the index exists and is up to date                | `atlas_status` |
+| Reindex after large changes or when status reports stale        | `atlas_index`  |
 
 Use `path_prefix`, `language`, and `include_content=false` on `atlas_search` to narrow scope and save tokens. Reserve exact literal matches (symbol names, error strings) for `grep`/`Read` only after Atlas has pointed you to the right files.
 

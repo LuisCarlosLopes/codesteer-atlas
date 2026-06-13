@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import json
+import posixpath
 import subprocess
 import time
 from pathlib import Path, PurePath
@@ -324,6 +325,14 @@ def atlas_search(
     # repetidos ao resolver #anchor de múltiplos links para o mesmo .md [F]
     sections_cache: dict = {}
 
+    # Mapa stem (lowercase, sem .md) -> paths .md, para resolver wikilinks
+    # "bare" ([[mcp-server]]) globalmente contra manifest.files [F]
+    name_to_paths: dict = {}
+    for file_path in manifest.files:
+        if file_path.lower().endswith(".md"):
+            stem = posixpath.basename(file_path)[: -len(".md")].lower()
+            name_to_paths.setdefault(stem, []).append(file_path)
+
     serialized_results = []
     for r in results:
         item = {
@@ -341,28 +350,33 @@ def atlas_search(
         # Enriquece resultados markdown com referências a outros .md detectadas
         # no conteúdo, resolvendo #anchor contra seções já indexadas (Seção 4.2 do plan.md)
         if r.language == "markdown":
-            targets = extract_markdown_link_targets(r.content, r.file_path)
+            targets = extract_markdown_link_targets(
+                r.content, r.file_path, name_to_paths=name_to_paths
+            )
             if targets:
                 markdown_references = []
-                for resolved_path, anchor in targets:
+                for target in targets:
                     resolved_section = None
-                    if anchor is not None:
-                        if resolved_path not in sections_cache:
-                            sections_cache[resolved_path] = storage.get_sections_by_file_path(
-                                resolved_path
+                    if target.anchor is not None and target.file_path is not None:
+                        if target.file_path not in sections_cache:
+                            sections_cache[target.file_path] = storage.get_sections_by_file_path(
+                                target.file_path
                             )
-                        target_slug = slugify_heading(anchor)
-                        for section in sections_cache[resolved_path]:
+                        target_slug = slugify_heading(target.anchor)
+                        for section in sections_cache[target.file_path]:
                             if slugify_heading(section["scope_name"]) == target_slug:
                                 resolved_section = section["scope_name"]
                                 break
-                    markdown_references.append(
-                        {
-                            "file_path": resolved_path,
-                            "anchor": anchor,
-                            "resolved_section": resolved_section,
-                        }
-                    )
+                    ref = {
+                        "file_path": target.file_path,
+                        "anchor": target.anchor,
+                        "resolved_section": resolved_section,
+                    }
+                    if target.alias is not None:
+                        ref["alias"] = target.alias
+                    if target.candidates:
+                        ref["candidates"] = target.candidates
+                    markdown_references.append(ref)
                 item["markdown_references"] = markdown_references
 
         serialized_results.append(item)
