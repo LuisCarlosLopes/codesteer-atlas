@@ -183,36 +183,52 @@ Para que agentes de codificação usem o Atlas de forma consistente, copie o blo
 | GitHub Copilot CLI | instruções do plugin ou regras do projeto |
 
 ```markdown
-## Busca no Codebase com codesteer-atlas (MCP)
+# Busca de código com o MCP codesteer-atlas
 
-Este repositório está indexado com `codesteer-atlas`. Use o MCP **antes** de `grep`, `rg`, `find`, `Glob` ou leitura em massa de arquivos para localizar ou explorar código.
+Este repositório é indexado pelo MCP `codesteer-atlas`. Use as ferramentas do MCP
+**antes** de `grep`, `rg`, `find`, glob ou leitura em massa de arquivos para localizar
+ou explorar código.
+
+## Ferramentas disponíveis
 
 | Objetivo | Ferramenta |
 | --- | --- |
-| Encontrar onde uma função, classe, método ou conceito é implementado | `atlas_search` |
-| Entender a estrutura do projeto sem ler arquivos completos | `atlas_map` |
+| Encontrar onde uma função, classe, método ou conceito está implementado | `atlas_search` |
+| Entender a estrutura do projeto sem ler arquivos inteiros | `atlas_map` |
 | Verificar se o índice existe e está atualizado | `atlas_status` |
-| Reindexar após grandes alterações ou índice desatualizado | `atlas_index` |
+| Reindexar após mudanças grandes ou índice desatualizado | `atlas_index` |
 
-### Boas práticas em `atlas_search`
+## Boas práticas em `atlas_search`
 
-- Use `path_prefix` para restringir ao subdiretório relevante (ex: `src/services`).
+- Use `path_prefix` para restringir a busca ao subdiretório relevante (ex.: `src/codesteer_atlas`).
 - Use `language` para filtrar por linguagem quando o contexto permitir.
-- Use `include_content=false` para economizar tokens em buscas de descoberta.
-- Reserve `grep`/`Read` para correspondências literais exatas (nomes de símbolos, strings de erro) **após** o Atlas indicar os arquivos corretos.
+- Use `include_content=false` em buscas exploratórias para economizar tokens — traga
+  apenas metadados/localização e só leia o conteúdo completo dos resultados relevantes.
+- Chame `atlas_search` diretamente; não chame `atlas_status` "só para checar" antes —
+  se o índice não existir, a própria ferramenta retorna um erro explicando como criá-lo.
 
-### Quando usar terminal / Read / Grep diretamente
+## Quando usar grep/Read/find diretamente
 
-- Git, CI, execução de testes (`jest`, `tsc`), instalação de deps.
-- Arquivo já indicado com caminho exato pelo usuário — `Read` direto.
-- Edição, diff, commit — ferramentas de arquivo normais.
+- Confirmar uma string/erro **literal exato** (ex.: mensagem de exceção, nome de
+  símbolo) **depois** que o Atlas já indicou o(s) arquivo(s) candidato(s).
+- O arquivo já foi indicado com caminho exato pelo usuário — vá direto com `Read`.
+- Edição, diff, commit — ferramentas normais de arquivo.
+- Git, CI, testes (`pytest`), instalação de dependências — sempre via terminal.
 - MCP indisponível, erro de autenticação, ou índice vazio/desatualizado.
 
-### Índice desatualizado
+## Índice desatualizado
 
-1. Execute `atlas_status` para confirmar.
+1. Rode `atlas_status` para confirmar (`is_stale: true` indica que o HEAD indexado
+   difere do HEAD atual do workspace).
 2. Se necessário, reindexe com `atlas_index`.
-3. Só então use `grep`/`Read` como fallback pontual e reindexe após a sessão.
+3. Só então use `grep`/`Read` como fallback pontual, e reindexe novamente após a sessão.
+
+## Resumo do fluxo
+
+1. **Descoberta** → `atlas_search` (semântico + BM25, granularidade de
+   classe/função/método via AST, retorna do mais relevante para o menos relevante).
+2. **Confirmação exata** → `grep`/`Read` nos arquivos indicados pelo Atlas.
+3. **Edição** → ferramentas normais (`Edit`, `Write`, terminal para git/testes).
 ```
 
 ## Como funciona

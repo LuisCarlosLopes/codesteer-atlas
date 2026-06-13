@@ -2,9 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Codebase Search with Codesteer-Atlas (MCP)
+# Code Search with MCP Codesteer-Atlas
 
-This repository is indexed with `codesteer-atlas`. Use MCP **before** `grep`, `rg`, `find`, `Glob`, or bulk file reading to locate or explore code.
+This repository is indexed by MCP `codesteer-atlas`. Use the MCP tools
+**before** `grep`, `rg`, `find`, glob, or bulk file reading to locate
+or explore code.
+
+## Available Tools
 
 | Purpose | Tool |
 | --- | --- |
@@ -13,23 +17,36 @@ This repository is indexed with `codesteer-atlas`. Use MCP **before** `grep`, `r
 | Check if the index exists and is up-to-date | `atlas_status` |
 | Reindex after major changes or outdated index | `atlas_index` |
 
-### Best practices in `atlas_search`
-- Use `path_prefix` to restrict to the relevant subdirectory (e.g., `src/services`).
-- Use `language` to filter by language when the context allows.
-- Use `include_content=false` to save tokens in discovery searches.
-- Reserve `grep`/`Read` for exact literal matches (symbol names, error strings) **after** Atlas indicates the correct files.
+## Best practices in `atlas_search`
 
-### When to use terminal / Read / Grep directly
-- Git, CI, running tests (`jest`, `tsc`), installing deps.
-- File already indicated with exact path by the user — direct `Read`.
+- Use `path_prefix` to restrict the search to the relevant subdirectory (e.g., `src/codesteer_atlas`).
+- Use `language` to filter by language when the context allows.
+- Use `include_content=false` in exploratory searches to save tokens — bring
+only metadata/location and only read the full content of relevant results.
+- Call `atlas_search` directly; don't call `atlas_status` "just to check" beforehand —
+if the index doesn't exist, the tool itself returns an error explaining how to create it.
+
+## When to use grep/Read/find directly
+
+- Confirming an **exact literal** string/error (e.g., exception message, symbol name) **after** Atlas has already indicated the candidate file(s).
+- The file has already been indicated with the exact path by the user — go directly with `Read`.
 - Editing, diffing, committing — normal file tools.
+- Git, CI, testing (`pytest`), dependency installation — always via terminal.
 - MCP unavailable, authentication error, or empty/outdated index.
 
-### Outdated index
+## Outdated Index
 
-1. Run `atlas_status` to confirm.
+1. Run `atlas_status` to confirm (`is_stale: true` indicates that the indexed HEAD
+differs from the current workspace HEAD).
 2. If necessary, reindex with `atlas_index`.
-3. Only then use `grep`/`Read` as a point-in-time fallback and reindex after the session.
+3. Only then use `grep`/`Read` as a point-in-time fallback, and reindex again after the session.
+
+## Flow Summary
+
+1. **Discovery** → `atlas_search` (semantic + BM25, granularity of
+class/function/method via AST, returns from most relevant to least relevant).
+2. **Exact Confirmation** → `grep`/`Read` on the files indicated by Atlas.
+3. **Editing** → standard tools (`Edit`, `Write`, terminal for git/tests).
 
 ## Project
 
