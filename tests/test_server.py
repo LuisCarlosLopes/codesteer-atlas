@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -674,6 +675,85 @@ def test_resolve_index_dir_falls_back_to_default_when_nothing_resolves(tmp_path)
     result = resolve_index_dir(cli_arg=None, env={}, start_dir=isolated_dir)
 
     assert Path(result) == DEFAULT_INDEX_DIR
+
+
+def test_resolve_index_dir_discovers_via_claude_project_dir_when_cwd_differs(tmp_path):
+    """Quando o CWD do processo (ex.: HOME do usuário em plugins) não tem
+    `.code-index` ascendente, mas `CLAUDE_PROJECT_DIR` aponta para a raiz do
+    projeto que tem, usa a discovery a partir de `CLAUDE_PROJECT_DIR`."""
+    project_dir = tmp_path / "project"
+    index_dir = project_dir / ".code-index"
+    index_dir.mkdir(parents=True)
+
+    other_cwd = tmp_path / "home"
+    other_cwd.mkdir()
+
+    result = resolve_index_dir(
+        cli_arg=None,
+        env={"CLAUDE_PROJECT_DIR": str(project_dir)},
+        start_dir=other_cwd,
+    )
+
+    assert Path(result).resolve() == index_dir.resolve()
+
+
+def test_resolve_index_dir_falls_back_to_claude_project_dir_default(tmp_path):
+    """Quando nem o CWD nem `CLAUDE_PROJECT_DIR` têm `.code-index`, o default
+    passa a ser relativo a `CLAUDE_PROJECT_DIR` (não ao CWD do plugin)."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    other_cwd = tmp_path / "home"
+    other_cwd.mkdir()
+
+    result = resolve_index_dir(
+        cli_arg=None,
+        env={"CLAUDE_PROJECT_DIR": str(project_dir)},
+        start_dir=other_cwd,
+    )
+
+    assert Path(result).resolve() == (project_dir / ".code-index").resolve()
+
+
+def test_resolve_index_dir_discovers_via_workspace_folder_paths_when_cwd_differs(tmp_path):
+    """Cursor/VS Code expõem a raiz do workspace via `WORKSPACE_FOLDER_PATHS`
+    (sem `CLAUDE_PROJECT_DIR`). Quando o CWD do processo não tem `.code-index`
+    ascendente, a discovery deve cair para `WORKSPACE_FOLDER_PATHS`."""
+    project_dir = tmp_path / "project"
+    index_dir = project_dir / ".code-index"
+    index_dir.mkdir(parents=True)
+
+    other_dir = tmp_path / "other-workspace"
+    other_dir.mkdir()
+
+    other_cwd = tmp_path / "cursor-internal"
+    other_cwd.mkdir()
+
+    result = resolve_index_dir(
+        cli_arg=None,
+        env={"WORKSPACE_FOLDER_PATHS": os.pathsep.join([str(project_dir), str(other_dir)])},
+        start_dir=other_cwd,
+    )
+
+    assert Path(result).resolve() == index_dir.resolve()
+
+
+def test_resolve_index_dir_falls_back_to_workspace_folder_paths_default(tmp_path):
+    """Quando nem o CWD nem `WORKSPACE_FOLDER_PATHS` têm `.code-index`, o
+    default passa a ser relativo ao primeiro path de `WORKSPACE_FOLDER_PATHS`."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    other_cwd = tmp_path / "cursor-internal"
+    other_cwd.mkdir()
+
+    result = resolve_index_dir(
+        cli_arg=None,
+        env={"WORKSPACE_FOLDER_PATHS": str(project_dir)},
+        start_dir=other_cwd,
+    )
+
+    assert Path(result).resolve() == (project_dir / ".code-index").resolve()
 
 
 def test_atlas_index_dry_run_does_not_create_index(tmp_path):

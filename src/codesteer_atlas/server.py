@@ -98,9 +98,15 @@ def resolve_index_dir(
     2. `ATLAS_INDEX_DIR` (variável de ambiente)
     3. Discovery ascendente: sobe a partir de `start_dir` (default: CWD)
        procurando uma pasta `.code-index` (estilo `.git`), até a raiz do filesystem.
+    4. Discovery ascendente a partir da raiz do projeto/workspace informada pelo
+       editor via variável de ambiente — `CLAUDE_PROJECT_DIR` (Claude Code) ou
+       `WORKSPACE_FOLDER_PATHS` (Cursor/VS Code) — usada quando o servidor MCP
+       de um plugin é iniciado com outro CWD (ex.: o HOME do usuário) e o passo
+       3 não encontra o `.code-index` do projeto.
 
-    Se nenhum mecanismo resolver, retorna `DEFAULT_INDEX_DIR` relativo ao CWD
-    (o caller decide como reportar a ausência do índice).
+    Se nenhum mecanismo resolver, retorna `.code-index` relativo à raiz do
+    projeto informada pelo editor (quando disponível) ou ao CWD (o caller
+    decide como reportar a ausência do índice).
 
     Como efeito colateral, registra a origem usada em `INDEX_RESOLUTION_SOURCE`.
     """
@@ -120,17 +126,62 @@ def resolve_index_dir(
         print(f"[atlas] Índice resolvido via ATLAS_INDEX_DIR: {resolved}", file=sys.stderr)
         return resolved
 
+    def _discover_from(base: Path) -> Optional[Path]:
+        base = base.resolve()
+        for candidate in [base, *base.parents]:
+            candidate_index = candidate / INDEX_DIR_NAME
+            if candidate_index.exists():
+                return candidate_index
+        return None
+
     # Discovery ascendente a partir do CWD (ou start_dir informado)
     current = (start_dir or Path.cwd()).resolve()
-    for candidate in [current, *current.parents]:
-        candidate_index = candidate / INDEX_DIR_NAME
-        if candidate_index.exists():
-            INDEX_RESOLUTION_SOURCE = "discovery"
+    found = _discover_from(current)
+    if found is not None:
+        INDEX_RESOLUTION_SOURCE = "discovery"
+        print(
+            f"[atlas] Índice resolvido via discovery ascendente: {found}",
+            file=sys.stderr,
+        )
+        return found
+
+    # Fallback: discovery ascendente a partir da raiz do projeto informada
+    # pelo editor. Plugins MCP podem ser iniciados com CWD diferente da raiz
+    # do projeto (ex.: HOME do usuário), então o passo acima não encontra o
+    # `.code-index` do projeto. Editores expõem a raiz real do projeto via
+    # variáveis de ambiente próprias:
+    # - `CLAUDE_PROJECT_DIR`: Claude Code.
+    # - `WORKSPACE_FOLDER_PATHS`: Cursor/VS Code (pode conter múltiplos paths
+    #   separados por `os.pathsep`; usamos o primeiro).
+    project_dir_value = env.get("CLAUDE_PROJECT_DIR")
+    project_dir_source = "CLAUDE_PROJECT_DIR"
+    if not project_dir_value:
+        workspace_paths = env.get("WORKSPACE_FOLDER_PATHS")
+        if workspace_paths:
+            project_dir_value = workspace_paths.split(os.pathsep)[0]
+            project_dir_source = "WORKSPACE_FOLDER_PATHS"
+
+    if project_dir_value:
+        project_dir = Path(project_dir_value)
+        found = _discover_from(project_dir)
+        if found is not None:
+            INDEX_RESOLUTION_SOURCE = "editor-project-dir"
             print(
-                f"[atlas] Índice resolvido via discovery ascendente: {candidate_index}",
+                f"[atlas] Índice resolvido via {project_dir_source}: {found}",
                 file=sys.stderr,
             )
-            return candidate_index
+            return found
+
+        INDEX_RESOLUTION_SOURCE = "editor-project-dir-fallback"
+        fallback = project_dir.resolve() / INDEX_DIR_NAME
+        print(
+            "[atlas] AVISO: não foi possível resolver o diretório do índice "
+            f"(--index-dir, ATLAS_INDEX_DIR e discovery a partir de {current} "
+            f"e de {project_dir_source}={project_dir} falharam). "
+            f"Usando o padrão relativo a {project_dir_source}: {fallback}",
+            file=sys.stderr,
+        )
+        return fallback
 
     INDEX_RESOLUTION_SOURCE = "cwd-fallback"
     print(

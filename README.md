@@ -276,11 +276,18 @@ O diretório `.code-index` é resolvido nesta ordem:
 1. Argumento `--index-dir` da CLI/servidor.
 2. Variável de ambiente `ATLAS_INDEX_DIR`.
 3. Busca ascendente a partir do diretório atual por uma pasta `.code-index` (estilo `.git`).
-4. Padrão `.code-index` relativo ao diretório atual.
+4. Busca ascendente a partir da raiz do projeto/workspace informada pelo editor: `CLAUDE_PROJECT_DIR` (Claude Code) ou `WORKSPACE_FOLDER_PATHS` (Cursor/VS Code, quando definida).
+5. Padrão `.code-index` relativo à raiz do projeto informada pelo editor (se disponível) ou ao diretório atual.
 
 ### Instalação via plugin/Power
 
-Os manifests de plugin (Claude Code, Kiro Power, Copilot CLI) não definem `--index-dir`/`ATLAS_INDEX_DIR` — eles dependem do item 3 acima: busca ascendente a partir do diretório de trabalho do processo do servidor, que normalmente é a raiz do projeto aberto no editor. Por isso, basta rodar `atlas-index --workspace .` na raiz do projeto (criando `.code-index/` ali) para que o servidor o encontre automaticamente, sem nenhuma configuração extra.
+Os manifests de plugin (Claude Code, Kiro Power, Copilot CLI) não definem `--index-dir`/`ATLAS_INDEX_DIR` — eles dependem dos itens 3 e 4 acima.
+
+Normalmente o item 3 já resolve: busca ascendente a partir do diretório de trabalho do processo do servidor, que costuma ser a raiz do projeto aberto no editor. Basta rodar `atlas-index --workspace .` na raiz do projeto (criando `.code-index/` ali) para que o servidor o encontre automaticamente, sem nenhuma configuração extra.
+
+**Se o servidor MCP do plugin for iniciado com outro CWD** (ex.: o HOME do usuário, em vez da raiz do projeto — o que faria a busca ascendente do item 3 não encontrar o `.code-index` do projeto e, na pior das hipóteses, encontrar ou criar um `.code-index` solto no HOME), o item 4 cobre esse caso: o editor define `CLAUDE_PROJECT_DIR`/`WORKSPACE_FOLDER_PATHS` com a raiz real do projeto, e o servidor refaz a busca ascendente a partir dela. Caso nem assim encontre um `.code-index` existente, o índice padrão (item 5) passa a usar essa raiz — ou seja, mesmo no primeiro `atlas_index` (que cria o diretório), ele é criado na raiz do projeto, não no HOME.
+
+> **Cursor**: roda os servidores MCP em um processo compartilhado entre projetos, com CWD fixo no `$HOME` e **sem** expor `CLAUDE_PROJECT_DIR`/`WORKSPACE_FOLDER_PATHS`. Os itens 3 e 4 não resolvem nesse caso — é necessário definir `ATLAS_INDEX_DIR` por projeto usando `${workspaceFolder}`. Veja [Cursor em CONTRIBUTING.md](CONTRIBUTING.md#cursor).
 
 **Para apontar para um `.code-index` em outro lugar** (ex.: índice compartilhado fora do projeto), defina `ATLAS_INDEX_DIR` — que tem prioridade sobre a busca automática — no manifest MCP:
 
