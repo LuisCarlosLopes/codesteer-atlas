@@ -46,20 +46,58 @@ O plugin registra o `codesteer-atlas` em modo remoto (`uvx`), sem caminhos absol
 ```bash
 uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
 ```
+#### Power do Kiro
 
-### Outros clientes (Cursor, Claude Desktop, Cline, Copilot, Kiro, OpenCode...)
+Este repositório também é distribuído como um [Power do Kiro](https://kiro.dev/docs/powers/create/) ([`POWER.md`](POWER.md) + [`mcp.json`](mcp.json)), que já inclui o passo de onboarding (verificação do `uv`/`uvx` e indexação inicial do workspace) e orientações de uso das tools `atlas_*`. Para instalar:
 
-- **Manifests prontos**: copie o arquivo de configuração do cliente (ex.: [`.cursor/mcp.json`](.cursor/mcp.json), [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json), [`.vscode/mcp.json`](.vscode/mcp.json)) para a raiz do seu projeto — veja [Configuração manual em outros clientes](#configuração-manual-em-outros-clientes).
-- **Instalador interativo** (a partir de um clone deste repositório):
+1. No Kiro, vá em **Add Custom Power → Import power from GitHub**.
+2. Informe o repositório `https://github.com/LuisCarlosLopes/codesteer-atlas.git`.
+3. Siga o onboarding do power para indexar o workspace atual.
 
-  ```bash
-  uv run python deploy_mcp.py
-  ```
+#### Plugin do GitHub Copilot CLI
 
-  Detecta clientes MCP disponíveis (Cursor, Claude Desktop, Cline, Claude Code CLI) e registra o servidor neles, em modo local (este repositório) ou remoto (via `uvx` direto do GitHub).
-- **Configuração manual**: veja os blocos JSON em [Configuração manual em outros clientes](#configuração-manual-em-outros-clientes).
+Este repositório também é um [plugin do Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) ([`plugin.json`](plugin.json) + [`.mcp.json`](.mcp.json)), em modo remoto (`uvx`, sem paths absolutos). Para instalar:
 
-> **Vai contribuir com o desenvolvimento do Atlas?** Aí sim você precisa clonar o repositório e instalar as dependências de desenvolvimento — veja [Desenvolvimento](#desenvolvimento).
+```bash
+copilot plugin install LuisCarlosLopes/codesteer-atlas
+
+# ou, a partir de uma pasta local clonada
+copilot plugin install /caminho/para/codesteer-atlas
+```
+
+Para remover: `copilot plugin uninstall codesteer-atlas`.
+
+### Outros clientes (Cursor, Cline, Copilot, Kiro, OpenCode...)
+
+Copie o manifest pronto do cliente correspondente para a raiz do seu projeto (ou para a configuração global dele) e reinicie o cliente:
+
+- Cursor: [`.cursor/mcp.json`](.cursor/mcp.json)
+- Kiro: [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json)
+- OpenCode: [`.opencode/opencode.json`](.opencode/opencode.json)
+- GitHub Copilot (VS Code): [`.vscode/mcp.json`](.vscode/mcp.json)
+
+Para configuração manual de outros clientes (OpenCode, Claude Desktop, Cline) ou para usar o modo instalado, veja [CONTRIBUTING.md](CONTRIBUTING.md#configuração-manual-em-outros-clientes).
+
+### Modo instalado (opcional)
+
+Se você instalou o Atlas como ferramenta global (`uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git` — veja [Início rápido](#2-rode-a-indexação-inicial)), o comando `atlas-serve` fica disponível direto no PATH e você pode registrá-lo sem `uvx`:
+
+```json
+{
+  "mcpServers": {
+    "codesteer-atlas": {
+      "command": "atlas-serve",
+      "env": {
+        "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
+      }
+    }
+  }
+}
+```
+
+Assim como no modo remoto, `--index-dir`/`ATLAS_INDEX_DIR` são opcionais — o servidor descobre automaticamente a pasta `.code-index` na raiz do projeto aberto.
+
+> **Vai contribuir com o desenvolvimento do Atlas?** Você precisa clonar o repositório e instalar as dependências de desenvolvimento — veja [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Início rápido (primeira vez)
 
@@ -73,46 +111,23 @@ cd /caminho/para/seu-projeto
 
 ### 2. Rode a indexação inicial
 
-Na primeira execução, todos os arquivos elegíveis são processados e o índice é criado do zero.
+Na primeira execução, todos os arquivos elegíveis são processados e o índice é criado do zero. Não é necessário clonar o Atlas.
 
-**Opção recomendada** — sem clonar o Atlas (só precisa do `uv`/`uvx`):
-
-```bash
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
-```
-
-**Opção instalar via `uv`** — instala `atlas-index` e `atlas-serve` como ferramentas globais (sem clonar e sem baixar o pacote a cada execução):
+**Recomendado** — instale `atlas-index`/`atlas-serve` como ferramentas globais (uma vez só):
 
 ```bash
 uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git
+```
 
-# uso
+E rode:
+
+```bash
 atlas-index --workspace .
-
-# atualizar para a versão mais recente
-uv tool upgrade codesteer-atlas
 ```
 
-**Opção local** — clone este repositório e instale as dependências:
+Para atualizar para a versão mais recente: `uv tool upgrade codesteer-atlas`.
 
-```bash
-git clone https://github.com/LuisCarlosLopes/codesteer-atlas.git
-cd codesteer-atlas
-
-# macOS / Linux
-./setup.sh
-
-# Windows (PowerShell)
-.\setup.ps1
-```
-
-Depois, rode a indexação apontando para o seu projeto:
-
-```bash
-uv --directory /caminho/para/codesteer-atlas run atlas-index --workspace /caminho/para/seu-projeto
-# ou, estando dentro do clone do Atlas com o projeto como alvo:
-uv run atlas-index --workspace /caminho/para/seu-projeto
-```
+> Alternativa sem instalar nada: `uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .` (baixa o pacote a cada execução).
 
 Ao terminar, você deve ver `Indexação Concluída com Sucesso!` e a pasta `.code-index/` na raiz do **seu projeto**, contendo `manifest.json` e `lancedb/`.
 
@@ -128,16 +143,18 @@ Nas execuções seguintes, rode o **mesmo comando** do passo 2. A indexação é
 
 ```bash
 # Reindexação incremental (padrão)
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
+atlas-index --workspace .
 
 # Forçar reconstrução completa do índice
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --full
+atlas-index --workspace . --full
 
 # Indexar apenas partes do projeto
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace . --paths src --paths docs
+atlas-index --workspace . --paths src --paths docs
 ```
 
 Também é possível reindexar pelo cliente MCP com a tool `atlas_index` (útil após mudanças grandes no código).
+
+> **Reindex automático no startup:** sempre que o servidor MCP (`atlas-serve`) inicia — ou seja, sempre que você abre/reinicia seu editor/cliente MCP — ele dispara automaticamente uma reindexação incremental em background (sem bloquear o cliente). Isso só acontece se já existir um índice em `.code-index/`; a primeira indexação continua precisando ser feita manualmente (passo 2). O log fica em `.code-index/background_reindex.log`.
 
 ## Uso
 
@@ -152,39 +169,11 @@ Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto ind
 
 Também expõe o recurso somente leitura `atlas://status`.
 
-
-
 Para reindexar após mudanças no código, rode novamente o comando de [indexação](#4-reindexar-depois) (incremental por padrão) ou peça ao agente para usar a tool `atlas_index`.
 
-## Como o código é indexado
+## Como funciona
 
-O núcleo da indexação é `index_workspace()` (`src/codesteer_atlas/indexer.py`), compartilhado pelo CLI (`atlas-index`) e pela tool MCP `atlas_index`. O pipeline roda 100% local — nenhum código-fonte é enviado para serviços externos.
-
-### Fluxo
-
-```
-Varredura → Filtros → Hash SHA-256 → Chunking (AST) → Embeddings → LanceDB + manifest.json
-```
-
-1. **Varredura** — percorre o workspace (ou as subpastas informadas em `--paths`) de forma recursiva.
-2. **Filtros** — ignora pastas como `.git`, `node_modules`, `.venv`, `__pycache__` e `.code-index`; arquivos ocultos; extensões não suportadas; e arquivos acima de 2 MB.
-3. **Incremental** — calcula o hash SHA-256 de cada arquivo elegível e compara com o `manifest.json`. Arquivos inalterados são pulados; novos, alterados ou deletados são processados. `--full` ignora os hashes e força reindexação completa.
-4. **Chunking** — o `ASTChunker` divide cada arquivo em `CodeChunk`s:
-   - **Código com AST** (Python, JS/TS, Go, Java, C#, etc.): parse via Tree-sitter; extrai classes, funções e métodos com nome hierárquico (ex.: `UserService.authenticate`). Se nenhum símbolo for encontrado, gera um chunk `module` com o arquivo inteiro.
-   - **SQL** (`.sql`): divide por statement (`CREATE TABLE`, `CREATE VIEW`, `SELECT`, etc.) via Tree-sitter; nomeia chunks pela tabela/view/função ou `select_<tabela>`; statements grandes são particionados por linhas (~1000 caracteres).
-   - **Markdown** (`.md`): divide por cabeçalhos (`#`, `##`, …); seções grandes são quebradas por parágrafos.
-   - **Texto / sem parser** (`.txt`, `.xml`, `.razor`, etc.): agrupa parágrafos em blocos de até ~1000 caracteres.
-   - Chunks muito grandes são truncados preservando assinatura/docstring (primeiras linhas) e retorno (últimas linhas).
-5. **Embeddings** — apenas chunks novos ou alterados passam pelo `EmbeddingEngine` (`fastembed`, modelo `all-MiniLM-L6-v2`, 384 dimensões, processamento em lote).
-6. **Persistência** — grava em `.code-index/`:
-   - `lancedb/` — tabela `chunks` com vetores e índice FTS (BM25) na coluna `content`.
-   - `manifest.json` — metadados (total de chunks, linguagens, modelo, `git_head_sha`, versão do índice) e mapa `arquivo → hash` para indexação incremental.
-
-Na primeira execução (ou com `--full` sem `--paths`), o índice é sobrescrito por completo. Nas demais, chunks de arquivos alterados ou removidos são deletados e os novos são inseridos, preservando o restante do índice.
-
-### Exemplo de chunks gerados
-
-Para um arquivo Python típico, em vez de indexar o arquivo inteiro de uma vez, o Atlas cria um chunk por símbolo:
+O Atlas divide cada arquivo em `CodeChunk`s no nível de símbolo (classes, funções, métodos) via Tree-sitter, gera embeddings locais para cada chunk e indexa tudo em LanceDB com busca vetorial + BM25 (RRF). Para um arquivo Python típico, em vez de indexar o arquivo inteiro de uma vez, o Atlas cria um chunk por símbolo:
 
 ```
 src/auth/service.py
@@ -193,7 +182,7 @@ src/auth/service.py
   └── AuthService.logout         (linhas 37–44)
 ```
 
-Cada chunk vira um registro pesquisável por similaridade vetorial (cosseno) e BM25, fundidos via RRF na busca (`atlas_search`).
+Cada chunk vira um registro pesquisável por similaridade vetorial (cosseno) e BM25, fundidos via RRF na busca (`atlas_search`). Para detalhes do pipeline (filtros, indexação incremental, chunking por linguagem, truncamento, persistência), veja [CONTRIBUTING.md](CONTRIBUTING.md#pipeline-de-indexação-detalhado).
 
 ### Excluindo arquivos com `.atlasignore`
 
@@ -220,163 +209,6 @@ fixtures/
 - `.atlasignore` é um filtro **adicional** — pastas como `.git`, `node_modules`, `.venv`, `__pycache__` e `.code-index` continuam sempre ignoradas e não podem ser "reincluídas" via `!`.
 - O filtro é aplicado tanto na indexação real (`atlas-index` / `atlas_index`) quanto no preview (`atlas_index` com `dry_run=true`).
 
-## Configuração manual em outros clientes
-
-O `deploy_mcp.py` automatiza Cursor, Claude Desktop, Cline e Claude Code CLI, em dois modos:
-
-- **Local**: aponta para a pasta deste repositório clonado na máquina (`uv --directory ...`).
-- **Remoto**: roda direto do GitHub via `uvx`, sem precisar clonar o repositório.
-
-Para outros clientes (ou configuração manual), use um dos blocos abaixo, substituindo `/caminho/para/.code-index` pelo diretório do índice do workspace alvo (gerado por `uv run atlas-index --workspace .`).
-
-**Modo local** (substitua também `/caminho/para/codesteer-atlas` pelo diretório deste repositório):
-
-```json
-{
-  "command": "uv",
-  "args": [
-    "--directory", "/caminho/para/codesteer-atlas",
-    "run", "atlas-serve",
-    "--index-dir", "/caminho/para/.code-index"
-  ],
-  "env": {
-    "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
-  }
-}
-```
-
-**Modo remoto** (não requer clonar o repositório, requer apenas `uvx`):
-
-```json
-{
-  "command": "uvx",
-  "args": [
-    "--from", "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
-    "atlas-serve",
-    "--index-dir", "/caminho/para/.code-index"
-  ],
-  "env": {
-    "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
-  }
-}
-```
-
-**Modo instalado** (após `uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git`, o comando `atlas-serve` fica disponível direto no PATH):
-
-```json
-{
-  "mcpServers": {
-    "codesteer-atlas": {
-      "command": "atlas-serve",
-      "env": {
-        "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
-      }
-    }
-  }
-}
-```
-
-Os exemplos por cliente abaixo usam o modo local; para usar o modo remoto ou instalado, basta substituir o bloco `command`/`args` pelo equivalente acima.
-
-### Claude Code (CLI)
-
-```bash
-# Modo local
-claude mcp add codesteer-atlas -- uv --directory /caminho/para/codesteer-atlas run atlas-serve --index-dir /caminho/para/.code-index
-
-# Modo remoto (sem clonar o repo)
-claude mcp add codesteer-atlas -- uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-serve --index-dir /caminho/para/.code-index
-```
-
-Ou adicione manualmente em `.mcp.json` (na raiz do projeto) ou na config global do Claude Code:
-
-```json
-{
-  "mcpServers": {
-    "codesteer-atlas": {
-      "command": "uv",
-      "args": [
-        "--directory", "/caminho/para/codesteer-atlas",
-        "run", "atlas-serve",
-        "--index-dir", "/caminho/para/.code-index"
-      ],
-      "env": {
-        "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
-      }
-    }
-  }
-}
-```
-
-
-### Cursor
-
-Este repositório já inclui um [`.cursor/mcp.json`](.cursor/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para a raiz do seu projeto (ou para `~/.cursor/mcp.json` para configuração global) e reinicie o Cursor.
-
-Para usar o modo local em vez do remoto, edite o arquivo copiado com o formato `mcpServers` da seção anterior.
-
-### OpenCode
-
-Crie/edite `opencode.json` na raiz do projeto (ou `~/.config/opencode/opencode.json` para configuração global):
-
-```json
-{
-  "mcp": {
-    "codesteer-atlas": {
-      "type": "local",
-      "command": [
-        "uv", "--directory", "/caminho/para/codesteer-atlas",
-        "run", "atlas-serve",
-        "--index-dir", "/caminho/para/.code-index"
-      ],
-      "environment": {
-        "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
-      },
-      "enabled": true
-    }
-  }
-}
-```
-
-### Kiro
-
-Este repositório já inclui um [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_search`, `atlas_map`, `atlas_status`). Copie esse arquivo para a raiz do seu projeto (ou para a configuração global do Kiro) e reinicie.
-
-Para usar o modo local em vez do remoto, edite o arquivo copiado com o formato `mcpServers` da seção anterior.
-
-#### Power do Kiro
-
-Este repositório também é distribuído como um [Power do Kiro](https://kiro.dev/docs/powers/create/) ([`POWER.md`](POWER.md) + [`mcp.json`](mcp.json)), que já inclui o passo de onboarding (verificação do `uv`/`uvx` e indexação inicial do workspace) e orientações de uso das tools `atlas_*`. Para instalar:
-
-1. No Kiro, vá em **Add Custom Power → Import power from GitHub**.
-2. Informe o repositório `LuisCarlosLopes/codesteer-atlas`.
-3. Siga o onboarding do power para indexar o workspace atual.
-
-### GitHub Copilot (VS Code)
-
-Este repositório já inclui um [`.vscode/mcp.json`](.vscode/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para a raiz do seu projeto.
-
-Para usar o modo local em vez do remoto, edite o arquivo copiado com o formato `servers` (note que o VS Code usa a chave `servers`, e não `mcpServers`).
-
-Após salvar, abra o painel de MCP Servers do Copilot Chat (Command Palette → "MCP: List Servers") e inicie o `codesteer-atlas`.
-
-> **Antes do primeiro uso:** indexe a raiz do **seu projeto** com `atlas-index --workspace .` (veja [Início rápido](#início-rápido-primeira-vez)). Só rode `./setup.sh`/`.\setup.ps1` se estiver usando o Atlas em modo local a partir deste repositório clonado.
-
-#### Plugin do GitHub Copilot CLI
-
-Este repositório também é um [plugin do Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) ([`plugin.json`](plugin.json) + [`.mcp.json`](.mcp.json)), em modo remoto (`uvx`, sem paths absolutos). Para instalar:
-
-```bash
-copilot plugin install LuisCarlosLopes/codesteer-atlas
-
-# ou, a partir de uma pasta local clonada
-copilot plugin install /caminho/para/codesteer-atlas
-```
-
-Para remover: `copilot plugin uninstall codesteer-atlas`.
-
-> **Antes do primeiro uso:** indexe a raiz do **seu projeto** com `atlas-index --workspace .` (veja [Início rápido](#início-rápido-primeira-vez)).
-
 ## Resolução do diretório de índice
 
 O diretório `.code-index` é resolvido nesta ordem:
@@ -386,44 +218,9 @@ O diretório `.code-index` é resolvido nesta ordem:
 3. Busca ascendente a partir do diretório atual por uma pasta `.code-index` (estilo `.git`).
 4. Padrão `.code-index` relativo ao diretório atual.
 
-## Desenvolvimento
+## Contribuindo
 
-Para desenvolver o Atlas, clone este repositório e instale as dependências:
-
-```bash
-# macOS / Linux
-./setup.sh
-
-# Windows (PowerShell)
-.\setup.ps1
-```
-
-O script verifica o `uv`, sincroniza as dependências (`uv sync --group dev`) e valida os imports críticos via `deploy_mcp.py --check`.
-
-### Rodar o servidor MCP localmente
-
-```bash
-uv run atlas-serve
-
-# Apontando para um diretório de índice específico
-uv run atlas-serve --index-dir /caminho/para/.code-index
-```
-
-O servidor se comunica via stdio (JSON-RPC), pronto para ser usado por clientes MCP (Claude Code, Claude Desktop, Cursor, Cline, etc.).
-
-### Testes e lint
-
-```bash
-# Rodar testes
-uv run pytest -v
-
-# Rodar lint
-uv run ruff check
-```
-
-## Arquitetura
-
-Veja [CLAUDE.md](CLAUDE.md) para detalhes de arquitetura, módulos internos e convenções de código, e [.memory-bank/constitution.md](.memory-bank/constitution.md) para os princípios que regem o projeto.
+Quer clonar o repositório, rodar testes, configurar manualmente outros clientes MCP ou entender o pipeline de indexação em detalhes? Veja [CONTRIBUTING.md](CONTRIBUTING.md) e [CLAUDE.md](CLAUDE.md).
 
 ## Licença
 
