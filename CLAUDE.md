@@ -112,7 +112,9 @@ Source lives under `src/codesteer_atlas/`:
 
 ### Index directory resolution (DECISAO-002)
 
-The `.code-index` directory location is resolved in order: (1) `--index-dir` CLI arg, (2) `ATLAS_INDEX_DIR` env var, (3) ascending discovery from CWD looking for a `.code-index` folder (git-style), (4) fallback to `DEFAULT_INDEX_DIR` relative to CWD. See `resolve_index_dir()` in `server.py`.
+The `.code-index` directory location is resolved at startup, in order, by `resolve_index_dir()` in `server.py`: (1) `--index-dir` CLI arg, (2) `ATLAS_INDEX_DIR` env var, (3) ascending discovery from CWD looking for a `.code-index` folder (git-style), (4) ascending discovery from the editor-provided project root (`CLAUDE_PROJECT_DIR` for Claude Code, or `WORKSPACE_FOLDER_PATHS` for Cursor/VS Code), (5) fallback to `DEFAULT_INDEX_DIR` relative to CWD (or to the editor project root, when known).
+
+When the server is registered **globally as a plugin** (Copilot, Cursor, Kiro), it is often launched with CWD = HOME and without those editor env vars, so the startup chain lands on a fallback. To recover without any per-project config, each tool then performs a one-time, per-process **MCP roots** upgrade via `_resolve_index_dir_via_roots(ctx)`: it requests the client's workspace roots (`roots/list`) and re-resolves `.code-index` from there (`roots` when an existing index is found by ascending discovery, `roots-fallback` when none exists yet — pointing the index at `<root>/.code-index` so `atlas_index` creates it inside the project, not HOME). The roots step only runs when startup resolution landed on a fallback (never overriding `cli-arg`/`env`/`discovery`/`editor-project-dir`), is best-effort (clients without `roots` support fall back gracefully, with a `ROOTS_LIST_TIMEOUT_S` guard), and the chosen source is reported in `atlas_status` → `index_resolution`. The sync→async bridge uses `anyio.from_thread.run`, valid because FastMCP runs sync tools in a worker thread via `anyio.to_thread.run_sync`.
 
 ### Incremental indexing (DECISAO-005 / [J])
 

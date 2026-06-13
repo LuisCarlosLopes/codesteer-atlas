@@ -16,6 +16,9 @@ from codesteer_atlas.server import (
     _spawn_background_reindex,
     _spawn_index_subprocess,
     _safe_responder_respond,
+    _file_uri_to_path,
+    _list_roots_sync,
+    _resolve_index_dir_via_roots,
 )
 
 # Mock do manifesto de índice de teste
@@ -815,6 +818,147 @@ def test_atlas_index_docstring_instructs_asking_user():
     doc = atlas_index.__doc__ or ""
     assert "ASK" in doc
     assert "dry_run" in doc
+
+
+# --- Resolução do índice via MCP roots ---
+
+
+def test_file_uri_to_path_basic():
+    """`file:///abs/path` -> Path('/abs/path')."""
+    assert _file_uri_to_path("file:///Users/me/project") == Path("/Users/me/project")
+
+
+def test_file_uri_to_path_decodes_percent_encoding():
+    """Espaços/caracteres percent-encoded são decodificados."""
+    assert _file_uri_to_path("file:///Users/me/my%20project") == Path("/Users/me/my project")
+
+
+def test_file_uri_to_path_non_file_scheme_returns_none():
+    """Esquemas não-`file` (ex.: http) retornam None."""
+    assert _file_uri_to_path("https://example.com/x") is None
+
+
+def test_list_roots_sync_none_ctx_returns_empty():
+    """Sem contexto MCP (chamada direta), não há roots a consultar."""
+    assert _list_roots_sync(None) == []
+
+
+def test_resolve_via_roots_noop_when_ctx_none(monkeypatch):
+    """`ctx=None` (testes/uso direto) é no-op: não toca globals nem o done flag."""
+    monkeypatch.setattr("codesteer_atlas.server._ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr("codesteer_atlas.server.INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr("codesteer_atlas.server.INDEX_DIR_PATH", Path("/unchanged/.code-index"))
+
+    _resolve_index_dir_via_roots(None)
+
+    import codesteer_atlas.server as s
+    assert s._ROOTS_RESOLUTION_DONE is False
+    assert s.INDEX_DIR_PATH == Path("/unchanged/.code-index")
+
+
+def test_resolve_via_roots_skips_high_confidence_source(monkeypatch):
+    """Quando o startup já resolveu por discovery/cli/env, roots não sobrescreve."""
+    import codesteer_atlas.server as s
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "discovery")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path("/already/.code-index"))
+    monkeypatch.setattr(
+        s, "_list_roots_sync", lambda ctx: (_ for _ in ()).throw(AssertionError("não deveria consultar roots"))
+    )
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH == Path("/already/.code-index")
+    assert s.INDEX_RESOLUTION_SOURCE == "discovery"
+    assert s._ROOTS_RESOLUTION_DONE is True
+
+
+def test_resolve_via_roots_finds_existing_index(monkeypatch, tmp_path):
+    """Startup em fallback + root com `.code-index` existente -> resolve via roots."""
+    import codesteer_atlas.server as s
+
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path.home() / ".code-index")
+    monkeypatch.setattr(s, "_list_roots_sync", lambda ctx: [tmp_path])
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH.resolve() == index_dir.resolve()
+    assert s.INDEX_RESOLUTION_SOURCE == "roots"
+    assert s._ROOTS_RESOLUTION_DONE is True
+
+
+def test_resolve_via_roots_discovers_index_in_ancestor_of_root(monkeypatch, tmp_path):
+    """A discovery sobe a partir do root: `.code-index` num ancestral é encontrado."""
+    import codesteer_atlas.server as s
+
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+    nested_root = tmp_path / "packages" / "app"
+    nested_root.mkdir(parents=True)
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path.home() / ".code-index")
+    monkeypatch.setattr(s, "_list_roots_sync", lambda ctx: [nested_root])
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH.resolve() == index_dir.resolve()
+    assert s.INDEX_RESOLUTION_SOURCE == "roots"
+
+
+def test_resolve_via_roots_points_to_root_when_no_index(monkeypatch, tmp_path):
+    """Fallback + root SEM `.code-index` -> aponta para `<root>/.code-index` (roots-fallback)."""
+    import codesteer_atlas.server as s
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path.home() / ".code-index")
+    monkeypatch.setattr(s, "_list_roots_sync", lambda ctx: [tmp_path])
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH.resolve() == (tmp_path / ".code-index").resolve()
+    assert s.INDEX_RESOLUTION_SOURCE == "roots-fallback"
+    assert s._ROOTS_RESOLUTION_DONE is True
+
+
+def test_resolve_via_roots_runs_only_once(monkeypatch):
+    """Já resolvido (done=True): não consulta roots de novo nem altera globals."""
+    import codesteer_atlas.server as s
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", True)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path("/keep/.code-index"))
+    monkeypatch.setattr(
+        s, "_list_roots_sync", lambda ctx: (_ for _ in ()).throw(AssertionError("não deveria reconsultar"))
+    )
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH == Path("/keep/.code-index")
+
+
+def test_resolve_via_roots_keeps_fallback_when_no_roots(monkeypatch):
+    """Cliente sem suporte a roots (lista vazia): mantém o fallback e marca done."""
+    import codesteer_atlas.server as s
+
+    monkeypatch.setattr(s, "_ROOTS_RESOLUTION_DONE", False)
+    monkeypatch.setattr(s, "INDEX_RESOLUTION_SOURCE", "cwd-fallback")
+    monkeypatch.setattr(s, "INDEX_DIR_PATH", Path("/fallback/.code-index"))
+    monkeypatch.setattr(s, "_list_roots_sync", lambda ctx: [])
+
+    _resolve_index_dir_via_roots(object())
+
+    assert s.INDEX_DIR_PATH == Path("/fallback/.code-index")
+    assert s.INDEX_RESOLUTION_SOURCE == "cwd-fallback"
+    assert s._ROOTS_RESOLUTION_DONE is True
 
 
 def test_atlas_search_docstring_instructs_proactive_use():

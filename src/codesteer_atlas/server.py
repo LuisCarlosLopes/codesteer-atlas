@@ -4,9 +4,11 @@ import argparse
 import json
 import posixpath
 import subprocess
+import threading
 import time
 from pathlib import Path, PurePath
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 # 1. Duplica o file descriptor real do stdout (fd 1) para uso exclusivo do
 # transporte stdio do MCP, e redireciona fd 1 (em nível de SO) para fd 2 (stderr).
@@ -32,7 +34,8 @@ os.environ.setdefault("RUST_LOG", "off")
 os.environ.setdefault("LANCE_LOG", "off")
 
 # Agora realizamos os imports de forma segura
-from fastmcp import FastMCP  # noqa: E402
+import anyio  # noqa: E402
+from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
 from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
@@ -81,10 +84,138 @@ app = FastMCP("CodeSteer Atlas")
 # resolução do workspace pai do índice)
 INDEX_DIR_NAME = ".code-index"
 
-# Origem da última resolução do índice (cli-arg | env | discovery | cwd-fallback),
-# exposta em `atlas_status` para autodiagnóstico de configuração do cliente MCP
-# (ex.: Windows GUI lança o servidor com CWD arbitrário e a discovery falha)
+# Origem da última resolução do índice (cli-arg | env | discovery |
+# editor-project-dir | roots | roots-fallback | editor-project-dir-fallback |
+# cwd-fallback), exposta em `atlas_status` para autodiagnóstico de configuração
+# do cliente MCP (ex.: Windows GUI lança o servidor com CWD arbitrário e a
+# discovery falha)
 INDEX_RESOLUTION_SOURCE = "cwd-fallback"
+
+# Timeout (s) do request `roots/list` ao cliente, para não travar um tool sync
+# caso o cliente declare a capability `roots` mas não responda [R].
+ROOTS_LIST_TIMEOUT_S = 5.0
+
+# A resolução via MCP roots é tentada no máximo uma vez por processo: o root do
+# workspace é estável durante toda a sessão do editor. O lock serializa a
+# primeira resolução entre threads (FastMCP roda tools sync em threadpool) [R].
+_ROOTS_RESOLUTION_DONE = False
+_ROOTS_RESOLUTION_LOCK = threading.Lock()
+
+
+def _discover_index_dir(base: Path) -> Optional[Path]:
+    """Sobe a partir de `base` procurando uma pasta `.code-index` (estilo `.git`)."""
+    base = base.resolve()
+    for candidate in [base, *base.parents]:
+        candidate_index = candidate / INDEX_DIR_NAME
+        if candidate_index.exists():
+            return candidate_index
+    return None
+
+
+def _file_uri_to_path(uri: str) -> Optional[Path]:
+    """
+    Converte uma URI `file://` (informada por um MCP root) em `Path`, de forma
+    cross-platform. Retorna `None` para esquemas não-`file` ou path vazio.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path)
+    # Windows: `/C:/Users/...` -> `C:/Users/...`
+    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return Path(path) if path else None
+
+
+def _list_roots_sync(ctx: "Context") -> list[Path]:
+    """
+    Obtém os workspace roots informados pelo cliente MCP (capability `roots`) a
+    partir de um tool handler síncrono. A ponte sync->async usa
+    `anyio.from_thread.run`, válida porque o FastMCP executa tools síncronos em
+    worker thread via `anyio.to_thread.run_sync`. Best-effort: qualquer falha
+    (cliente sem suporte a `roots`, timeout, transporte) retorna lista vazia [R].
+    """
+    if ctx is None:
+        return []
+
+    async def _call() -> list:
+        with anyio.fail_after(ROOTS_LIST_TIMEOUT_S):
+            return await ctx.list_roots()
+
+    try:
+        roots = anyio.from_thread.run(_call)
+    except Exception as e:
+        print(
+            f"[atlas] roots/list indisponível ({type(e).__name__}); ignorando.",
+            file=sys.stderr,
+        )
+        return []
+
+    paths: list[Path] = []
+    for root in roots or []:
+        uri = getattr(root, "uri", None)
+        if uri is None:
+            continue
+        resolved = _file_uri_to_path(str(uri))
+        if resolved is not None:
+            paths.append(resolved)
+    return paths
+
+
+def _resolve_index_dir_via_roots(ctx: "Context") -> None:
+    """
+    Atualiza `INDEX_DIR_PATH`/`INDEX_RESOLUTION_SOURCE` usando os workspace roots
+    do cliente MCP, quando a resolução de startup caiu em fallback (nenhum índice
+    localizado por `--index-dir`, `ATLAS_INDEX_DIR`, discovery do CWD ou env do
+    editor).
+
+    Cobre o caso de um servidor MCP registrado globalmente como plugin (Copilot,
+    Cursor, Kiro), iniciado com CWD = HOME e sem as env vars próprias do editor:
+    os `roots` informam a raiz real do projeto e o índice é resolvido lá — sem
+    exigir configuração local por projeto [R].
+
+    Executa no máximo uma vez por processo (root estável na sessão do editor).
+    Sem efeito quando `ctx` é `None` (chamada direta em testes unitários).
+    """
+    global INDEX_DIR_PATH, INDEX_RESOLUTION_SOURCE, _ROOTS_RESOLUTION_DONE
+
+    if ctx is None or _ROOTS_RESOLUTION_DONE:
+        return
+
+    with _ROOTS_RESOLUTION_LOCK:
+        if _ROOTS_RESOLUTION_DONE:
+            return
+
+        # Fontes de alta confiança / índice já localizado: não sobrescreve.
+        if INDEX_RESOLUTION_SOURCE in ("cli-arg", "env", "discovery", "editor-project-dir"):
+            _ROOTS_RESOLUTION_DONE = True
+            return
+
+        roots = _list_roots_sync(ctx)
+        if not roots:
+            _ROOTS_RESOLUTION_DONE = True
+            return
+
+        # 1) Procura um `.code-index` existente subindo a partir de cada root.
+        for root in roots:
+            found = _discover_index_dir(root)
+            if found is not None:
+                INDEX_DIR_PATH = found
+                INDEX_RESOLUTION_SOURCE = "roots"
+                _ROOTS_RESOLUTION_DONE = True
+                print(f"[atlas] Índice resolvido via MCP roots: {found}", file=sys.stderr)
+                return
+
+        # 2) Nenhum índice ainda: aponta para `.code-index` na raiz do 1º root,
+        #    para que uma futura `atlas_index` crie o índice no projeto (e não no HOME).
+        target = roots[0].resolve() / INDEX_DIR_NAME
+        INDEX_DIR_PATH = target
+        INDEX_RESOLUTION_SOURCE = "roots-fallback"
+        _ROOTS_RESOLUTION_DONE = True
+        print(
+            f"[atlas] Índice (inexistente) apontado via MCP roots para: {target}",
+            file=sys.stderr,
+        )
 
 
 def resolve_index_dir(
@@ -126,17 +257,9 @@ def resolve_index_dir(
         print(f"[atlas] Índice resolvido via ATLAS_INDEX_DIR: {resolved}", file=sys.stderr)
         return resolved
 
-    def _discover_from(base: Path) -> Optional[Path]:
-        base = base.resolve()
-        for candidate in [base, *base.parents]:
-            candidate_index = candidate / INDEX_DIR_NAME
-            if candidate_index.exists():
-                return candidate_index
-        return None
-
     # Discovery ascendente a partir do CWD (ou start_dir informado)
     current = (start_dir or Path.cwd()).resolve()
-    found = _discover_from(current)
+    found = _discover_index_dir(current)
     if found is not None:
         INDEX_RESOLUTION_SOURCE = "discovery"
         print(
@@ -163,7 +286,7 @@ def resolve_index_dir(
 
     if project_dir_value:
         project_dir = Path(project_dir_value)
-        found = _discover_from(project_dir)
+        found = _discover_index_dir(project_dir)
         if found is not None:
             INDEX_RESOLUTION_SOURCE = "editor-project-dir"
             print(
@@ -200,7 +323,10 @@ def _index_not_found_error(storage: "StorageBackend") -> FileNotFoundError:
         "O diretório do índice é resolvido na seguinte ordem: "
         "(1) argumento --index-dir do servidor, "
         "(2) variável de ambiente ATLAS_INDEX_DIR, "
-        "(3) busca ascendente por uma pasta '.code-index' a partir do CWD. "
+        "(3) busca ascendente por uma pasta '.code-index' a partir do CWD, "
+        "(4) raiz do projeto informada pelo editor (CLAUDE_PROJECT_DIR / "
+        "WORKSPACE_FOLDER_PATHS), "
+        "(5) workspace roots informados pelo cliente MCP (capability 'roots'). "
         "Execute a indexação primeiro: 'atlas-index --workspace <caminho>' "
         "ou use a tool 'atlas_index'."
     )
@@ -293,6 +419,7 @@ def atlas_search(
     path_prefix: Optional[str] = None,
     include_content: bool = True,
     limit: Optional[int] = None,
+    ctx: "Context | None" = None,
 ) -> str:
     """
     Search code AND documents in the project's local index — your primary tool whenever
@@ -347,6 +474,7 @@ def atlas_search(
     if top_k < 1 or top_k > 50:
         raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
 
+    _resolve_index_dir_via_roots(ctx)
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     if not storage.exists():
         raise _index_not_found_error(storage)
@@ -447,6 +575,7 @@ def atlas_map(
     path_prefix: Optional[str] = None,
     max_depth: int = 3,
     query: Optional[str] = None,  # Aceito para compatibilidade com clientes MCP que injetam 'query'
+    ctx: "Context | None" = None,
 ) -> str:
     """
     Retrieve a structured hierarchical tree map of classes, methods, and functions in the workspace.
@@ -470,6 +599,7 @@ def atlas_map(
         JSON string with `map` (indented text tree of files and their symbols),
         `total_files`, `total_symbols`, and `repo`.
     """
+    _resolve_index_dir_via_roots(ctx)
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     if not storage.exists():
         raise _index_not_found_error(storage)
@@ -537,7 +667,7 @@ def atlas_map(
 
 
 @app.tool()
-def atlas_status() -> str:
+def atlas_status(ctx: "Context | None" = None) -> str:
     """
     Get diagnostic metadata and health status of the local vector index.
 
@@ -551,12 +681,15 @@ def atlas_status() -> str:
         JSON string with `index_exists`, `total_chunks`, `repos_indexed`,
         `languages_indexed`, `embedding_model`, `embedding_backend`, `storage_backend`,
         `index_path`, `index_resolution` (how the index directory was resolved:
-        "cli-arg" | "env" | "discovery" | "cwd-fallback" — useful to diagnose client
-        misconfiguration when `index_exists` is unexpectedly false), `last_indexed_at`,
+        "cli-arg" | "env" | "discovery" | "editor-project-dir" | "roots" |
+        "roots-fallback" | "editor-project-dir-fallback" | "cwd-fallback" — useful to
+        diagnose client misconfiguration when `index_exists` is unexpectedly false),
+        `last_indexed_at`,
         `git_head_sha`, `is_stale` (true when the indexed git HEAD differs from the
         workspace's current HEAD), and `reindexing` (true when another process
         currently holds the reindex lock for this index).
     """
+    _resolve_index_dir_via_roots(ctx)
     data = get_status_data()
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
@@ -567,6 +700,7 @@ def atlas_index(
     paths: Optional[list[str]] = None,
     full: bool = False,
     dry_run: bool = False,
+    ctx: "Context | None" = None,
 ) -> str:
     """
     Index (or re-index) source code into the local search index.
@@ -615,6 +749,10 @@ def atlas_index(
         optionally `skipped_reason`/`message` if another process already holds
         the reindex lock.
     """
+    # Resolve o índice via MCP roots quando a resolução de startup caiu em fallback,
+    # antes de derivar o workspace do pai do índice [R].
+    _resolve_index_dir_via_roots(ctx)
+
     # Resolve o workspace: parâmetro -> pai do índice resolvido -> CWD
     if workspace:
         workspace_path = Path(workspace).resolve()
