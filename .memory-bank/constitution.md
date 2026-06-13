@@ -3,7 +3,7 @@
 ## Core Principles
 
 ### I. Execução 100% Local e Privada
-O sistema processa tudo localmente na máquina do desenvolvedor. A geração de embeddings usando o modelo `all-MiniLM-L6-v2` e o armazenamento/busca no banco LanceDB embutido funcionam de forma independente e totalmente offline, garantindo que o código-fonte proprietário nunca seja enviado para serviços de nuvem ou exposto a terceiros.
+O sistema processa tudo localmente na máquina do desenvolvedor. A geração de embeddings usando o modelo `all-MiniLM-L6-v2` e o armazenamento/busca no LanceDB embutido funcionam de forma independente e totalmente offline, garantindo que o código-fonte proprietário nunca seja enviado para serviços de nuvem ou exposto a terceiros.
 
 ### II. Indexação Sintática via AST (Tree-sitter)
 O código do workspace deve ser processado estruturalmente por meio de analisadores sintáticos Tree-sitter para mapear classes, métodos e funções. Isso garante que o contexto fornecido aos agentes de IA seja quebrado e isolado em escopos lógicos reais (chunks de símbolos), e não em blocos arbitrários de linhas ou caracteres.
@@ -14,8 +14,8 @@ Prioridade absoluta na economia de tokens dos prompts da IA. A recuperação de 
 ### IV. Isolamento de Stdio e Resiliência da Interface MCP
 Toda a comunicação externa com editores e clientes de IA é feita via stdio (JSON-RPC) por meio do FastMCP. Qualquer tipo de warning de dependências, C-extensions, logging ou prints indesejados deve ser obrigatoriamente isolado e redirecionado para o canal `stderr`, mantendo o `stdout` livre de ruídos para garantir a integridade do protocolo.
 
-### V. Simplicidade Operacional e Fricção Mínima (YAGNI)
-O design prioriza simplicidade e portabilidade, rodando nativamente em macOS e Linux via Python e gerenciador `uv`. Funcionalidades acessórias complexas, como sincronização automática contínua (watch mode), interfaces Web de administração ou reranking externo na nuvem, estão fora do escopo para assegurar baixo acoplamento e inicialização instantânea.
+### V. Portabilidade Multiplataforma (macOS, Linux e Windows)
+O MCP deve rodar nativamente em **macOS, Linux e Windows** via Python e gerenciador `uv`. Bootstrap (`setup.sh`, `setup.ps1`), resolução de paths, subprocessos, locking de arquivos, encoding de stdio e registro em clientes MCP (`deploy_mcp.py`) devem tratar diferenças de plataforma de forma explícita e coberta por testes — sem assumir ambiente POSIX. Funcionalidades acessórias complexas (watch mode, UI web, reranking na nuvem) permanecem fora do escopo para preservar simplicidade e inicialização instantânea.
 
 ## Restrições Adicionais e Padrões de Código
 
@@ -28,23 +28,37 @@ Comentários no código e tags de contexto (como `// @MindContext` ou `// @Mind.
 - Usar tags apenas quando agregarem valor real de governança ou contexto.
 - Evitar redundâncias e ruído (em geral, manter de 1 a 3 tags por unidade lógica).
 
+### Ambiguidade Exige Parada
+Pedido ambíguo, com mais de uma interpretação plausível ou com premissas não fornecidas deve ser interrompido antes de executar. O agente nomeia a ambiguidade de forma objetiva e pergunta. Normalizar internamente e prosseguir sem clarificação é proibido. Suposições assumidas são declaradas explicitamente em seção "Hipóteses" no artefato.
+
+### Código Mínimo — Sem Especulação
+Código gerado contém apenas o que foi pedido. Proibido: features não solicitadas, abstrações para uso único, "flexibilidade" ou "configurabilidade" não requeridas, error handling para cenários impossíveis. Se uma solução com menos código resolve o problema, ela é preferida.
+
+### Mudanças Cirúrgicas
+Cada linha alterada deve ser rastreável diretamente ao pedido. Código adjacente não é tocado, reformatado nem "melhorado". Estilo e convenções existentes são preservados. Imports, variáveis e funções tornados órfãos pelas próprias mudanças são removidos. Dead code pré-existente é mencionado, nunca deletado sem pedido explícito.
+
+### Execução Orientada a Critério Verificável
+Toda task deve ter critério de aceite observável antes de iniciar execução. Critérios vagos ("fazer funcionar", "melhorar") são rejeitados para clarificação. Para tasks com múltiplos passos, cada passo declara sua verificação: `[passo] → verificar: [condição]`.
+
 ## Workflow de Qualidade e Desenvolvimento
 
 ### Garantia de Qualidade com Testes Automatizados
-Qualquer alteração de comportamento lógico no indexador ou no servidor MCP deve vir acompanhada de testes unitários ou de integração apropriados. A suíte de testes deve ser executada com o comando:
+Qualquer alteração de comportamento lógico no indexador ou no servidor MCP deve vir acompanhada de testes unitários ou de integração apropriados. Mudanças com impacto multiplataforma devem incluir cobertura ou validação explícita para Windows quando aplicável. A suíte de testes deve ser executada com:
+
 ```bash
 uv run --python 3.12 --with pytest python -m pytest
 ```
 
 ### Estilo de Código e Linter
-O código Python deve seguir as convenções de estilo e conformidade do repositório. O linter `ruff` deve ser executado para validação do código alterado:
+O código Python deve seguir as convenções de estilo e conformidade do repositório:
+
 ```bash
 uv run ruff check
 ```
 
 ## Governance
 
-- Esta Constituição é o documento de maior relevância normativa no repositório. As regras e princípios aqui estabelecidos prevalecem sobre quaisquer convenções locais, padrões locais ou regras temporárias definidas na memória operacional (`operational-memory.md`) se houver conflito ou ambiguidade.
-- Qualquer alteração a esta Constituição exige o incremento de sua versão, atualização da data de alteração e registro dos novos princípios.
+- Esta Constituição é o documento de maior relevância normativa no repositório. As regras aqui estabelecidas prevalecem sobre convenções locais ou conteúdo de `.memory-bank/operational-memory.md` quando houver conflito ou ambiguidade.
+- Qualquer alteração exige incremento de versão, atualização de `Last Amended` e registro dos princípios alterados.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-06-05
+**Version**: 1.1.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-06-13

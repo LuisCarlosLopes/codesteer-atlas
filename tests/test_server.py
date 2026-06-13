@@ -1223,6 +1223,31 @@ def test_spawn_index_subprocess_started_with_full_and_paths(tmp_path):
     assert kwargs["stdin"] == subprocess.DEVNULL
 
 
+def test_spawn_index_subprocess_writes_timestamped_header_to_log(tmp_path):
+    """O log recebe um cabeçalho com data/hora (ISO 8601) antes do output do subprocesso."""
+    import re
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value.pid = 7
+        _spawn_index_subprocess(workspace, paths=["src"], full=False)
+
+    log_content = (index_dir / "background_reindex.log").read_text(encoding="utf-8")
+    # Timestamp ISO 8601 (data + hora) no cabeçalho do run
+    assert re.search(r"\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", log_content)
+    assert "Reindex iniciado" in log_content
+    assert "modo=incremental" in log_content
+    assert "paths=src" in log_content
+
+
 def test_spawn_index_subprocess_popen_raises_returns_error(tmp_path):
     """Quando `Popen` lança exceção, retorna status='error' com a mensagem."""
     workspace = tmp_path / "workspace"

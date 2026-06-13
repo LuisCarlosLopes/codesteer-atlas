@@ -6,6 +6,7 @@ import posixpath
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path, PurePath
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -933,7 +934,21 @@ def _spawn_index_subprocess(
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
     try:
-        with open(log_path, "a", encoding="utf-8") as log_file:
+        # `newline=""` desativa a tradução de newline do modo texto: no Windows o
+        # default converteria '\n' em '\r\n' no header, divergindo do output do
+        # subprocesso (que escreve '\n' cru no mesmo fd). Mantém LF uniforme em
+        # mac/linux/windows.
+        with open(log_path, "a", encoding="utf-8", newline="") as log_file:
+            # Cabeçalho com data/hora local (com timezone) marcando o início de
+            # cada run; `flush` garante que ele anteceda o output do subprocesso.
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            mode = "full" if full else "incremental"
+            scope = ", ".join(paths) if paths else "all"
+            log_file.write(
+                f"\n[{timestamp}] === Reindex iniciado "
+                f"(workspace={workspace_path}, modo={mode}, paths={scope}) ===\n"
+            )
+            log_file.flush()
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
