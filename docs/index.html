@@ -5,15 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CodeSteer Atlas — Documentação Visual & Conceitos</title>
   <meta name="description" content="Aprenda sobre o Model Context Protocol (MCP), a busca híbrida semântica local e como o CodeSteer Atlas indexa código-fonte e documentos de forma inteligente.">
+  <meta name="theme-color" content="#080d1a">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+
+  <a class="skip-link" href="#main">Ir para o conteúdo</a>
 
   <!-- Hero Section -->
   <header class="hero">
     <div class="hero-glow"></div>
     <div class="container">
-      <div class="badge">Constituição Local-First</div>
+      <div class="badge">100% local-first</div>
       <h1>CodeSteer Atlas</h1>
       <p class="subtitle">Servidor MCP local para busca semântica híbrida em código e documentos</p>
       <div class="hero-actions">
@@ -29,30 +33,39 @@
   </header>
 
   <!-- Sticky Navigation -->
-  <nav class="navbar">
+  <nav class="navbar" aria-label="Navegação principal">
     <div class="container nav-container">
-      <a href="#" class="nav-brand">Atlas Docs</a>
-      <ul class="nav-links">
-        <li><a href="#mcp">O que é MCP</a></li>
-        <li><a href="#como-funciona">Como Funciona</a></li>
-        <li><a href="#indexacao">Indexação</a></li>
-        <li><a href="#codigo-ast">Código (AST)</a></li>
-        <li><a href="#texto-docs">Texto & Docs</a></li>
-        <li><a href="#busca-hibrida">Busca Hibrida</a></li>
-        <li><a href="#tools">Tools</a></li>
-        <li><a href="#local-first">Local-First</a></li>
-      </ul>
+      <a href="#" class="nav-brand">CodeSteer Atlas</a>
+      <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav">
+        <span class="sr-only">Abrir menu de seções</span>
+        <span class="nav-toggle-bar" aria-hidden="true"></span>
+        <span class="nav-toggle-bar" aria-hidden="true"></span>
+        <span class="nav-toggle-bar" aria-hidden="true"></span>
+      </button>
+      <div class="nav-panel" id="site-nav">
+        <p class="nav-panel-label">Seções</p>
+        <ul class="nav-links">
+          <li><a href="#mcp"><span class="nav-num">01</span> MCP</a></li>
+          <li><a href="#como-funciona"><span class="nav-num">02</span> Protocolo</a></li>
+          <li><a href="#indexacao"><span class="nav-num">03</span> Indexação</a></li>
+          <li><a href="#codigo-ast"><span class="nav-num">04</span> Código AST</a></li>
+          <li><a href="#texto-docs"><span class="nav-num">05</span> Texto &amp; Docs</a></li>
+          <li><a href="#busca-hibrida"><span class="nav-num">06</span> Busca híbrida</a></li>
+          <li><a href="#tools"><span class="nav-num">07</span> Tools</a></li>
+          <li><a href="#instalacao"><span class="nav-num">08</span> Instalar</a></li>
+        </ul>
+      </div>
     </div>
   </nav>
 
   <!-- Main Content -->
-  <main class="container content-grid">
+  <main id="main" class="container content-grid">
 
     <!-- 1. O QUE É MCP -->
-    <section id="mcp" class="card-section">
+    <section id="mcp" class="card-section" aria-labelledby="heading-mcp">
       <div class="section-header">
         <span class="section-num">01</span>
-        <h2>O que é o Model Context Protocol (MCP)?</h2>
+        <h2 id="heading-mcp">O que é o Model Context Protocol (MCP)?</h2>
       </div>
       <div class="section-body">
         <p>
@@ -62,9 +75,9 @@
           Em vez de cada LLM ou IDE escrever integrações proprietárias para ler arquivos, pesquisar em bancos de dados ou executar comandos, eles atuam como <strong>Clientes MCP</strong> genéricos que se conectam a um ou mais <strong>Servidores MCP</strong> por canais estruturados.
         </p>
 
-        <div class="diagram-container">
+        <div class="diagram-container" role="img" aria-label="Diagrama: Cliente IA conecta via stdio JSON-RPC ao servidor CodeSteer Atlas, que consulta o LanceDB local na pasta .code-index">
           <div class="diagram-title">Arquitetura de Comunicação do CodeSteer Atlas</div>
-          <svg class="diagram-svg" viewBox="0 0 800 240" xmlns="http://www.w3.org/2000/svg">
+          <svg class="diagram-svg" viewBox="0 0 800 240" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
             <!-- Defs for markers and gradients -->
             <defs>
               <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
@@ -90,8 +103,8 @@
             <!-- Client Node -->
             <rect x="30" y="50" width="180" height="140" rx="10" fill="url(#gradient-blue)" stroke="#4f46e5" stroke-width="2" />
             <text x="120" y="85" fill="#f8fafc" font-size="14" font-weight="bold" text-anchor="middle">Cliente IA (IDE)</text>
-            <text x="120" y="115" fill="#94a3b8" font-size="12" text-anchor="middle">Cursor / Claude Code</text>
-            <text x="120" y="135" fill="#94a3b8" font-size="12" text-anchor="middle">VS Code / Cline / Cline</text>
+            <text x="120" y="115" fill="#94a3b8" font-size="12" text-anchor="middle">Cursor · Claude Code · Copilot</text>
+            <text x="120" y="135" fill="#94a3b8" font-size="12" text-anchor="middle">VS Code · Cline · Kiro</text>
             <rect x="50" y="155" width="140" height="22" rx="4" fill="#312e81" />
             <text x="120" y="170" fill="#38bdf8" font-size="11" font-weight="bold" text-anchor="middle">Orquestra Chamadas</text>
 
@@ -129,7 +142,7 @@
     </section>
 
     <!-- 2. COMO FUNCIONA O PROTOCOLO -->
-    <section id="como-funciona" class="card-section">
+    <section id="como-funciona" class="card-section card-section--flat">
       <div class="section-header">
         <span class="section-num">02</span>
         <h2>Como o protocolo funciona na prática?</h2>
@@ -192,6 +205,10 @@
         <span class="section-num">03</span>
         <h2>O Pipeline de Indexação do Atlas</h2>
       </div>
+      <nav class="section-toc" aria-label="Subseções de indexação">
+        <a href="#indexacao">Pipeline</a>
+        <a href="#resolucao-indice">Resolução do índice</a>
+      </nav>
       <div class="section-body">
         <p>
           Para responder a buscas semânticas instantâneas sem gastar tokens, o CodeSteer Atlas constrói um índice vetorial e textual local chamado <code>.code-index</code>. O processo de indexação segue <strong>6 etapas factuais e lineares</strong> executadas pelo <code>indexer.py</code>:
@@ -278,6 +295,58 @@
             </svg>
           </div>
         </div>
+
+        <h3 id="resolucao-indice">Onde fica o <code>.code-index</code>?</h3>
+        <p>
+          O servidor MCP precisa localizar a pasta <code>.code-index</code> do projeto antes de buscar ou indexar.
+          A resolução segue uma cadeia de prioridade fixa (DECISAO-002). O campo
+          <code>index_resolution</code> retornado por <code>atlas_status</code> indica qual mecanismo foi usado —
+          útil para diagnosticar plugins globais iniciados com CWD diferente da raiz do projeto (ex.: HOME).
+        </p>
+
+        <ol class="resolution-chain">
+          <li>
+            <strong><code>--index-dir</code></strong> — argumento de linha de comando do servidor (<code>index_resolution: "cli-arg"</code>).
+          </li>
+          <li>
+            <strong><code>ATLAS_INDEX_DIR</code></strong> — variável de ambiente explícita (<code>"env"</code>).
+          </li>
+          <li>
+            <strong>Discovery ascendente a partir do CWD</strong> — sobe diretórios procurando uma pasta <code>.code-index</code> existente, estilo <code>.git</code> (<code>"discovery"</code>).
+          </li>
+          <li>
+            <strong>Raiz informada pelo editor</strong> — <code>CLAUDE_PROJECT_DIR</code> (Claude Code) ou
+            <code>WORKSPACE_FOLDER_PATHS</code> (Cursor/VS Code), quando o CWD do plugin não é a raiz do projeto (<code>"editor-project-dir"</code> ou <code>"editor-project-dir-fallback"</code>).
+          </li>
+          <li>
+            <strong>MCP roots (upgrade na 1ª tool call)</strong> — se a resolução de startup caiu em fallback,
+            a primeira chamada a uma tool consulta <code>roots/list</code> do cliente MCP, localiza ou aponta o índice
+            para a raiz real do workspace (<code>"roots"</code> ou <code>"roots-fallback"</code>). Cobre plugins globais
+            (Copilot, Cursor, Kiro) sem configuração por projeto.
+          </li>
+          <li>
+            <strong>Fallback final</strong> — <code>.code-index</code> relativo ao CWD ou à raiz do editor (<code>"cwd-fallback"</code>).
+          </li>
+        </ol>
+
+        <div class="note-box info">
+          <strong>Plugins globais:</strong> quando o servidor é registrado como plugin (não por projeto), ele costuma
+          iniciar com CWD = HOME. Sem os passos 4 e 5, o Atlas apontaria para um índice errado. Use
+          <code>atlas_status</code> e verifique <code>index_resolution</code> e <code>index_path</code> se a busca
+          retornar índice inexistente ou vazio.
+        </div>
+
+        <h3>Reindex automático em background</h3>
+        <p>
+          Ao iniciar o servidor MCP (<code>atlas-serve</code>), se já existir um índice local, o Atlas dispara uma
+          <strong>reindexação incremental em subprocesso</strong> — sem bloquear o canal stdio JSON-RPC. Operações
+          pesadas (LanceDB, Tantivy FTS, ONNX) rodam fora do processo do servidor para não congelar chamadas MCP.
+        </p>
+        <ul>
+          <li><strong>Lock de reindex:</strong> apenas um processo reindexa por vez; <code>atlas_status</code> expõe <code>reindexing: true</code> enquanto o lock estiver ativo.</li>
+          <li><strong>Log:</strong> saída em <code>.code-index/background_reindex.log</code>, com cabeçalhos timestamped por execução.</li>
+          <li><strong><code>atlas_index</code> assíncrono:</strong> indexação do workspace inteiro ou com <code>full=true</code> também roda em background e retorna imediatamente com <code>status</code>, <code>pid</code> e <code>log_path</code>. Indexação de subpastas específicas (<code>paths</code> não vazio, <code>full=false</code>) permanece síncrona.</li>
+        </ul>
       </div>
     </section>
 
@@ -308,21 +377,21 @@
           <div>
             <div class="diagram-title">Estrutura de Chunks AST de um Arquivo Python</div>
             <div class="code-tree">
-              <span class="tree-root">📁 auth_service.py (Arquivo de Código)</span>
+              <span class="tree-root"><span class="tree-kind">Arquivo</span> auth_service.py</span>
               <div class="tree-branch">
-                <span class="tree-node class">📦 class AuthService (Linhas 5-42)</span>
+                <span class="tree-node class"><span class="tree-kind">Classe</span> AuthService (Linhas 5-42)</span>
                 <div class="tree-leaf">
-                  <span class="tree-node method">⚙️ method AuthService.__init__ (Linhas 6-8)</span>
+                  <span class="tree-node method"><span class="tree-kind">Método</span> AuthService.__init__ (Linhas 6-8)</span>
                 </div>
                 <div class="tree-leaf">
-                  <span class="tree-node method">⚙️ method AuthService.login (Linhas 10-25)</span>
+                  <span class="tree-node method"><span class="tree-kind">Método</span> AuthService.login (Linhas 10-25)</span>
                 </div>
                 <div class="tree-leaf">
-                  <span class="tree-node method">⚙️ method AuthService.logout (Linhas 27-42) [Truncado]</span>
+                  <span class="tree-node method"><span class="tree-kind">Método</span> AuthService.logout (Linhas 27-42) [Truncado]</span>
                 </div>
               </div>
               <div class="tree-branch">
-                <span class="tree-node function">⚙️ function hash_password (Linhas 45-50)</span>
+                <span class="tree-node function"><span class="tree-kind">Função</span> hash_password (Linhas 45-50)</span>
               </div>
             </div>
           </div>
@@ -400,13 +469,52 @@
             <span class="tag">toml (.toml)</span>
             <span class="tag">html/css (.html, .css)</span>
             <span class="tag">xml (.xml)</span>
+            <span class="tag">dart (.dart)</span>
+            <span class="tag">pascal (.pas)</span>
+            <span class="tag">vb6 (.bas, .cls, .frm)</span>
+            <span class="tag">razor (.cshtml, .razor)</span>
           </div>
+        </div>
+
+        <h3>Referências cruzadas em Markdown (busca enriquecida)</h3>
+        <p>
+          Além de indexar seções Markdown por cabeçalhos, o <code>atlas_search</code> enriquece resultados
+          <code>language=="markdown"</code> com o campo opcional <code>markdown_references</code> — sem reindexar
+          nem alterar o schema LanceDB. O enriquecimento é feito em tempo de busca a partir do conteúdo do chunk.
+        </p>
+        <ul>
+          <li><strong>Links padrão:</strong> <code>[texto](destino.md)</code> e <code>[texto](destino.md#secao)</code></li>
+          <li><strong>Wikilinks Obsidian:</strong> <code>[[destino]]</code>, <code>[[destino|alias]]</code>, <code>[[destino#Secao]]</code>, <code>![[embed]]</code></li>
+          <li><strong>Resolução de wikilinks "bare":</strong> nomes sem path (ex.: <code>[[mcp-server]]</code>) são resolvidos globalmente contra o mapa de arquivos <code>.md</code> do <code>manifest.json</code>; ambiguidade retorna lista de <code>candidates</code>.</li>
+          <li><strong>Âncoras:</strong> quando o destino está indexado, o campo <code>resolved_section</code> pode mapear <code>#secao</code> ao nome da seção correspondente.</li>
+        </ul>
+
+        <div class="code-example">
+          <div class="code-title">Trecho de resposta atlas_search — markdown_references</div>
+          <pre><code>{
+  "file_path": "docs/architecture.md",
+  "language": "markdown",
+  "symbol": "Pipeline de Indexação",
+  "score": 0.041,
+  "markdown_references": [
+    {
+      "file_path": "docs/mcp-overview.md",
+      "anchor": "stdio-transport",
+      "resolved_section": "Transporte stdio"
+    },
+    {
+      "file_path": "docs/obsidian-vault/note.md",
+      "anchor": null,
+      "resolved_section": null
+    }
+  ]
+}</code></pre>
         </div>
       </div>
     </section>
 
     <!-- 6. BUSCA HÍBRIDA E EMBEDDINGS -->
-    <section id="busca-hibrida" class="card-section">
+    <section id="busca-hibrida" class="card-section card-section--flat">
       <div class="section-header">
         <span class="section-num">06</span>
         <h2>Busca Híbrida e Embeddings Locais</h2>
@@ -465,10 +573,12 @@
               <span class="tool-type">Busca Híbrida</span>
             </div>
             <p class="tool-desc">
-              Realiza a busca semântica híbrida (vetorial + léxica) no índice de chunks locais. A IA utiliza isso sempre que precisa localizar códigos, conceitos ou regras no repositório.
+              Realiza a busca semântica híbrida (vetorial + léxica) no índice de chunks locais. Chame diretamente —
+              não é necessário rodar <code>atlas_status</code> antes; erros acionáveis são retornados se o índice não existir.
+              Resultados Markdown incluem <code>markdown_references</code> para links e wikilinks Obsidian detectados no chunk.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code>
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code> (ou alias <code>limit</code>), <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code>
             </div>
           </div>
 
@@ -478,7 +588,8 @@
               <span class="tool-type">Arquitetura</span>
             </div>
             <p class="tool-desc">
-              Retorna um mapa estruturado em árvore (hierárquico) contendo apenas os nomes das classes e métodos declarados no projeto até certa profundidade. Ideal para dar um panorama geral sem estourar limite de tokens.
+              Retorna um mapa estruturado em árvore (hierárquico) contendo classes, funções e métodos indexados até certa profundidade.
+              Também cobre símbolos de documentos Markdown (<code>section</code>). Ideal para panorama geral sem estourar limite de tokens.
             </p>
             <div class="tool-args">
               <strong>Argumentos:</strong> <code>repo</code>, <code>path_prefix</code>, <code>max_depth</code>
@@ -491,10 +602,13 @@
               <span class="tool-type">Diagnóstico</span>
             </div>
             <p class="tool-desc">
-              Retorna metadados de diagnóstico sobre o índice local: se existe, total de chunks, repositórios indexados, modelo ativo, data da última indexação, hash HEAD do Git correspondente, e se o índice está obsoleto (stale).
+              Metadados de diagnóstico do índice local. Use apenas quando o usuário perguntar sobre saúde do índice,
+              staleness ou antes de decidir rodar <code>atlas_index</code> — <strong>não</strong> é pré-requisito para
+              <code>atlas_search</code> ou <code>atlas_map</code>. Expõe <code>index_resolution</code> (como o
+              <code>.code-index</code> foi resolvido), <code>is_stale</code>, <code>reindexing</code> e demais metadados.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> Sem parâmetros
+              <strong>Campos-chave:</strong> <code>index_exists</code>, <code>index_path</code>, <code>index_resolution</code>, <code>is_stale</code>, <code>reindexing</code>, <code>total_chunks</code>, <code>git_head_sha</code>
             </div>
           </div>
 
@@ -504,7 +618,10 @@
               <span class="tool-type">Indexador</span>
             </div>
             <p class="tool-desc">
-              Solicita a indexação ou reindexação incremental ou completa do workspace ativo. Pode ser rodado com <code>dry_run=true</code> para apresentar uma prévia dos arquivos elegíveis antes de iniciar o processo de embeddings.
+              Indexa ou reindexa o workspace. Use <code>dry_run=true</code> primeiro para listar pastas candidatas.
+              Workspace inteiro ou <code>full=true</code> rodam em background (retorno imediato com <code>log_path</code>);
+              subpastas específicas com <code>paths</code> rodam de forma síncrona. Respeita lock de reindex —
+              retorna <code>skipped</code> se outro processo já estiver indexando.
             </p>
             <div class="tool-args">
               <strong>Argumentos:</strong> <code>workspace</code>, <code>paths</code>, <code>full</code>, <code>dry_run</code>
@@ -522,7 +639,7 @@
       </div>
       <div class="section-body">
         <div class="local-first-box">
-          <div class="shield-icon">🛡️</div>
+          <div class="shield-icon" aria-hidden="true">◆</div>
           <div class="local-first-text">
             <h3>Soberania e Privacidade de Código</h3>
             <p>
@@ -534,11 +651,34 @@
           </div>
         </div>
 
+        <h3 id="instalacao">Início rápido (sem clonar o repositório)</h3>
+        <p>
+          Para usar o Atlas em qualquer projeto, basta registrar o servidor MCP no seu cliente e indexar o workspace uma vez.
+          O pacote roda via <code>uvx</code>, direto do GitHub — 100% local após o download inicial das dependências.
+        </p>
+
+        <div class="install-grid">
+          <div class="install-card">
+            <h4>1. Indexar o projeto</h4>
+            <pre><code>uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git \
+  atlas-index --workspace .</code></pre>
+          </div>
+          <div class="install-card">
+            <h4>2. Registrar no cliente MCP</h4>
+            <p>Copie o manifest do seu editor (<code>.cursor/mcp.json</code>, <code>.vscode/mcp.json</code>, etc.) ou instale como plugin:</p>
+            <ul>
+              <li>Claude Code: <code>/plugin install codesteer-atlas</code></li>
+              <li>Copilot CLI: <code>copilot plugin install LuisCarlosLopes/codesteer-atlas</code></li>
+              <li>Kiro: importar Power do GitHub</li>
+            </ul>
+          </div>
+        </div>
+
         <div class="cta-box">
           <h3>Pronto para integrar ao seu fluxo de trabalho?</h3>
-          <p>Instale o CodeSteer Atlas localmente, registre-o no seu cliente MCP predileto e explore o poder da busca híbrida rápida e privada.</p>
+          <p>Explore o guia completo de instalação, variáveis de ambiente e configuração manual em outros clientes.</p>
           <div class="cta-actions">
-            <a href="https://github.com/LuisCarlosLopes/codesteer-atlas#readme" target="_blank" rel="noopener" class="btn btn-primary">Ver Guia de Instalação</a>
+            <a href="https://github.com/LuisCarlosLopes/codesteer-atlas#instalação" target="_blank" rel="noopener" class="btn btn-primary">Ver Guia de Instalação</a>
           </div>
         </div>
       </div>
@@ -546,13 +686,18 @@
 
   </main>
 
+  <button type="button" class="back-to-top" id="back-to-top" hidden aria-label="Voltar ao topo">
+    ↑ Topo
+  </button>
+
   <!-- Footer -->
   <footer class="main-footer">
     <div class="container">
-      <p>CodeSteer Atlas — Documentação Viva. Rodando 100% local-first.</p>
-      <p class="footer-sub">Criado em inglês com comentários internos e documentação oficial em português.</p>
+      <p>CodeSteer Atlas — documentação visual. Tudo roda 100% local-first.</p>
+      <p class="footer-sub">Código-fonte e índice vetorial permanecem na sua máquina.</p>
     </div>
   </footer>
 
+  <script src="site.js" defer></script>
 </body>
 </html>

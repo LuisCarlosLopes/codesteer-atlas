@@ -13,3 +13,4 @@ _codesteer/**
 .coverage
 .DS_Store
 _cognitive-base/.obsidian/
+.impeccable/
