@@ -218,6 +218,32 @@ O diretório `.code-index` é resolvido nesta ordem:
 3. Busca ascendente a partir do diretório atual por uma pasta `.code-index` (estilo `.git`).
 4. Padrão `.code-index` relativo ao diretório atual.
 
+### Instalação via plugin/Power
+
+Os manifests de plugin (Claude Code, Kiro Power, Copilot CLI) não definem `--index-dir`/`ATLAS_INDEX_DIR` — eles dependem do item 3 acima: busca ascendente a partir do diretório de trabalho do processo do servidor, que normalmente é a raiz do projeto aberto no editor. Por isso, basta rodar `atlas-index --workspace .` na raiz do projeto (criando `.code-index/` ali) para que o servidor o encontre automaticamente, sem nenhuma configuração extra.
+
+**Para apontar para um `.code-index` em outro lugar** (ex.: índice compartilhado fora do projeto), defina `ATLAS_INDEX_DIR` — que tem prioridade sobre a busca automática — no manifest MCP:
+
+- **Claude Code**: adicione/edite `.mcp.json` na raiz do projeto (ou a config global) com:
+
+  ```json
+  {
+    "mcpServers": {
+      "codesteer-atlas": {
+        "command": "uvx",
+        "args": ["--from", "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git", "atlas-serve"],
+        "env": {
+          "ATLAS_INDEX_DIR": "/caminho/para/.code-index"
+        }
+      }
+    }
+  }
+  ```
+
+  Uma entrada de `codesteer-atlas` em `.mcp.json` do projeto tem precedência sobre a registrada pelo plugin.
+
+- **Kiro Power / Copilot CLI plugin**: o manifest (`mcp.json`/`.mcp.json`) vem do próprio repositório do Atlas instalado pelo marketplace — não edite-o diretamente (mudanças seriam perdidas em atualizações). Em vez disso, copie o manifest pronto do cliente (ex.: [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json)) para a raiz do seu projeto, adicione `env.ATLAS_INDEX_DIR` e reinicie o cliente — veja [Outros clientes](#outros-clientes-cursor-cline-copilot-kiro-opencode).
+
 ## Contribuindo
 
 Quer clonar o repositório, rodar testes, configurar manualmente outros clientes MCP ou entender o pipeline de indexação em detalhes? Veja [CONTRIBUTING.md](CONTRIBUTING.md) e [CLAUDE.md](CLAUDE.md).
