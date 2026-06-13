@@ -353,6 +353,31 @@ class StorageBackend:
         )
         return arrow_table.to_pylist()
 
+    def get_sections_by_file_path(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Retorna `scope_type`/`scope_name` de todos os chunks indexados de um
+        `file_path` específico, via projeção Arrow (mesmo padrão de
+        `get_symbols`). Usado para resolver `#anchor` de links markdown contra
+        seções já indexadas do arquivo referenciado [F].
+
+        Retorna lista vazia se o índice não existir ou o arquivo não estiver
+        indexado.
+        """
+        if not self.exists():
+            return []
+
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+
+        escaped_path = file_path.replace("'", "''")
+        arrow_table = (
+            table.search()
+            .where(f"file_path = '{escaped_path}'", prefilter=True)
+            .select(["scope_type", "scope_name"])
+            .to_arrow()
+        )
+        return arrow_table.to_pylist()
+
     def delete_by_file_paths(self, file_paths: List[str]) -> None:
         """
         Remove do índice todos os chunks cujo `file_path` esteja na lista informada.

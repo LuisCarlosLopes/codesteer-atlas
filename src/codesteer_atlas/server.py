@@ -36,6 +36,10 @@ from mcp.shared.session import RequestResponder  # noqa: E402
 from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
+from codesteer_atlas.markdown_links import (  # noqa: E402
+    extract_markdown_link_targets,
+    slugify_heading,
+)
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
@@ -273,7 +277,10 @@ def atlas_search(
     Returns:
         JSON string with `results` (list of matches, each with file_path, lines, symbol,
         type, language, score, repo, and optionally content), `total_chunks_searched`,
-        and `query_time_ms`.
+        and `query_time_ms`. For markdown results whose content links to other `.md`
+        files, each match also includes an optional `markdown_references` list of
+        `{file_path, anchor, resolved_section}` describing the linked documents (and,
+        when the anchor matches an indexed section, the resolved section name).
     """
     start_time = time.time()
 
@@ -313,6 +320,10 @@ def atlas_search(
     query_time_ms = (time.time() - start_time) * 1000
     manifest = storage.get_manifest()
 
+    # Cache local de seções por arquivo referenciado, para evitar lookups
+    # repetidos ao resolver #anchor de múltiplos links para o mesmo .md [F]
+    sections_cache: dict = {}
+
     serialized_results = []
     for r in results:
         item = {
@@ -326,6 +337,34 @@ def atlas_search(
         }
         if include_content:
             item["content"] = r.content
+
+        # Enriquece resultados markdown com referências a outros .md detectadas
+        # no conteúdo, resolvendo #anchor contra seções já indexadas (Seção 4.2 do plan.md)
+        if r.language == "markdown":
+            targets = extract_markdown_link_targets(r.content, r.file_path)
+            if targets:
+                markdown_references = []
+                for resolved_path, anchor in targets:
+                    resolved_section = None
+                    if anchor is not None:
+                        if resolved_path not in sections_cache:
+                            sections_cache[resolved_path] = storage.get_sections_by_file_path(
+                                resolved_path
+                            )
+                        target_slug = slugify_heading(anchor)
+                        for section in sections_cache[resolved_path]:
+                            if slugify_heading(section["scope_name"]) == target_slug:
+                                resolved_section = section["scope_name"]
+                                break
+                    markdown_references.append(
+                        {
+                            "file_path": resolved_path,
+                            "anchor": anchor,
+                            "resolved_section": resolved_section,
+                        }
+                    )
+                item["markdown_references"] = markdown_references
+
         serialized_results.append(item)
 
     response = {

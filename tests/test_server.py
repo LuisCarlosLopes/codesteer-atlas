@@ -179,6 +179,226 @@ def test_atlas_search_limit_alias_overrides_top_k():
         assert mock_search.call_args.kwargs["top_k"] == 10
 
 
+def test_atlas_search_markdown_chunk_with_link_includes_references():
+    """Chunk markdown com link para outro .md (sem anchor) ganha `markdown_references`."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="Ver também [outros docs](other.md) para mais detalhes.",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [{"file_path": "docs/other.md", "anchor": None, "resolved_section": None}]
+
+
+def test_atlas_search_markdown_link_with_resolved_anchor():
+    """Link com #anchor que corresponde a uma seção indexada (após slugify) resolve `resolved_section`."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="[ver Decisão 007](decisions.md#decisao-007)",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    mock_sections = [
+        {"scope_type": "section", "scope_name": "Decisão 007"},
+        {"scope_type": "section", "scope_name": "Decisão 008"},
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
+            return_value=mock_sections,
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": "docs/decisions.md",
+                "anchor": "decisao-007",
+                "resolved_section": "Decisão 007",
+            }
+        ]
+
+
+def test_atlas_search_markdown_link_with_unresolved_anchor_is_null():
+    """Link com #anchor sem correspondência em seções indexadas retorna `resolved_section: null`."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="[ver](decisions.md#secao-inexistente)",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    mock_sections = [
+        {"scope_type": "section", "scope_name": "Decisão 007"},
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
+            return_value=mock_sections,
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": "docs/decisions.md",
+                "anchor": "secao-inexistente",
+                "resolved_section": None,
+            }
+        ]
+
+
+def test_atlas_search_markdown_chunk_without_links_omits_field():
+    """Chunk markdown sem nenhum link .md não recebe a chave `markdown_references`."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="Apenas texto, sem links para outros documentos.",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        assert "markdown_references" not in result["results"][0]
+
+
+def test_atlas_search_non_markdown_chunk_omits_field():
+    """Chunk não-markdown nunca recebe a chave `markdown_references`, mesmo com texto similar a link."""
+    mock_results = [
+        SearchResult(
+            file_path="src/app.py",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="# [doc](other.md) — comentário com sintaxe de link",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        assert "markdown_references" not in result["results"][0]
+
+
+def test_atlas_search_include_content_false_still_includes_references():
+    """`include_content=false` omite `content`, mas `markdown_references` permanece presente."""
+    mock_results = [
+        SearchResult(
+            file_path="docs/index.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Intro",
+            language="markdown",
+            content="Ver também [outros docs](other.md) para mais detalhes.",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1, include_content=False))
+
+        item = result["results"][0]
+        assert "content" not in item
+        assert item["markdown_references"] == [
+            {"file_path": "docs/other.md", "anchor": None, "resolved_section": None}
+        ]
+
+
 def test_atlas_map_generation():
     """
     Testa o retorno da ferramenta atlas_map formatando os chunks

@@ -555,3 +555,79 @@ def test_update_manifest_after_incremental_writes_manifest_atomically(temp_stora
     assert not tmp_path.exists()
     assert total == 1
     assert temp_storage.get_manifest().files == {"src/main.py": "hash1"}
+
+
+def test_get_sections_by_file_path_returns_scope_names(temp_storage):
+    """`get_sections_by_file_path` retorna scope_type/scope_name dos chunks do arquivo informado."""
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="docs/decisions.md",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Decisão 007",
+            language="markdown",
+            content="## Decisão 007\n\nconteúdo",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="c2",
+            file_path="docs/decisions.md",
+            repo="test-project",
+            start_line=6,
+            end_line=10,
+            scope_type="section",
+            scope_name="Decisão 008",
+            language="markdown",
+            content="## Decisão 008\n\noutro conteúdo",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="c3",
+            file_path="src/main.py",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main(): pass",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(chunks)
+
+    sections = temp_storage.get_sections_by_file_path("docs/decisions.md")
+
+    scope_names = {row["scope_name"] for row in sections}
+    assert scope_names == {"Decisão 007", "Decisão 008"}
+    assert all(row["scope_type"] == "section" for row in sections)
+
+
+def test_get_sections_by_file_path_empty_for_unknown_file(temp_storage):
+    """`get_sections_by_file_path` retorna lista vazia para arquivo não indexado."""
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="docs/decisions.md",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Decisão 007",
+            language="markdown",
+            content="## Decisão 007\n\nconteúdo",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(chunks)
+
+    sections = temp_storage.get_sections_by_file_path("docs/unknown.md")
+
+    assert sections == []
