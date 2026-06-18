@@ -418,49 +418,42 @@ def atlas_search(
     repo: Optional[str] = None,
     language: Optional[str] = None,
     path_prefix: Optional[str] = None,
-    include_content: bool = True,
+    include_content: bool = False,
     limit: Optional[int] = None,
     ctx: "Context | None" = None,
 ) -> str:
     """
-    Search code AND documents in the project's local index — your primary tool whenever
-    you need to find, explore or investigate ANYTHING in this project.
+    Search code AND documents in the project's local index — your FIRST tool to find,
+    explore or investigate anything here, before broad file reads or grep.
 
-    Reach for this FIRST, before broad file reads or grep, any time you need to locate
-    where something lives, understand an unfamiliar area, or gather context for a task.
-    It runs a semantic hybrid search (vector cosine similarity + BM25 full-text), fused
-    via Reciprocal Rank Fusion (RRF), over pre-indexed chunks of both source code
-    (classes, functions, methods) and documents (Markdown, text, config files such as
-    JSON/YAML/TOML). Pass a natural-language description of what you're looking for or
-    exact symbols/strings.
+    Runs a semantic hybrid search (vector + BM25, fused via RRF) over pre-indexed chunks
+    of source code (classes/functions/methods) and documents (Markdown, text, JSON/YAML/
+    TOML). Pass natural language or exact symbols. For a structural overview instead, use
+    `atlas_map`.
 
-    Use it to find specific implementations, where a function/feature/concept is defined,
-    relevant documentation, or code/docs matching a description of a task. For a
-    structural overview of the codebase instead, use `atlas_map`.
+    Token-efficient two-pass pattern: by default this returns metadata only (file_path,
+    lines, symbol, type, score). Locate first, then read the exact lines with `Read`, or
+    re-call with include_content=true for the few results whose content you actually need.
 
-    Call this directly — do NOT call `atlas_status` first "just to check". If the index
-    does not exist yet, this raises an actionable error explaining how to build it (see
-    `atlas_index`); `atlas_status` is only for explicit diagnostics, not a precondition
-    for search.
+    Call directly — do NOT call `atlas_status` first "just to check". If the index does
+    not exist yet, this raises an actionable error explaining how to build it (see
+    `atlas_index`).
 
     Args:
-        query: The natural language search term or description of the code to find.
-        top_k: Maximum number of results to return (integer between 1 and 50). Defaults to 5.
-        repo: Optional repository name to filter results.
-        language: Optional programming language to filter results (e.g., 'python', 'javascript', 'go').
-        path_prefix: Optional file path prefix to restrict the search to a specific directory (e.g., 'src/controllers').
-        include_content: When false, omits the 'content' field from results to save tokens,
-            returning only metadata and location (file_path, lines, symbol, type, language, score).
-            Defaults to true.
-        limit: Alias for 'top_k', accepted for compatibility. When provided, overrides 'top_k'.
+        query: Natural language description or exact symbols to find.
+        top_k: Max results, 1-50. Defaults to 5.
+        repo: Optional repository name filter.
+        language: Optional language filter (e.g. 'python', 'javascript', 'go').
+        path_prefix: Optional path prefix filter (e.g. 'src/controllers').
+        include_content: When true, includes each result's 'content'. Defaults to false
+            (metadata/location only) to save tokens.
+        limit: Alias for 'top_k'; overrides it when provided.
 
     Returns:
-        JSON string with `results` (list of matches, each with file_path, lines, symbol,
-        type, language, score, repo, and optionally content), `total_chunks_searched`,
-        and `query_time_ms`. For markdown results whose content links to other `.md`
-        files, each match also includes an optional `markdown_references` list of
-        `{file_path, anchor, resolved_section}` describing the linked documents (and,
-        when the anchor matches an indexed section, the resolved section name).
+        JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
+        and `content` only when include_content=true), `total_chunks_searched`, and
+        `query_time_ms`. Markdown results may also include `markdown_references`
+        ({file_path, anchor, resolved_section}) for links to other `.md` files.
     """
     start_time = time.time()
 
@@ -704,51 +697,44 @@ def atlas_index(
     ctx: "Context | None" = None,
 ) -> str:
     """
-    Index (or re-index) source code into the local search index.
+    Index (or re-index) source code and documents into the local search index.
 
-    Use this to build the index for the first time, or to refresh it after
-    `atlas_status` reports `is_stale: true` or large code changes have been made.
+    Use to build the index the first time, or to refresh it after `atlas_status`
+    reports `is_stale: true` or large changes.
 
-    IMPORTANT: unless the user already specified what to index, call with
-    dry_run=true first, show the candidate folders to the user and ASK whether
-    to index everything or specific folders. Only then call again with the
-    chosen 'paths' (or none for the full workspace).
+    IMPORTANT: unless the user already said what to index, call with dry_run=true
+    first, show the candidate folders, and ASK whether to index everything or
+    specific folders. Then call again with the chosen 'paths' (or none for the
+    whole workspace).
 
-    Indexing is incremental by default: unchanged files (by content hash) are
-    skipped on subsequent calls, making re-runs fast. Use full=true to force a
-    complete rebuild ignoring cached file hashes.
+    Incremental by default: unchanged files (by content hash) are skipped, so
+    re-runs are fast. full=true forces a complete rebuild.
 
-    full=true or an empty/omitted 'paths' (whole-workspace indexing) run
-    asynchronously in a background subprocess and return immediately — use
-    `atlas_status` to check progress (`reindexing: true` while running).
-    A non-empty 'paths' with full=false runs synchronously and returns the
-    indexing stats directly.
+    full=true or empty/omitted 'paths' (whole-workspace) run asynchronously in a
+    background subprocess and return immediately — poll `atlas_status`
+    (`reindexing: true` while running). A non-empty 'paths' with full=false runs
+    synchronously and returns stats directly.
 
     Args:
-        workspace: Absolute path to the root directory to index. Defaults to the
-            parent directory of the resolved index, or the current working
-            directory if no index has been resolved yet. Must exist and be a directory.
-        paths: Optional list of subfolder paths, relative to 'workspace', to index
-            (e.g. ["src", "docs"]). When omitted, the entire workspace is indexed.
-            Each path must resolve to a location inside 'workspace' (no path traversal).
-        full: When true, forces a full re-index ignoring cached file hashes.
-            Defaults to false (incremental).
-        dry_run: When true, does NOT index anything. Instead, returns the
-            top-level candidate folders under 'workspace' with a count of
-            eligible files in each, so the agent can present them to the user
-            before deciding what to index. Defaults to false.
+        workspace: Absolute path to index. Defaults to the parent of the resolved
+            index, else the current directory. Must exist and be a directory.
+        paths: Optional subfolders (relative to 'workspace') to index, e.g.
+            ["src", "docs"]. Omitted = whole workspace. No path traversal outside it.
+        full: Force full re-index ignoring cached hashes. Defaults to false.
+        dry_run: When true, indexes nothing; returns top-level candidate folders
+            with eligible-file counts so you can present them before deciding.
+            Defaults to false.
 
     Returns:
-        When dry_run is true: JSON with `workspace`, `candidates` (list of
-        {path, eligible_files}), and `total_eligible_files`.
-        When full=true or 'paths' is empty/omitted (dry_run=false): JSON with
-        `workspace`, `indexed_paths`, `status` ("started"|"skipped"|"error"),
-        `log_path`, optionally `pid`/`reason`/`error`, and `message`.
-        When 'paths' is non-empty and full=false: JSON with `workspace`,
-        `indexed_paths`, `files_processed`, `files_skipped_unchanged`,
-        `files_removed`, `chunks_persisted`, `duration_s`, `git_head_sha`, and
-        optionally `skipped_reason`/`message` if another process already holds
-        the reindex lock.
+        dry_run=true: JSON with `workspace`, `candidates` ({path, eligible_files}),
+        `total_eligible_files`.
+        async (full=true or empty 'paths'): JSON with `workspace`, `indexed_paths`,
+        `status` ("started"|"skipped"|"error"), `log_path`, optional
+        `pid`/`reason`/`error`, and `message`.
+        sync ('paths' set, full=false): JSON with `workspace`, `indexed_paths`,
+        `files_processed`, `files_skipped_unchanged`, `files_removed`,
+        `chunks_persisted`, `duration_s`, `git_head_sha`, and optional
+        `skipped_reason`/`message` if another process holds the reindex lock.
     """
     # Resolve o índice via MCP roots quando a resolução de startup caiu em fallback,
     # antes de derivar o workspace do pai do índice [R].

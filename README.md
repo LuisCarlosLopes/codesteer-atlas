@@ -162,7 +162,7 @@ Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto ind
 
 | Tool | Descrição |
 |---|---|
-| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF) por trechos de código relevantes. Suporta filtros por `repo`, `language` e `path_prefix`. |
+| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF). Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo. Filtros: `repo`, `language`, `path_prefix`. |
 | `atlas_map` | Mapa hierárquico de classes/funções/métodos do workspace indexado. |
 | `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. |
 | `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness etc.). |
@@ -202,8 +202,9 @@ ou explorar código.
 
 - Use `path_prefix` para restringir a busca ao subdiretório relevante (ex.: `src/codesteer_atlas`).
 - Use `language` para filtrar por linguagem quando o contexto permitir.
-- Use `include_content=false` em buscas exploratórias para economizar tokens — traga
-  apenas metadados/localização e só leia o conteúdo completo dos resultados relevantes.
+- **Fluxo em 2 passos (economia de tokens):** `atlas_search` retorna **só metadados por padrão**
+  (`file_path`, linhas, símbolo, tipo, score). **Localize primeiro**; depois leia as linhas
+  com `Read`, ou repita com `include_content=true` apenas nos poucos resultados relevantes.
 - Chame `atlas_search` diretamente; não chame `atlas_status` "só para checar" antes —
   se o índice não existir, a própria ferramenta retorna um erro explicando como criá-lo.
 
@@ -225,10 +226,10 @@ ou explorar código.
 
 ## Resumo do fluxo
 
-1. **Descoberta** → `atlas_search` (semântico + BM25, granularidade de
-   classe/função/método via AST, retorna do mais relevante para o menos relevante).
-2. **Confirmação exata** → `grep`/`Read` nos arquivos indicados pelo Atlas.
-3. **Edição** → ferramentas normais (`Edit`, `Write`, terminal para git/testes).
+1. **Descoberta** → `atlas_search` (semântico + BM25; metadados por padrão).
+2. **Detalhe** → `Read` nas linhas retornadas, ou `atlas_search` com `include_content=true` nos hits relevantes.
+3. **Confirmação exata** → `grep`/`Read` para strings literais quando necessário.
+4. **Edição** → ferramentas normais (`Edit`, `Write`, terminal para git/testes).
 ```
 
 ## Como funciona

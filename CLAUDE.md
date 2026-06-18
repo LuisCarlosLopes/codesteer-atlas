@@ -21,8 +21,9 @@ or explore code.
 
 - Use `path_prefix` to restrict the search to the relevant subdirectory (e.g., `src/codesteer_atlas`).
 - Use `language` to filter by language when the context allows.
-- Use `include_content=false` in exploratory searches to save tokens — bring
-only metadata/location and only read the full content of relevant results.
+- **Two-pass flow (token-efficient):** `atlas_search` returns **metadata only by default**
+  (`file_path`, lines, symbol, type, score). **Locate first**, then read the exact lines
+  with `Read`, or re-call with `include_content=true` only for the few results you need.
 - Call `atlas_search` directly; don't call `atlas_status` "just to check" beforehand —
 if the index doesn't exist, the tool itself returns an error explaining how to create it.
 
@@ -43,10 +44,10 @@ differs from the current workspace HEAD).
 
 ## Flow Summary
 
-1. **Discovery** → `atlas_search` (semantic + BM25, granularity of
-class/function/method via AST, returns from most relevant to least relevant).
-2. **Exact Confirmation** → `grep`/`Read` on the files indicated by Atlas.
-3. **Editing** → standard tools (`Edit`, `Write`, terminal for git/tests).
+1. **Discovery** → `atlas_search` (semantic + BM25; metadata only by default).
+2. **Detail** → `Read` the returned line ranges, or `atlas_search` with `include_content=true` for specific hits.
+3. **Exact confirmation** → `grep`/`Read` for literal strings when needed.
+4. **Editing** → standard tools (`Edit`, `Write`, terminal for git/tests).
 
 ## Project
 
@@ -65,7 +66,10 @@ Everything runs 100% locally and offline — no source code is ever sent to exte
 | Check whether the index exists and is up to date                | `atlas_status` |
 | Reindex after large changes or when status reports stale        | `atlas_index`  |
 
-Use `path_prefix`, `language`, and `include_content=false` on `atlas_search` to narrow scope and save tokens. Reserve exact literal matches (symbol names, error strings) for `grep`/`Read` only after Atlas has pointed you to the right files.
+Use `path_prefix` and `language` on `atlas_search` to narrow scope. By default it returns
+metadata only — read the indicated lines with `Read`, or pass `include_content=true` when
+you need chunk content in the response. Reserve exact literal matches (symbol names, error
+strings) for `grep`/`Read` only after Atlas has pointed you to the right files.
 
 ## Commands
 

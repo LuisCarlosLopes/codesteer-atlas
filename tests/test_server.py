@@ -103,7 +103,8 @@ def test_atlas_search_success():
             "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
         ) as mock_search,
     ):
-        result_json = atlas_search(query="how to run app", top_k=2)
+        # include_content=True explícito: o default agora é False (metadata only)
+        result_json = atlas_search(query="how to run app", top_k=2, include_content=True)
         result = json.loads(result_json)
 
         # Garante que a query foi convertida em vetor síncronamente
@@ -122,6 +123,38 @@ def test_atlas_search_success():
         assert "\n" not in result_json
         assert '", "' not in result_json
         assert '": ' not in result_json
+
+
+def test_atlas_search_default_omits_content():
+    """O default de `include_content` é False: a chamada padrão omite 'content'."""
+    mock_results = [
+        SearchResult(
+            file_path="src/app.py",
+            start_line=10,
+            end_line=20,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run(): pass",
+            score=0.15,
+            repo="my-project",
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="how to run app", top_k=2))
+
+        assert len(result["results"]) == 1
+        assert "content" not in result["results"][0]
 
 
 def test_atlas_search_include_content_false_omits_content():

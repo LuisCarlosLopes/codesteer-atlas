@@ -575,10 +575,12 @@
             <p class="tool-desc">
               Realiza a busca semântica híbrida (vetorial + léxica) no índice de chunks locais. Chame diretamente —
               não é necessário rodar <code>atlas_status</code> antes; erros acionáveis são retornados se o índice não existir.
-              Resultados Markdown incluem <code>markdown_references</code> para links e wikilinks Obsidian detectados no chunk.
+              Por padrão retorna só metadados (<code>file_path</code>, linhas, símbolo, score); use <code>include_content=true</code>
+              ou <code>Read</code> nas linhas indicadas para o conteúdo. Resultados Markdown incluem <code>markdown_references</code>
+              para links e wikilinks Obsidian detectados no chunk.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code> (ou alias <code>limit</code>), <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code>
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code> (ou alias <code>limit</code>), <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code> (padrão: <code>false</code>)
             </div>
           </div>
 

@@ -126,7 +126,7 @@ Equipes que preferem busca 100% cloud com reranking gerenciado, watch mode cont�
 ### 6.1 Princípios do MVP
 
 - **Privacidade absoluta:** nenhum byte de código-fonte sai da máquina do desenvolvedor
-- **Economia de contexto:** preferir metadados e trechos mínimos (`include_content=false`) quando possível
+- **Economia de contexto:** `atlas_search` retorna metadados por padrão (`include_content=false`); detalhe com `Read` nas linhas ou `include_content=true` só quando necessário
 - **Fricção mínima:** instalação via comando remoto; descoberta automática do índice no projeto
 - **Resiliência do protocolo:** comunicação MCP estável, sem corrupção do canal de mensagens
 - **Simplicidade (YAGNI):** sem watch mode, sem UI web, sem reranking cloud
