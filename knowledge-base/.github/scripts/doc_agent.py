@@ -77,6 +77,7 @@ def build_draft(
         flags=re.IGNORECASE,
     ).strip() or title
     filename = f"{note_id}-{slugify(clean_title)}.md"
+    escaped_title = title.replace('"', '\\"')
     content = f"""---
 id: {note_id}
 type: {note_type}
@@ -91,7 +92,7 @@ source: greenfield
 migration_status: ""
 meta:
   generated_by: doc-agent
-  pr_title: "{title.replace('"', '\\"')}"
+  pr_title: "{escaped_title}"
 ---
 
 # {clean_title}
