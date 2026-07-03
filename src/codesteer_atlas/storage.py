@@ -132,12 +132,12 @@ class StorageBackend:
             table = db.open_table("chunks")
             table.add(data_to_insert)
 
-            # Atualiza o índice FTS incrementalmente em vez de recriá-lo do zero (DECISAO-003)
-            has_fts = any("content" in idx.columns for idx in table.list_indices())
-            if has_fts:
-                table.optimize()
-            else:
-                table.create_fts_index("content", replace=False)
+            # Recria o índice FTS do zero após cada append incremental.
+            # Workaround para bug lance-index 7.0.0 (lance-format/lance#7313):
+            # table.optimize() causa Rust panic ("index out of bounds") no
+            # inverted index builder ao fazer merge de fragmentos FTS após
+            # múltiplos appends incrementais. Custo extra ~1-2s por reindex.
+            table.create_fts_index("content", replace=True)
         else:
             table = db.create_table("chunks", data=data_to_insert, mode="overwrite")
             table.create_fts_index("content", replace=True)
