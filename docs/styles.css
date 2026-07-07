@@ -176,6 +176,7 @@ button:focus-visible,
 .hero-actions {
   display: flex;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 16px;
   position: relative;
   z-index: 2;
@@ -1101,6 +1102,193 @@ code {
 .install-card code {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* -----------------------------------------
+   Artefatos do índice
+-------------------------------------------- */
+.artifacts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 24px 0 36px;
+}
+
+.artifact-card {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 18px;
+}
+
+.artifact-icon {
+  font-size: 1.4rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.artifact-card h4 {
+  color: #fff;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.artifact-card p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.pipeline-flow-svg {
+  max-height: 140px;
+}
+
+/* -----------------------------------------
+   Workspace multi-repo
+-------------------------------------------- */
+.workspace-panel {
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  border: 1px solid var(--border-color);
+}
+
+.workspace-panel h4 {
+  font-size: 14px;
+  margin-bottom: 12px;
+  color: #fff;
+}
+
+.workspace-panel ul {
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.workspace-panel li {
+  margin-bottom: 6px;
+}
+
+.workspace-panel--ok {
+  background: rgba(16, 185, 129, 0.06);
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.workspace-panel--warn {
+  background: rgba(245, 158, 11, 0.06);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+/* -----------------------------------------
+   Grafo — modos e comparação
+-------------------------------------------- */
+.compare-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin: 24px 0 32px;
+}
+
+.choice-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+
+.choice-card h4 {
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.choice-card p {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.graph-modes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+  margin: 24px 0 32px;
+}
+
+.graph-mode-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 18px;
+}
+
+.graph-mode-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  padding: 3px 8px;
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+
+.graph-mode-card h4 {
+  color: #fff;
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+
+.graph-mode-card p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.graph-mode-card pre {
+  background: #050811;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  color: #a5f3fc;
+  overflow-x: auto;
+}
+
+.tools-grid--five {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.tool-card--highlight {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), transparent);
+}
+
+.tool-card--highlight .tool-name {
+  color: #fde68a;
+}
+
+.tool-args a {
+  color: var(--color-cyan);
+}
+
+.cta-actions--split {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.main-footer a {
+  color: var(--color-cyan);
+  text-decoration: none;
+}
+
+.main-footer a:hover {
+  text-decoration: underline;
 }
 
 /* -----------------------------------------

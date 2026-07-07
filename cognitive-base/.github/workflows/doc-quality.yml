@@ -1,0 +1,23 @@
+name: KB Doc Quality
+
+on:
+  pull_request:
+    paths:
+      - "cognitive-base/**/*.md"
+  push:
+    branches: [main]
+    paths:
+      - "cognitive-base/**/*.md"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate cognitive-base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar Base Cognitiva
+        run: python3 cognitive-base/.github/scripts/validate_kb.py

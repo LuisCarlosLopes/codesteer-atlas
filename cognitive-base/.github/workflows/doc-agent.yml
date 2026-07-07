@@ -1,0 +1,15 @@
+# Template portátil — workflow ativo na raiz do monorepo
+
+O workflow executável está em `.github/workflows/doc-agent.yml` na raiz do
+repositório. Este arquivo documenta o mapeamento PR → nota:
+
+| Padrão no PR                   | Quadrante                 | Type          |
+| ------------------------------ | ------------------------- | ------------- |
+| `feat:`                        | specs/                    | feature       |
+| `fix:` com stack trace         | ops/                      | incident      |
+| `refactor:` breaking           | decisions/                | adr           |
+| `chore(migration):` / `.sql`   | system/                   | table         |
+| label `ai-correction`          | decisions/ai-corrections/ | ai-correction |
+| label `guide` / `docs(guide):` | guides/                   | how-to        |
+
+Script: `cognitive-base/.github/scripts/doc_agent.py`

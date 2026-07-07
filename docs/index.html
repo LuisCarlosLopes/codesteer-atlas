@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CodeSteer Atlas — Documentação Visual & Conceitos</title>
-  <meta name="description" content="Aprenda sobre o Model Context Protocol (MCP), a busca híbrida semântica local e como o CodeSteer Atlas indexa código-fonte e documentos de forma inteligente.">
+  <meta name="description" content="Documentação visual do CodeSteer Atlas: MCP, pipeline de indexação, grafo de conectividade, busca híbrida local e ferramentas atlas_* — 100% offline.">
   <meta name="theme-color" content="#080d1a">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
@@ -19,7 +19,7 @@
     <div class="container">
       <div class="badge">100% local-first</div>
       <h1>CodeSteer Atlas</h1>
-      <p class="subtitle">Servidor MCP local para busca semântica híbrida em código e documentos</p>
+      <p class="subtitle">Servidor MCP local para busca semântica híbrida, indexação incremental e grafo de conectividade em código e documentos</p>
       <div class="hero-actions">
         <a href="#mcp" class="btn btn-primary">Começar a Explorar</a>
         <a href="https://github.com/LuisCarlosLopes/codesteer-atlas" target="_blank" rel="noopener" class="btn btn-secondary">
@@ -50,9 +50,10 @@
           <li><a href="#indexacao"><span class="nav-num">03</span> Indexação</a></li>
           <li><a href="#codigo-ast"><span class="nav-num">04</span> Código AST</a></li>
           <li><a href="#texto-docs"><span class="nav-num">05</span> Texto &amp; Docs</a></li>
-          <li><a href="#busca-hibrida"><span class="nav-num">06</span> Busca híbrida</a></li>
-          <li><a href="#tools"><span class="nav-num">07</span> Tools</a></li>
-          <li><a href="#instalacao"><span class="nav-num">08</span> Instalar</a></li>
+          <li><a href="#grafo"><span class="nav-num">06</span> Grafo</a></li>
+          <li><a href="#busca-hibrida"><span class="nav-num">07</span> Busca híbrida</a></li>
+          <li><a href="#tools"><span class="nav-num">08</span> Tools</a></li>
+          <li><a href="#instalacao"><span class="nav-num">09</span> Instalar</a></li>
         </ul>
       </div>
     </div>
@@ -131,7 +132,8 @@
             <text x="695" y="90" fill="#f8fafc" font-size="14" font-weight="bold" text-anchor="middle">LanceDB Local</text>
             <text x="695" y="120" fill="#a7f3d0" font-size="12" text-anchor="middle">Tabela 'chunks'</text>
             <text x="695" y="140" fill="#64748b" font-size="11" text-anchor="middle">Vetor + FTS (Tantivy)</text>
-            <text x="695" y="165" fill="#34d399" font-size="10" font-weight="bold" text-anchor="middle">.code-index/</text>
+            <text x="695" y="155" fill="#f59e0b" font-size="10" font-weight="bold" text-anchor="middle">+ graph.json</text>
+            <text x="695" y="175" fill="#34d399" font-size="10" font-weight="bold" text-anchor="middle">.code-index/</text>
           </svg>
         </div>
 
@@ -161,7 +163,7 @@
           <div class="flow-step">
             <div class="step-badge">2</div>
             <h4>Descoberta (Listing)</h4>
-            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 4 ferramentas (ex: <code>atlas_search</code>).</p>
+            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 5 ferramentas (ex: <code>atlas_search</code>, <code>atlas_graph</code>).</p>
           </div>
           <div class="flow-step">
             <div class="step-badge">3</div>
@@ -207,44 +209,76 @@
       </div>
       <nav class="section-toc" aria-label="Subseções de indexação">
         <a href="#indexacao">Pipeline</a>
+        <a href="#artefatos-indice">Artefatos</a>
+        <a href="#workspace-multi">Workspace multi-repo</a>
         <a href="#resolucao-indice">Resolução do índice</a>
       </nav>
       <div class="section-body">
         <p>
-          Para responder a buscas semânticas instantâneas sem gastar tokens, o CodeSteer Atlas constrói um índice vetorial e textual local chamado <code>.code-index</code>. O processo de indexação segue <strong>6 etapas factuais e lineares</strong> executadas pelo <code>indexer.py</code>:
+          Para responder a buscas semânticas instantâneas sem gastar tokens, o CodeSteer Atlas constrói um índice vetorial, textual e um grafo de conectividade na pasta local <code>.code-index</code>. O processo é orquestrado por <code>index_workspace()</code> em <code>indexer.py</code> e segue <strong>6 fases ponderadas</strong>:
         </p>
 
         <div class="pipeline-grid">
           <div class="pipeline-card">
             <span class="step-num">1</span>
-            <h4>Varredura</h4>
-            <p>Busca recursiva de arquivos no workspace baseado em <code>SUPPORTED_EXTENSIONS</code>.</p>
+            <h4>Scan</h4>
+            <p>Varredura recursiva do workspace (ou subpastas em <code>--paths</code>). Ignora <code>node_modules</code>, <code>.git</code>, <code>.atlasignore</code> e arquivos &gt; 2 MB.</p>
           </div>
           <div class="pipeline-card">
             <span class="step-num">2</span>
-            <h4>Filtros</h4>
-            <p>Descarta caminhos ignorados pela configuração interna, <code>.gitignore</code> ou arquivo local <code>.atlasignore</code>.</p>
+            <h4>Hash</h4>
+            <p>Compara <code>mtime + size</code> e sha256 com <code>manifest.json</code>. Fast path evita reler arquivos inalterados.</p>
           </div>
           <div class="pipeline-card">
             <span class="step-num">3</span>
-            <h4>Hash SHA-256</h4>
-            <p>Calcula o hash do conteúdo do arquivo para comparar com o <code>manifest.json</code> e permitir indexação incremental.</p>
+            <h4>Chunk</h4>
+            <p>Parse AST (Tree-sitter) ou estratégias textuais. Extrai símbolos, imports e rationale refs (<code>DECISAO-XXX</code>).</p>
           </div>
           <div class="pipeline-card">
             <span class="step-num">4</span>
-            <h4>Chunking</h4>
-            <p>Quebra o arquivo em blocos lógicos autossuficientes (~256 tokens) dependendo da extensão (AST ou Texto).</p>
+            <h4>Embed</h4>
+            <p>Vetores 384d com <code>all-MiniLM-L6-v2</code> via <code>fastembed</code> — apenas chunks novos ou alterados.</p>
           </div>
           <div class="pipeline-card">
             <span class="step-num">5</span>
-            <h4>Embeddings</h4>
-            <p>Gera o vetor semântico de 384 dimensões usando o modelo <code>all-MiniLM-L6-v2</code> através da biblioteca <code>fastembed</code>.</p>
+            <h4>Persist</h4>
+            <p>Grava no LanceDB, atualiza FTS (BM25) e o <code>manifest.json</code> (incremental ou rebuild com <code>--full</code>).</p>
           </div>
           <div class="pipeline-card">
             <span class="step-num">6</span>
-            <h4>LanceDB</h4>
-            <p>Salva os chunks, vetores e metadados no banco e reconstrói o índice FTS Tantivy na coluna de conteúdo.</p>
+            <h4>Graph</h4>
+            <p>Reconstrói <code>graph.json</code> e gera o visualizador offline <code>graph.html</code> a partir do índice atual.</p>
           </div>
+        </div>
+
+        <div class="diagram-container" role="img" aria-label="Fluxo linear: Scan, Hash, Chunk, Embed, Persist, Graph">
+          <div class="diagram-title">Pipeline de indexação — visão linear</div>
+          <svg class="diagram-svg pipeline-flow-svg" viewBox="0 0 880 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+            <defs>
+              <marker id="arrow-pipe" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b"/>
+              </marker>
+            </defs>
+            <g font-size="11" font-weight="600" text-anchor="middle">
+              <rect x="10" y="35" width="120" height="50" rx="8" fill="#1e1b4b" stroke="#6366f1"/>
+              <text x="70" y="65" fill="#e2e8f0">Scan</text>
+              <rect x="150" y="35" width="120" height="50" rx="8" fill="#1e293b" stroke="#0ea5e9"/>
+              <text x="210" y="65" fill="#e2e8f0">Hash</text>
+              <rect x="290" y="35" width="120" height="50" rx="8" fill="#022c22" stroke="#10b981"/>
+              <text x="350" y="65" fill="#a7f3d0">Chunk</text>
+              <rect x="430" y="35" width="120" height="50" rx="8" fill="#180c2e" stroke="#8b5cf6"/>
+              <text x="490" y="65" fill="#ddd6fe">Embed</text>
+              <rect x="570" y="35" width="120" height="50" rx="8" fill="#0c2540" stroke="#0284c7"/>
+              <text x="630" y="65" fill="#bae6fd">Persist</text>
+              <rect x="710" y="35" width="120" height="50" rx="8" fill="#422006" stroke="#f59e0b"/>
+              <text x="770" y="65" fill="#fde68a">Graph</text>
+            </g>
+            <path d="M 130 60 L 150 60" stroke="#64748b" marker-end="url(#arrow-pipe)"/>
+            <path d="M 270 60 L 290 60" stroke="#64748b" marker-end="url(#arrow-pipe)"/>
+            <path d="M 410 60 L 430 60" stroke="#64748b" marker-end="url(#arrow-pipe)"/>
+            <path d="M 550 60 L 570 60" stroke="#64748b" marker-end="url(#arrow-pipe)"/>
+            <path d="M 690 60 L 710 60" stroke="#64748b" marker-end="url(#arrow-pipe)"/>
+          </svg>
         </div>
 
         <div class="grid-2col">
@@ -294,6 +328,65 @@
               <path d="M 180 130 L 290 155" stroke="#f43f5e" stroke-width="1" />
             </svg>
           </div>
+        </div>
+
+        <h3 id="artefatos-indice">O que fica em <code>.code-index/</code></h3>
+        <div class="artifacts-grid">
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">📋</span>
+            <h4><code>manifest.json</code></h4>
+            <p>Hashes sha256, metadados, git HEAD, versão do índice. Usado por <code>atlas_status</code> e indexação incremental.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">🗄️</span>
+            <h4><code>lancedb/</code></h4>
+            <p>Tabela <code>chunks</code> com vetores + texto. Alimenta <code>atlas_search</code> (híbrido) e <code>atlas_map</code>.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">🔗</span>
+            <h4><code>graph.json</code></h4>
+            <p>Grafo derivado: arquivos, símbolos, docs, imports e cites. Consultado por <code>atlas_graph</code>.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">🌐</span>
+            <h4><code>graph.html</code></h4>
+            <p>Viewer offline com busca, filtros e pan/zoom. Abra via <code>file://</code> — caminho em <code>graph_viewer_path</code>.</p>
+          </div>
+        </div>
+
+        <h3 id="workspace-multi">Workspace com várias pastas ou repos</h3>
+        <p>
+          Você pode indexar subpastas específicas com <code>--paths</code> repetido ou via MCP
+          <code>paths=["frontend", "backend"]</code>. Para workspaces com múltiplos repositórios git
+          aninhados, a abordagem recomendada é <strong>um único <code>.code-index</code> na pasta pai</strong>.
+        </p>
+
+        <div class="grid-2col">
+          <div class="workspace-panel workspace-panel--ok">
+            <h4>✓ Suportado</h4>
+            <ul>
+              <li>Indexar várias subpastas: <code>-p frontend -p backend</code></li>
+              <li>Filtrar busca: <code>path_prefix="backend/"</code></li>
+              <li>Indexação incremental por subárvore</li>
+              <li>Pastas <code>.git</code> ignoradas automaticamente</li>
+            </ul>
+          </div>
+          <div class="workspace-panel workspace-panel--warn">
+            <h4>⚠ Limitações atuais</h4>
+            <ul>
+              <li>MCP usa <strong>um índice por processo</strong> — não mergeia dois <code>.code-index</code></li>
+              <li>Campo <code>repo</code> nos chunks = nome da pasta workspace, não cada repo filho</li>
+              <li><code>is_stale</code> só reflete git na raiz do workspace</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="code-example">
+          <div class="code-title">Indexar múltiplas pastas no mesmo workspace</div>
+          <pre><code>uv run atlas-index --workspace . --paths src --paths docs --paths cognitive-base
+
+# Via MCP (síncrono quando paths está definido)
+atlas_index(paths=["src", "docs"])</code></pre>
         </div>
 
         <h3 id="resolucao-indice">Onde fica o <code>.code-index</code>?</h3>
@@ -510,13 +603,192 @@
   ]
 }</code></pre>
         </div>
+
+        <h3>Rationale refs em código (grafo + busca)</h3>
+        <p>
+          Comentários estruturados no código viram metadados persistidos no índice e arestas no grafo.
+          Resultados de <code>atlas_search</code> podem incluir <code>rationale_refs</code> apontando
+          para notas de decisão.
+        </p>
+        <ul>
+          <li><strong>Cites:</strong> <code>DECISAO-005</code>, <code>DEC-002</code>, <code>ADR-001</code>, <code>RFC-012</code></li>
+          <li><strong>Anotações:</strong> <code># WHY:</code>, <code># NOTE:</code> (ou <code>//</code>, <code>--</code>)</li>
+          <li><strong>Wikilinks em comentários:</strong> resolvidos contra arquivos <code>.md</code> do manifest</li>
+        </ul>
+
+        <div class="code-example">
+          <div class="code-title">Exemplo — comentário que alimenta o grafo</div>
+          <pre><code># DECISAO-005: embeddings locais com fastembed
+# WHY: manter indexação 100% offline — nenhum código sai da máquina
+def encode(self, texts: list[str]) -> list[list[float]]:
+    ...</code></pre>
+        </div>
       </div>
     </section>
 
-    <!-- 6. BUSCA HÍBRIDA E EMBEDDINGS -->
-    <section id="busca-hibrida" class="card-section card-section--flat">
+    <!-- 6. GRAFO DE CONHECIMENTO -->
+    <section id="grafo" class="card-section">
       <div class="section-header">
         <span class="section-num">06</span>
+        <h2>Grafo de Conhecimento Derivado</h2>
+      </div>
+      <nav class="section-toc" aria-label="Subseções do grafo">
+        <a href="#grafo">Conceito</a>
+        <a href="#grafo-nos">Nós e arestas</a>
+        <a href="#atlas-graph">atlas_graph</a>
+        <a href="#graph-html">graph.html</a>
+      </nav>
+      <div class="section-body">
+        <p>
+          Além da busca semântica, o Atlas deriva um <strong>grafo de conectividade</strong> a cada indexação.
+          Ele mapeia relações explícitas entre código, documentação, imports e rationale — não substitui
+          <code>atlas_search</code>, mas responde perguntas do tipo <em>"como A se conecta a B?"</em>.
+        </p>
+
+        <div class="compare-choices">
+          <div class="choice-card">
+            <h4><code>atlas_search</code></h4>
+            <p>Localizar por conceito ou símbolo — busca híbrida vetorial + BM25.</p>
+          </div>
+          <div class="choice-card">
+            <h4><code>atlas_graph</code></h4>
+            <p>Explorar hubs, caminhos e vizinhança — conectividade e rationale.</p>
+          </div>
+          <div class="choice-card">
+            <h4><code>graph.html</code></h4>
+            <p>Exploração visual offline — pan, zoom, filtros e foco local.</p>
+          </div>
+        </div>
+
+        <h3 id="grafo-nos">Tipos de nó e aresta</h3>
+        <div class="table-responsive">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>Nós (<code>kind</code>)</th>
+                <th>Exemplo</th>
+                <th>Arestas (<code>kind</code>)</th>
+                <th>Significado</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>file</code>, <code>doc</code></td>
+                <td><code>src/server.py</code>, <code>dec-002.md</code></td>
+                <td><code>contains</code></td>
+                <td>Arquivo contém símbolo ou seção</td>
+              </tr>
+              <tr>
+                <td><code>symbol</code></td>
+                <td><code>index_workspace</code></td>
+                <td><code>imports</code></td>
+                <td>Import Python ou JS/TS relativo</td>
+              </tr>
+              <tr>
+                <td><code>section</code></td>
+                <td>Heading markdown</td>
+                <td><code>links_to</code></td>
+                <td>Link ou wikilink entre docs</td>
+              </tr>
+              <tr>
+                <td><code>rationale</code></td>
+                <td>Texto de <code>WHY:</code> / <code>NOTE:</code></td>
+                <td><code>cites</code></td>
+                <td>Referência <code>DECISAO-XXX</code> no código</td>
+              </tr>
+              <tr>
+                <td colspan="2"></td>
+                <td><code>annotates</code></td>
+                <td>Comentário rationale ligado ao símbolo</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="diagram-container" role="img" aria-label="Exemplo de subgrafo: símbolo cita documento de decisão">
+          <div class="diagram-title">Exemplo — caminho código → decisão arquitetural</div>
+          <svg class="diagram-svg" viewBox="0 0 720 160" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+            <defs>
+              <marker id="arrow-graph" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b"/>
+              </marker>
+            </defs>
+            <rect x="20" y="50" width="150" height="60" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+            <text x="95" y="78" fill="#e2e8f0" font-size="12" font-weight="bold" text-anchor="middle">symbol</text>
+            <text x="95" y="96" fill="#94a3b8" font-size="10" text-anchor="middle">index_workspace</text>
+            <path d="M 170 80 L 210 80" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-graph)"/>
+            <text x="190" y="70" fill="#f59e0b" font-size="9" text-anchor="middle">cites</text>
+            <rect x="210" y="50" width="170" height="60" rx="10" fill="#064e3b" stroke="#10b981" stroke-width="2"/>
+            <text x="295" y="78" fill="#a7f3d0" font-size="12" font-weight="bold" text-anchor="middle">doc</text>
+            <text x="295" y="96" fill="#94a3b8" font-size="9" text-anchor="middle">dec-001-busca-hibrida-rrf.md</text>
+            <path d="M 380 80 L 420 80" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-graph)"/>
+            <text x="400" y="70" fill="#38bdf8" font-size="9" text-anchor="middle">links_to</text>
+            <rect x="420" y="50" width="130" height="60" rx="10" fill="#422006" stroke="#f59e0b" stroke-width="2"/>
+            <text x="485" y="78" fill="#fde68a" font-size="12" font-weight="bold" text-anchor="middle">section</text>
+            <text x="485" y="96" fill="#94a3b8" font-size="9" text-anchor="middle">index.md#decisions</text>
+            <path d="M 550 80 L 590 80" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-graph)"/>
+            <text x="570" y="70" fill="#38bdf8" font-size="9" text-anchor="middle">links_to</text>
+            <rect x="590" y="50" width="110" height="60" rx="10" fill="#064e3b" stroke="#10b981" stroke-width="2"/>
+            <text x="645" y="78" fill="#a7f3d0" font-size="12" font-weight="bold" text-anchor="middle">doc</text>
+            <text x="645" y="96" fill="#94a3b8" font-size="9" text-anchor="middle">dec-002…</text>
+          </svg>
+        </div>
+
+        <h3 id="atlas-graph">Tool <code>atlas_graph</code> — três modos</h3>
+        <p>
+          Lê o <code>graph.json</code> já gerado — <strong>não reconstrói</strong> o grafo.
+          Reindexe com <code>atlas_index</code> se o grafo estiver ausente (índices &lt; 2.1.0).
+        </p>
+
+        <div class="graph-modes-grid">
+          <div class="graph-mode-card">
+            <span class="graph-mode-badge">hubs</span>
+            <h4>Nós centrais</h4>
+            <p>Retorna os nós mais conectados (maior grau). Ideal para descobrir documentos e código “hub” do projeto.</p>
+            <pre><code>atlas_graph(mode="hubs", top_n=10)</code></pre>
+          </div>
+          <div class="graph-mode-card">
+            <span class="graph-mode-badge">explain</span>
+            <h4>Vizinhança</h4>
+            <p>Resume arquivos, docs citados e rationale ligados a um símbolo, arquivo ou nota.</p>
+            <pre><code>atlas_graph(mode="explain",
+  target="index_workspace")</code></pre>
+          </div>
+          <div class="graph-mode-card">
+            <span class="graph-mode-badge">path</span>
+            <h4>Caminho BFS</h4>
+            <p>Encontra rota entre dois nós (até 10 saltos). Aceita id, label ou sufixo único.</p>
+            <pre><code>atlas_graph(mode="path",
+  source="index_workspace",
+  target="dec-002")</code></pre>
+          </div>
+        </div>
+
+        <h3 id="graph-html">Visualizador <code>graph.html</code></h3>
+        <p>
+          Após indexar, abra o HTML autocontido em <code>.code-index/graph.html</code>.
+          O caminho absoluto aparece em <code>atlas_status</code> → <code>graph_viewer_path</code>.
+        </p>
+        <ul>
+          <li><strong>Busca</strong> por label ou id de nó</li>
+          <li><strong>Clique</strong> em nó para focar subgrafo local</li>
+          <li><strong>Filtros</strong> por tipo de nó e aresta</li>
+          <li><strong>Grafos grandes</strong> (&gt; 3000 nós): modo hubs-only com opção “Expandir tudo”</li>
+          <li><strong>Debug:</strong> adicione <code>?debug=1</code> na URL</li>
+        </ul>
+
+        <div class="note-box info">
+          <strong>Upgrade de índice:</strong> se <code>atlas_graph</code> retornar erro de
+          <code>graph.json</code> ausente, rode <code>uv run atlas-index --workspace . --full</code>
+          para regenerar grafo e viewer (requer índice versão 2.1.0+).
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. BUSCA HÍBRIDA E EMBEDDINGS -->
+    <section id="busca-hibrida" class="card-section card-section--flat">
+      <div class="section-header">
+        <span class="section-num">07</span>
         <h2>Busca Híbrida e Embeddings Locais</h2>
       </div>
       <div class="section-body">
@@ -555,32 +827,32 @@
       </div>
     </section>
 
-    <!-- 7. TOOLS MCP DO ATLAS -->
+    <!-- 8. TOOLS MCP DO ATLAS -->
     <section id="tools" class="card-section">
       <div class="section-header">
-        <span class="section-num">07</span>
-        <h2>As 4 Ferramentas (Tools) do Atlas</h2>
+        <span class="section-num">08</span>
+        <h2>As 5 Ferramentas (Tools) do Atlas</h2>
       </div>
       <div class="section-body">
         <p>
-          O servidor MCP do Atlas expõe quatro ações principais que a IA consome automaticamente para gerenciar o contexto do projeto:
+          O servidor MCP expõe cinco ações principais. Use <code>atlas_search</code> para localizar código,
+          <code>atlas_graph</code> para conectividade, e <code>atlas_status</code> apenas para diagnóstico explícito.
         </p>
 
-        <div class="tools-grid">
+        <div class="tools-grid tools-grid--five">
           <div class="tool-card">
             <div class="tool-head">
               <span class="tool-name">atlas_search</span>
               <span class="tool-type">Busca Híbrida</span>
             </div>
             <p class="tool-desc">
-              Realiza a busca semântica híbrida (vetorial + léxica) no índice de chunks locais. Chame diretamente —
-              não é necessário rodar <code>atlas_status</code> antes; erros acionáveis são retornados se o índice não existir.
-              Por padrão retorna só metadados (<code>file_path</code>, linhas, símbolo, score); use <code>include_content=true</code>
-              ou <code>Read</code> nas linhas indicadas para o conteúdo. Resultados Markdown incluem <code>markdown_references</code>
-              para links e wikilinks Obsidian detectados no chunk.
+              Busca semântica híbrida (vetorial + BM25) no índice local. Retorna metadados por padrão;
+              use <code>include_content=true</code> ou <code>Read</code> nas linhas indicadas.
+              Resultados de código podem incluir <code>rationale_refs</code>; Markdown inclui
+              <code>markdown_references</code>.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code> (ou alias <code>limit</code>), <code>repo</code>, <code>language</code>, <code>path_prefix</code>, <code>include_content</code> (padrão: <code>false</code>)
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>path_prefix</code>, <code>language</code>, <code>include_content</code>
             </div>
           </div>
 
@@ -590,11 +862,26 @@
               <span class="tool-type">Arquitetura</span>
             </div>
             <p class="tool-desc">
-              Retorna um mapa estruturado em árvore (hierárquico) contendo classes, funções e métodos indexados até certa profundidade.
-              Também cobre símbolos de documentos Markdown (<code>section</code>). Ideal para panorama geral sem estourar limite de tokens.
+              Mapa hierárquico de classes, funções, métodos e seções Markdown.
+              Panorama estrutural token-eficiente.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>repo</code>, <code>path_prefix</code>, <code>max_depth</code>
+              <strong>Argumentos:</strong> <code>path_prefix</code>, <code>max_depth</code>, <code>repo</code>
+            </div>
+          </div>
+
+          <div class="tool-card tool-card--highlight">
+            <div class="tool-head">
+              <span class="tool-name">atlas_graph</span>
+              <span class="tool-type">Conectividade</span>
+            </div>
+            <p class="tool-desc">
+              Consulta o grafo derivado (<code>graph.json</code>): hubs centrais, caminhos BFS entre nós
+              e vizinhança com docs/rationale. Use quando a pergunta for sobre relações, não localização.
+            </p>
+            <div class="tool-args">
+              <strong>Modos:</strong> <code>hubs</code>, <code>explain</code>, <code>path</code> —
+              ver seção <a href="#grafo">Grafo</a>
             </div>
           </div>
 
@@ -604,13 +891,11 @@
               <span class="tool-type">Diagnóstico</span>
             </div>
             <p class="tool-desc">
-              Metadados de diagnóstico do índice local. Use apenas quando o usuário perguntar sobre saúde do índice,
-              staleness ou antes de decidir rodar <code>atlas_index</code> — <strong>não</strong> é pré-requisito para
-              <code>atlas_search</code> ou <code>atlas_map</code>. Expõe <code>index_resolution</code> (como o
-              <code>.code-index</code> foi resolvido), <code>is_stale</code>, <code>reindexing</code> e demais metadados.
+              Metadados do índice: <code>is_stale</code>, <code>reindexing</code>, <code>index_resolution</code>,
+              <code>graph_available</code>, <code>graph_viewer_path</code>. Não é pré-requisito para busca.
             </p>
             <div class="tool-args">
-              <strong>Campos-chave:</strong> <code>index_exists</code>, <code>index_path</code>, <code>index_resolution</code>, <code>is_stale</code>, <code>reindexing</code>, <code>total_chunks</code>, <code>git_head_sha</code>
+              <strong>Campos-chave:</strong> <code>total_chunks</code>, <code>index_path</code>, <code>git_head_sha</code>
             </div>
           </div>
 
@@ -620,10 +905,9 @@
               <span class="tool-type">Indexador</span>
             </div>
             <p class="tool-desc">
-              Indexa ou reindexa o workspace. Use <code>dry_run=true</code> primeiro para listar pastas candidatas.
-              Workspace inteiro ou <code>full=true</code> rodam em background (retorno imediato com <code>log_path</code>);
-              subpastas específicas com <code>paths</code> rodam de forma síncrona. Respeita lock de reindex —
-              retorna <code>skipped</code> se outro processo já estiver indexando.
+              Indexa ou reindexa o workspace. <code>dry_run=true</code> lista candidatos.
+              Workspace inteiro ou <code>full=true</code> rodam em background; <code>paths</code> específicos são síncronos.
+              Regenera <code>graph.json</code> e <code>graph.html</code>.
             </p>
             <div class="tool-args">
               <strong>Argumentos:</strong> <code>workspace</code>, <code>paths</code>, <code>full</code>, <code>dry_run</code>
@@ -633,10 +917,10 @@
       </div>
     </section>
 
-    <!-- 8. PRINCÍPIO LOCAL-FIRST -->
+    <!-- 9. PRINCÍPIO LOCAL-FIRST -->
     <section id="local-first" class="card-section">
       <div class="section-header">
-        <span class="section-num">08</span>
+        <span class="section-num">09</span>
         <h2>Princípio Constitucional: 100% Local-First</h2>
       </div>
       <div class="section-body">

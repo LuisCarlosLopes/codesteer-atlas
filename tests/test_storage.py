@@ -1,4 +1,6 @@
 import pytest
+import json
+import lancedb
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.storage import StorageBackend
 
@@ -116,6 +118,150 @@ def test_append_chunks_preserves_existing_rows(temp_storage):
         "docs/guide.md",
         "src/utils.py",
     }
+
+
+def test_store_chunks_persists_references_json_and_search_returns_references(temp_storage):
+    vec = [0.1] * 384
+    chunk = CodeChunk(
+        id="c1",
+        file_path="src/main.py",
+        repo="test-project",
+        start_line=1,
+        end_line=5,
+        scope_type="function",
+        scope_name="main",
+        language="python",
+        content="def main():\n    pass",
+        indexed_at="2026-06-05T12:00:00Z",
+        vector=vec,
+        references=["cite:dec-002", "why:cache local"],
+    )
+
+    temp_storage.store_chunks([chunk])
+    results = temp_storage.search_hybrid(query_vector=vec, query_text="main", filters={}, top_k=1)
+
+    assert results[0].references == ["cite:dec-002", "why:cache local"]
+
+
+def test_append_chunks_preserves_references_for_old_and_new_rows(temp_storage):
+    vec = [0.1] * 384
+    temp_storage.store_chunks(
+        [
+            CodeChunk(
+                id="c1",
+                file_path="src/old.py",
+                repo="test-project",
+                start_line=1,
+                end_line=2,
+                scope_type="function",
+                scope_name="old",
+                language="python",
+                content="def old(): pass",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=vec,
+                references=["why:legado"],
+            )
+        ]
+    )
+    temp_storage.append_chunks(
+        [
+            CodeChunk(
+                id="c2",
+                file_path="src/new.py",
+                repo="test-project",
+                start_line=1,
+                end_line=2,
+                scope_type="function",
+                scope_name="new",
+                language="python",
+                content="def new(): pass",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=vec,
+                references=["cite:dec-003"],
+            )
+        ]
+    )
+
+    results = temp_storage.search_hybrid(query_vector=vec, query_text="def", filters={}, top_k=5)
+    refs_by_path = {result.file_path: result.references for result in results}
+
+    assert refs_by_path["src/old.py"] == ["why:legado"]
+    assert refs_by_path["src/new.py"] == ["cite:dec-003"]
+
+
+def test_graph_projection_returns_columns_without_vector(temp_storage):
+    temp_storage.store_chunks(
+        [
+            CodeChunk(
+                id="c1",
+                file_path="docs/guide.md",
+                repo="test-project",
+                start_line=1,
+                end_line=3,
+                scope_type="section",
+                scope_name="Guide",
+                language="markdown",
+                content="# Guide\n\nbody",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=MOCK_VECTOR,
+                references=["cite:dec-001"],
+            )
+        ]
+    )
+
+    rows = temp_storage.get_graph_projection()
+
+    assert rows[0]["references_json"] == json.dumps(["cite:dec-001"], ensure_ascii=False)
+    assert "vector" not in rows[0]
+
+
+def test_search_hybrid_on_legacy_table_without_references_column_returns_empty_refs(temp_storage):
+    temp_storage.index_dir.mkdir(parents=True, exist_ok=True)
+    db = lancedb.connect(str(temp_storage.db_path))
+    db.create_table(
+        "chunks",
+        data=[
+            {
+                "id": "c1",
+                "file_path": "src/legacy.py",
+                "repo": "legacy",
+                "start_line": 1,
+                "end_line": 2,
+                "scope_type": "function",
+                "scope_name": "legacy",
+                "language": "python",
+                "content": "def legacy(): pass",
+                "indexed_at": "2026-06-05T12:00:00Z",
+                "vector": MOCK_VECTOR,
+            }
+        ],
+        mode="overwrite",
+    ).create_fts_index("content", replace=True)
+    temp_storage.manifest_path.write_text(
+        json.dumps(
+            {
+                "total_chunks": 1,
+                "repos_indexed": ["legacy"],
+                "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+                "embedding_dim": 384,
+                "embedding_backend": "fastembed",
+                "storage_backend": "lancedb",
+                "last_indexed_at": "2026-06-05T12:00:00Z",
+                "git_head_sha": None,
+                "languages_indexed": ["python"],
+                "index_version": "2.0.0",
+                "files": {"src/legacy.py": "sha"},
+                "files_meta": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    results = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR, query_text="legacy", filters={}, top_k=1
+    )
+
+    assert results[0].references == []
 
 
 def test_hybrid_search_with_filters(temp_storage):

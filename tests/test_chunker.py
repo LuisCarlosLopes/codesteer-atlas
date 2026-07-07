@@ -87,6 +87,50 @@ def test_chunk_file_truncation(tmp_path):
     assert "return True" in chunks[0].content
 
 
+def test_chunk_python_long_function_keeps_rationale_refs_before_truncation(tmp_path):
+    lines = [f"    value_{i} = {i}" for i in range(80)]
+    lines.insert(40, "    # WHY: manter cache local para evitar nova busca")
+    code_content = "def long_function():\n" + "\n".join(lines) + "\n    return True\n"
+
+    test_file = tmp_path / "large_file.py"
+    test_file.write_text(code_content, encoding="utf-8")
+
+    chunker = ASTChunker()
+    chunks = chunker.chunk_file(test_file, repo_name="test-repo")
+
+    assert len(chunks) == 1
+    assert "# ... [conteúdo truncado para respeitar limites do modelo] ..." in chunks[0].content
+    assert chunks[0].references == ["why:manter cache local para evitar nova busca"]
+
+
+def test_chunk_without_rationale_has_empty_references(tmp_path):
+    test_file = tmp_path / "plain.py"
+    test_file.write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    chunker = ASTChunker()
+    chunks = chunker.chunk_file(test_file, repo_name="test-repo")
+
+    assert chunks[0].references == []
+
+
+def test_extract_imports_returns_python_and_typescript_targets(tmp_path):
+    py_file = tmp_path / "service.py"
+    py_file.write_text(
+        "import pkg.module\nfrom .local import helper\nfrom pkg.sub import thing\n",
+        encoding="utf-8",
+    )
+    ts_file = tmp_path / "app.ts"
+    ts_file.write_text(
+        'import x from "./lib";\nimport { y } from "../shared";\nimport "react";\n',
+        encoding="utf-8",
+    )
+
+    chunker = ASTChunker()
+
+    assert chunker.extract_imports(py_file) == ["pkg.module", ".local", "pkg.sub"]
+    assert chunker.extract_imports(ts_file) == ["./lib", "../shared", "react"]
+
+
 def test_chunk_markdown_file_with_headings(tmp_path):
     """
     Testa se o ASTChunker divide corretamente um arquivo Markdown
@@ -415,4 +459,3 @@ def test_chunk_sql_fallback_to_text_when_unparseable(tmp_path):
     assert len(chunks) >= 1
     assert all(c.language == "sql" for c in chunks)
     assert all(c.scope_type == "chunk" for c in chunks)
-

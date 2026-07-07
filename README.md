@@ -15,6 +15,9 @@ Para entender de forma visual os conceitos do Model Context Protocol (MCP), o pi
 - **Indexação incremental**: reindexações subsequentes processam apenas arquivos novos/alterados (hash sha256), tornando re-execuções rápidas.
 - **Embeddings locais**: modelo `all-MiniLM-L6-v2` (384 dimensões) via `fastembed`, com lazy loading.
 - **Mapa de arquitetura**: visão hierárquica de classes/funções/métodos do workspace, sem precisar carregar arquivos inteiros.
+- **Rationale refs em código**: comentários `NOTE` / `WHY`, cites `DEC/ADR/RFC` e wikilinks viram metadados persistidos no índice e podem aparecer em `atlas_search`.
+- **Grafo de conhecimento derivado**: gera `.code-index/graph.json` conectando arquivos, símbolos, markdown, imports e rationale para consultas de conectividade.
+- **Visualizador local do grafo**: gera `.code-index/graph.html` autocontido, abrível via `file://`, com pan/zoom, filtros, busca e painel de detalhes.
 - **Multi-linguagem**: Python, JavaScript, TypeScript/TSX, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
 
 ## Pré-requisitos
@@ -129,7 +132,7 @@ Para atualizar para a versão mais recente: `uv tool upgrade codesteer-atlas`.
 
 > Alternativa sem instalar nada: `uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .` (baixa o pacote a cada execução).
 
-Ao terminar, você deve ver `Indexação Concluída com Sucesso!` e a pasta `.code-index/` na raiz do **seu projeto**, contendo `manifest.json` e `lancedb/`.
+Ao terminar, você deve ver `Indexação Concluída com Sucesso!` e a pasta `.code-index/` na raiz do **seu projeto**, contendo `manifest.json`, `lancedb/`, `graph.json` e `graph.html`.
 
 > **Git:** adicione `.code-index/` ao `.gitignore` do seu projeto se ainda não estiver lá — o índice é artefato local, não deve ir para o repositório.
 
@@ -162,14 +165,56 @@ Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto ind
 
 | Tool | Descrição |
 |---|---|
-| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF). Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo. Filtros: `repo`, `language`, `path_prefix`. |
+| `atlas_search` | Busca híbrida (vetorial + BM25 + RRF). Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo. Filtros: `repo`, `language`, `path_prefix`. Resultados de código podem incluir `rationale_refs`. |
 | `atlas_map` | Mapa hierárquico de classes/funções/métodos do workspace indexado. |
-| `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. |
-| `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness etc.). |
+| `atlas_graph` | Consulta o grafo derivado do índice: `hubs`, `path` e `explain`, conectando código, markdown e rationale. |
+| `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. Também regenera `.code-index/graph.json` e `.code-index/graph.html`. |
+| `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness, `graph_available`, `graph_viewer_path`). |
 
 Também expõe o recurso somente leitura `atlas://status`.
 
 Para reindexar após mudanças no código, rode novamente o comando de [indexação](#4-reindexar-depois) (incremental por padrão) ou peça ao agente para usar a tool `atlas_index`.
+
+> **Nota de upgrade:** `atlas_graph`, `graph.json` e `graph.html` exigem um reindex em índices antigos (< `2.1.0`). Índices `2.0.0` continuam respondendo busca e mapa normalmente.
+
+Após a indexação, o Atlas também grava `.code-index/graph.html`, um visualizador autocontido do grafo. Você pode abri-lo com duplo-clique (`file://`) para inspecionar hubs, caminhos e clusters sem rodar servidor web.
+
+### Novos recursos de conhecimento
+
+**`atlas_search` com rationale refs**
+
+Em resultados de código, `atlas_search` pode incluir `rationale_refs` quando o chunk contém referências estruturadas como:
+
+- `DECISAO-002`, `DEC-002`, `ADR-001`, `RFC-012`
+- `[[wikilinks]]` para notas markdown
+- comentários `# NOTE:` e `# WHY:` (ou `//`, `--`, `*`)
+
+Isso permite ao agente responder não só "onde está", mas também "qual decisão embasa este trecho".
+
+**`atlas_graph`**
+
+Use a tool `atlas_graph` quando a pergunta for sobre conectividade:
+
+- `mode="hubs"`: encontra os nós mais conectados do workspace
+- `mode="path"`: encontra caminho entre dois arquivos, símbolos ou notas
+- `mode="explain"`: resume a vizinhança de um nó, incluindo rationale e notas ligadas
+
+Exemplos:
+
+```text
+atlas_graph(mode="hubs", top_n=10)
+atlas_graph(mode="path", source="src/app.py", target="dec-002")
+atlas_graph(mode="explain", target="AuthService.login")
+```
+
+**`atlas_status` com artefatos de grafo**
+
+`atlas_status` agora também informa:
+
+- `graph_available`: se o índice atual já possui `graph.json`
+- `graph_viewer_path`: path absoluto do `graph.html`, quando disponível
+
+Isso permite ao agente orientar o usuário a abrir o visualizador local diretamente.
 
 ## Instruções para agentes de IA (AGENTS.md / CLAUDE.md)
 
@@ -191,6 +236,7 @@ Este repositório é indexado pelo MCP `codesteer-atlas`. Para localizar ou expl
 
 - `atlas_search`: localizar função, classe, método, símbolo ou conceito
 - `atlas_map`: entender a estrutura do projeto sem abrir muitos arquivos
+- `atlas_graph`: inspecionar hubs, paths e conexões entre código, markdown e rationale
 - `atlas_status`: usar só quando houver suspeita de índice ausente ou desatualizado
 - `atlas_index`: reindexar após mudanças grandes ou índice stale
 

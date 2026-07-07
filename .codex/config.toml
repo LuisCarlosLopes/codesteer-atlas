@@ -1,0 +1,10 @@
+[mcp_servers.codesteer-atlas]
+command = "uvx"
+args = [
+    "--from",
+    "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
+    "atlas-serve",
+]
+
+[mcp_servers.codesteer-atlas.tools.atlas_search]
+approval_mode = "approve"

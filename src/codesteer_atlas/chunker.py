@@ -3,9 +3,11 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import List, Tuple
+
 from tree_sitter_language_pack import get_parser
 from codesteer_atlas.config import SUPPORTED_EXTENSIONS
 from codesteer_atlas.models import CodeChunk
+from codesteer_atlas.rationale import extract_rationale_refs, serialize_rationale_refs
 
 # Tamanho máximo de conteúdo por chunk (~256 tokens para all-MiniLM-L6-v2)
 _CHUNK_MAX_CHARS = 1000
@@ -260,6 +262,7 @@ class ASTChunker:
         # [L] file_path sempre persistido em formato POSIX, independente do OS de origem
 
         for start_line, end_line, scope_type, scope_name, content in symbols:
+            references = serialize_rationale_refs(extract_rationale_refs(content))
             truncated_content = self._truncate_content(content)
             chunk_id = self._generate_chunk_id(
                 truncated_content, relative_path, start_line, end_line
@@ -277,6 +280,7 @@ class ASTChunker:
                     language=language,
                     content=truncated_content,
                     indexed_at=timestamp,
+                    references=references,
                 )
             )
 
@@ -287,6 +291,7 @@ class ASTChunker:
             lines = source_text.splitlines()
             total_lines = len(lines)
 
+            references = serialize_rationale_refs(extract_rationale_refs(source_text))
             truncated_content = self._truncate_content(source_text)
             chunk_id = self._generate_chunk_id(truncated_content, relative_path, 1, total_lines)
 
@@ -302,6 +307,7 @@ class ASTChunker:
                     language=language,
                     content=truncated_content,
                     indexed_at=timestamp,
+                    references=references,
                 )
             )
 
@@ -310,6 +316,81 @@ class ASTChunker:
     def _decode_node(self, node, source_bytes: bytes) -> str:
         """Extrai o texto de um nó Tree-sitter a partir dos bytes do source original."""
         return source_bytes[node.start_byte() : node.end_byte()].decode("utf-8", errors="ignore")
+
+    def _collect_nodes_by_kind(self, node, kinds: set[str], found: List = None) -> List:
+        if found is None:
+            found = []
+        if node.kind() in kinds:
+            found.append(node)
+        for i in range(node.child_count()):
+            self._collect_nodes_by_kind(node.child(i), kinds, found)
+        return found
+
+    def _extract_python_imports(self, tree, source_text: str) -> List[str]:
+        source_bytes = source_text.encode("utf-8")
+        imports: List[str] = []
+        seen = set()
+        for node in self._collect_nodes_by_kind(
+            tree.root_node(), {"import_statement", "import_from_statement"}
+        ):
+            for i in range(node.child_count()):
+                child = node.child(i)
+                if child.kind() not in {"dotted_name", "relative_import"}:
+                    continue
+                value = self._decode_node(child, source_bytes).strip()
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                imports.append(value)
+                if node.kind() == "import_from_statement":
+                    break
+        return imports
+
+    def _extract_js_ts_imports(self, tree, source_text: str) -> List[str]:
+        source_bytes = source_text.encode("utf-8")
+        imports: List[str] = []
+        seen = set()
+        for node in self._collect_nodes_by_kind(tree.root_node(), {"import_statement", "export_statement"}):
+            statement = self._decode_node(node, source_bytes)
+            match = re.search(r'["\']([^"\']+)["\']', statement)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            imports.append(value)
+        return imports
+
+    def extract_imports(self, file_path: Path) -> List[str]:
+        """
+        Retorna alvos crus de import para Python e JS/TS, reusando o parser cacheado.
+        """
+        if not file_path.exists():
+            return []
+
+        ext = file_path.suffix.lower()
+        language = SUPPORTED_EXTENSIONS.get(ext)
+        if language not in {"python", "javascript", "typescript"}:
+            return []
+
+        parser = self._get_parser(language)
+        if not parser:
+            return []
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                source_text = f.read()
+        except Exception:
+            return []
+
+        tree = parser.parse(source_text)
+        if not tree:
+            return []
+
+        if language == "python":
+            return self._extract_python_imports(tree, source_text)
+        return self._extract_js_ts_imports(tree, source_text)
 
     def _first_sql_statement_child(self, statement_node):
         """Retorna o primeiro filho semântico de um nó `statement` (ignora ';')."""

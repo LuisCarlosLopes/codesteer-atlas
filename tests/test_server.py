@@ -1,12 +1,14 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 from codesteer_atlas.models import IndexManifest, IndexStats, SearchResult
 from codesteer_atlas.server import (
+    atlas_graph,
     atlas_status,
     atlas_search,
     atlas_map,
@@ -399,6 +401,118 @@ def test_atlas_search_non_markdown_chunk_omits_field():
         result = json.loads(atlas_search(query="docs", top_k=1))
 
         assert "markdown_references" not in result["results"][0]
+
+
+def test_atlas_search_includes_rationale_refs_for_code_chunk_with_resolved_cite():
+    mock_results = [
+        SearchResult(
+            file_path="src/app.py",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run(): pass",
+            score=0.2,
+            repo="my-project",
+            references=["cite:dec-002", "why:cache local"],
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"cognitive-base/decisions/dec-002-index-dir.md": "sha_1"}}
+    )
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="run", top_k=1))
+
+    assert result["results"][0]["rationale_refs"] == [
+        {
+            "kind": "cite",
+            "key": "dec-002",
+            "note_path": "cognitive-base/decisions/dec-002-index-dir.md",
+        },
+        {"kind": "annotation", "key": "why", "text": "cache local"},
+    ]
+
+
+def test_atlas_search_omits_rationale_refs_when_references_are_empty():
+    mock_results = [
+        SearchResult(
+            file_path="src/app.py",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run(): pass",
+            score=0.2,
+            repo="my-project",
+            references=[],
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="run", top_k=1))
+
+    assert "rationale_refs" not in result["results"][0]
+
+
+def test_atlas_search_resolves_note_path_by_prefix():
+    mock_results = [
+        SearchResult(
+            file_path="src/app.py",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run(): pass",
+            score=0.2,
+            repo="my-project",
+            references=["cite:dec-002"],
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"docs/dec-002-resolucao-index-dir.md": "sha_1"}}
+    )
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+        ),
+    ):
+        result = json.loads(atlas_search(query="run", top_k=1))
+
+    assert result["results"][0]["rationale_refs"][0]["note_path"] == "docs/dec-002-resolucao-index-dir.md"
 
 
 def test_atlas_search_include_content_false_still_includes_references():
@@ -1258,8 +1372,6 @@ def test_spawn_index_subprocess_started_with_full_and_paths(tmp_path):
 
 def test_spawn_index_subprocess_writes_timestamped_header_to_log(tmp_path):
     """O log recebe um cabeçalho com data/hora (ISO 8601) antes do output do subprocesso."""
-    import re
-
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     index_dir = tmp_path / ".code-index"
@@ -1383,3 +1495,118 @@ def test_resolve_index_dir_records_resolution_source(tmp_path):
         assert server_module.INDEX_RESOLUTION_SOURCE == "discovery"
     finally:
         server_module.INDEX_RESOLUTION_SOURCE = original_source
+
+
+def test_atlas_graph_hubs_returns_top_n_with_labels(tmp_path):
+    graph = {
+        "nodes": [
+            {"id": "file:pkg/a.py", "kind": "file", "label": "a.py", "degree": 3},
+            {"id": "file:pkg/b.py", "kind": "file", "label": "b.py", "degree": 2},
+        ],
+        "edges": [],
+        "metrics": {
+            "top_hubs": [
+                {"id": "file:pkg/a.py", "degree": 3},
+                {"id": "file:pkg/b.py", "degree": 2},
+            ]
+        },
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="hubs", top_n=1))
+
+    assert result["items"] == [
+        {
+            "id": "file:pkg/a.py",
+            "label": "a.py",
+            "kind": "file",
+            "degree": 3,
+            "file_path": None,
+        }
+    ]
+
+
+def test_atlas_graph_path_accepts_partial_names(tmp_path):
+    graph = {
+        "nodes": [
+            {"id": "file:pkg/a.py", "kind": "file", "label": "a.py", "file_path": "pkg/a.py", "degree": 1},
+            {"id": "file:pkg/b.py", "kind": "file", "label": "b.py", "file_path": "pkg/b.py", "degree": 1},
+        ],
+        "edges": [{"source": "file:pkg/a.py", "target": "file:pkg/b.py", "kind": "imports"}],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="path", source="a.py", target="pkg/b.py"))
+
+    assert result["found"] is True
+    assert result["path"][0]["edge_kind_to_next"] == "imports"
+
+
+def test_atlas_graph_explain_groups_neighbors_and_notes(tmp_path):
+    graph = {
+        "nodes": [
+            {"id": "sym:pkg/a.py#run", "kind": "symbol", "label": "run", "file_path": "pkg/a.py", "lines": [1, 4], "degree": 2},
+            {"id": "file:docs/dec-002.md", "kind": "doc", "label": "dec-002.md", "file_path": "docs/dec-002.md", "lines": None, "degree": 1},
+            {"id": "rat:abc", "kind": "rationale", "label": "cache local", "file_path": "pkg/a.py", "lines": [2, 2], "degree": 1},
+        ],
+        "edges": [
+            {"source": "sym:pkg/a.py#run", "target": "file:docs/dec-002.md", "kind": "cites"},
+            {"source": "sym:pkg/a.py#run", "target": "rat:abc", "kind": "annotates"},
+        ],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="explain", target="run"))
+
+    assert "doc" in result["neighbors"]
+    assert result["notes"] == [
+        {
+            "id": "file:docs/dec-002.md",
+            "label": "dec-002.md",
+            "file_path": "docs/dec-002.md",
+            "lines": None,
+        }
+    ]
+
+
+def test_atlas_graph_without_graph_json_raises_actionable_error(tmp_path):
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        try:
+            atlas_graph(mode="hubs")
+        except FileNotFoundError as e:
+            assert "Execute atlas_index" in str(e)
+        else:
+            raise AssertionError("Esperava FileNotFoundError")
+
+
+def test_atlas_graph_invalid_mode_raises_value_error():
+    try:
+        atlas_graph(mode="invalid")
+    except ValueError as e:
+        assert "mode" in str(e)
+    else:
+        raise AssertionError("Esperava ValueError")
+
+
+def test_atlas_status_includes_graph_availability_and_viewer_path(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    graph_html = tmp_path / "graph.html"
+    graph_path.write_text("{}", encoding="utf-8")
+    graph_html.write_text("<html></html>", encoding="utf-8")
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["graph_available"] is True
+    assert result["graph_viewer_path"] == str(graph_html.resolve())

@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
 from typing import List, Optional
+from pydantic import BaseModel, Field
 
 
 class CodeChunk(BaseModel):
@@ -22,6 +22,9 @@ class CodeChunk(BaseModel):
     content: str = Field(..., description="Conteúdo textual do fragmento de código")
     indexed_at: str = Field(..., description="Timestamp ISO do momento de indexação")
     vector: Optional[List[float]] = Field(None, description="Embedding vetorial (dimensão 384)")
+    references: List[str] = Field(
+        default_factory=list, description="Refs de rationale persistidas no chunk"
+    )
 
 
 class IndexManifest(BaseModel):
@@ -56,6 +59,10 @@ class IndexManifest(BaseModel):
         description="Mapa de path POSIX -> [mtime, size] do arquivo no momento da indexação,"
         " usado para evitar reler/hashear arquivos inalterados em workspaces grandes",
     )
+    files_imports: dict[str, list] = Field(
+        default_factory=dict,
+        description="Mapa de path POSIX -> imports crus extraídos para o grafo",
+    )
 
 
 class SearchResult(BaseModel):
@@ -72,6 +79,7 @@ class SearchResult(BaseModel):
     content: Optional[str] = None
     score: float
     repo: str
+    references: List[str] = Field(default_factory=list)
 
 
 class IndexStats(BaseModel):

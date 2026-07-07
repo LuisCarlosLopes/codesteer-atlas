@@ -594,3 +594,123 @@ def test_get_git_head_sha_uses_windows_safe_subprocess_kwargs(monkeypatch, tmp_p
     assert captured_kwargs["stdin"] == subprocess.DEVNULL
     assert captured_kwargs["timeout"] == 10
     assert "creationflags" in captured_kwargs
+
+
+def test_index_workspace_full_generates_graph_json_and_graph_html(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "a.py").write_text(
+        "import b\n# WHY: cache local\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (workspace_dir / "b.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (workspace_dir / "dec-002.md").write_text("# Decisão 002\n\ntexto\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    html = (index_dir / "graph.html").read_text(encoding="utf-8")
+
+    assert graph["graph_version"] == "1.0"
+    assert "application/json" in html
+
+
+def test_index_workspace_incremental_regenerates_graph_after_delete(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    file_a = workspace_dir / "a.py"
+    file_b = workspace_dir / "b.py"
+    file_a.write_text("import b\n\ndef run():\n    return helper()\n", encoding="utf-8")
+    file_b.write_text("def helper():\n    return 1\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+        before = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+        file_b.unlink()
+        index_workspace(workspace_dir, index_dir)
+        after = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+
+    before_ids = {node["id"] for node in before["nodes"]}
+    after_ids = {node["id"] for node in after["nodes"]}
+    assert "file:b.py" in before_ids
+    assert "file:b.py" not in after_ids
+
+
+def test_manifest_files_imports_is_updated_and_cleaned_for_deleted_files(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    file_a = workspace_dir / "a.py"
+    file_b = workspace_dir / "b.py"
+    file_a.write_text("import b\n\ndef run():\n    return helper()\n", encoding="utf-8")
+    file_b.write_text("def helper():\n    return 1\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+        manifest_before = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+        file_b.unlink()
+        index_workspace(workspace_dir, index_dir)
+        manifest_after = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest_before["files_imports"]["a.py"] == ["b"]
+    assert "b.py" not in manifest_after["files_imports"]
+
+
+def test_graph_build_exception_does_not_fail_indexing(tmp_path, capsys):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "a.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+        patch("codesteer_atlas.indexer.build_and_write", side_effect=RuntimeError("boom")),
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    assert stats.files_processed == 1
+    assert "Falha ao reconstruir graph.json" in capsys.readouterr().err
+
+
+def test_index_progress_reporter_emits_graph_phase(tmp_path, capsys):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir, report_progress=True)
+
+    captured = capsys.readouterr()
+    assert "Reconstruindo grafo" in captured.err
