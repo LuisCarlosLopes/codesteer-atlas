@@ -35,6 +35,7 @@ GRAPH_HTML_FILENAME = "graph.html"
 GRAPH_TOP_HUBS_LIMIT = 25
 GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
+BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
 
 # Padrões de arquivos e pastas que devem ser ignorados durante a varredura
 IGNORE_DIRS = {

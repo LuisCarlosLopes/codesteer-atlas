@@ -399,6 +399,10 @@ class StorageBackend:
         """
         Retorna a projeção mínima necessária para reconstruir `graph.json`,
         sempre sem a coluna `vector`.
+
+        Para reduzir uso de memória em workspaces grandes, só carrega `content`
+        dos chunks Markdown, já que chunks de código usam apenas refs de
+        rationale/imports no rebuild do grafo.
         """
         if not self.exists():
             return []
@@ -406,25 +410,103 @@ class StorageBackend:
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
 
-        columns = [
+        base_columns = [
             "file_path",
             "scope_type",
             "scope_name",
             "language",
             "start_line",
             "end_line",
-            "content",
             "references_json",
         ]
+
+        code_rows: List[Dict[str, Any]] = []
+        markdown_rows: List[Dict[str, Any]] = []
+
         try:
-            arrow_table = table.search().select(columns).to_arrow()
-            return arrow_table.to_pylist()
+            code_arrow = (
+                table.search()
+                .where("language != 'markdown'", prefilter=True)
+                .select(base_columns)
+                .to_arrow()
+            )
+            code_rows = code_arrow.to_pylist()
+            for row in code_rows:
+                row["content"] = None
+
+            markdown_arrow = (
+                table.search()
+                .where("language = 'markdown'", prefilter=True)
+                .select([*base_columns[:-1], "content", base_columns[-1]])
+                .to_arrow()
+            )
+            markdown_rows = markdown_arrow.to_pylist()
+            return code_rows + markdown_rows
         except Exception:
-            arrow_table = table.search().select(columns[:-1]).to_arrow()
+            code_arrow = (
+                table.search()
+                .where("language != 'markdown'", prefilter=True)
+                .select(base_columns[:-1])
+                .to_arrow()
+            )
+            code_rows = code_arrow.to_pylist()
+            for row in code_rows:
+                row["content"] = None
+                row["references_json"] = "[]"
+
+            markdown_arrow = (
+                table.search()
+                .where("language = 'markdown'", prefilter=True)
+                .select([*base_columns[:-1], "content"])
+                .to_arrow()
+            )
+            markdown_rows = markdown_arrow.to_pylist()
+            for row in markdown_rows:
+                row["references_json"] = "[]"
+            return code_rows + markdown_rows
+
+    def get_graph_projection_for_file_paths(self, file_paths: List[str]) -> List[Dict[str, Any]]:
+        """
+        Retorna a mesma projeção de `get_graph_projection`, mas restrita a um
+        conjunto de `file_path`s. Usado no update incremental do grafo para
+        evitar releitura do índice inteiro.
+        """
+        if not file_paths or not self.exists():
+            return []
+
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+
+        escaped_paths = [file_path.replace("'", "''") for file_path in file_paths]
+        in_clause = ", ".join(f"'{path}'" for path in escaped_paths)
+        where_clause = f"file_path IN ({in_clause})"
+        base_columns = [
+            "file_path",
+            "scope_type",
+            "scope_name",
+            "language",
+            "start_line",
+            "end_line",
+            "references_json",
+        ]
+
+        try:
+            arrow_table = table.search().where(where_clause, prefilter=True).select(
+                [*base_columns[:-1], "content", base_columns[-1]]
+            ).to_arrow()
+            rows = arrow_table.to_pylist()
+        except Exception:
+            arrow_table = (
+                table.search().where(where_clause, prefilter=True).select([*base_columns[:-1], "content"]).to_arrow()
+            )
             rows = arrow_table.to_pylist()
             for row in rows:
                 row["references_json"] = "[]"
-            return rows
+
+        for row in rows:
+            if row["language"] != "markdown":
+                row["content"] = None
+        return rows
 
     def delete_by_file_paths(self, file_paths: List[str]) -> None:
         """

@@ -6,7 +6,7 @@ import posixpath
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -39,6 +39,7 @@ import anyio  # noqa: E402
 from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
 from codesteer_atlas.config import (  # noqa: E402
+    BACKGROUND_REINDEX_MIN_INTERVAL_S,
     DEFAULT_INDEX_DIR,
     GRAPH_FILENAME,
     GRAPH_HTML_FILENAME,
@@ -109,6 +110,26 @@ ROOTS_LIST_TIMEOUT_S = 5.0
 # primeira resolução entre threads (FastMCP roda tools sync em threadpool) [R].
 _ROOTS_RESOLUTION_DONE = False
 _ROOTS_RESOLUTION_LOCK = threading.Lock()
+
+
+def _recommend_dry_run_paths(candidates: list[dict], total_eligible: int) -> tuple[str, list[str], str]:
+    ranked = sorted(
+        (candidate for candidate in candidates if "/" not in candidate["path"]),
+        key=lambda item: (-item["eligible_files"], item["path"]),
+    )
+    preferred_names = {"src", "docs", "app", "apps", "packages", "backend", "frontend"}
+    recommended = [
+        candidate["path"]
+        for candidate in ranked
+        if candidate["path"] in preferred_names or candidate["eligible_files"] > 1
+    ][:3]
+    if total_eligible > 200 and recommended:
+        return (
+            "paths",
+            recommended,
+            "Workspace grande detectado; prefira indexação parcial primeiro.",
+        )
+    return ("workspace", [], "Workspace pequeno/médio; indexação completa é razoável.")
 
 
 def _discover_index_dir(base: Path) -> Optional[Path]:
@@ -911,6 +932,13 @@ def atlas_index(
             "candidates": candidates,
             "total_eligible_files": total_eligible,
         }
+        recommended_mode, recommended_paths, message = _recommend_dry_run_paths(
+            candidates, total_eligible
+        )
+        response["recommended_mode"] = recommended_mode
+        if recommended_paths:
+            response["recommended_paths"] = recommended_paths
+        response["message"] = message
         return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
     print(
@@ -953,11 +981,20 @@ def atlas_index(
         "workspace": str(workspace_path),
         "indexed_paths": list(paths) if paths else "all",
         "files_processed": stats.files_processed,
+        "files_scanned": stats.files_scanned,
+        "files_eligible": stats.files_eligible,
         "files_skipped_unchanged": stats.files_skipped_unchanged,
         "files_removed": stats.files_removed,
         "chunks_persisted": stats.chunks_persisted,
+        "chunks_generated": stats.chunks_generated,
         "duration_s": stats.duration_s,
         "git_head_sha": stats.git_head_sha,
+        "phase_durations_s": stats.phase_durations_s,
+        "graph_strategy": stats.graph_strategy,
+        "graph_nodes": stats.graph_nodes,
+        "graph_edges": stats.graph_edges,
+        "graph_bytes": stats.graph_bytes,
+        "graph_html_bytes": stats.graph_html_bytes,
     }
     if stats.skipped_reason:
         response["skipped_reason"] = stats.skipped_reason
@@ -1083,6 +1120,29 @@ def _spawn_background_reindex() -> None:
             file=sys.stderr,
         )
         return
+
+    try:
+        manifest = storage.get_manifest()
+        indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
+        if indexed_at.tzinfo is None:
+            indexed_at = indexed_at.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
+        current_git_sha = get_git_head_sha(workspace_path)
+        if (
+            age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
+            and manifest.git_head_sha is not None
+            and current_git_sha is not None
+            and manifest.git_head_sha == current_git_sha
+        ):
+            print(
+                "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
+                file=sys.stderr,
+            )
+            return
+    except Exception:
+        # Falha em heurística de debounce nunca deve impedir o fallback seguro:
+        # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
+        pass
 
     log_path = INDEX_DIR_PATH / "background_reindex.log"
     print(

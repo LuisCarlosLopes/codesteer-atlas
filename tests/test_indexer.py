@@ -146,8 +146,36 @@ def test_index_workspace_second_run_skips_unchanged_files(tmp_path):
         assert stats2.files_processed == 0
         assert stats2.files_skipped_unchanged == 2
         assert stats2.files_removed == 0
+        assert stats2.graph_strategy == "skipped-unchanged"
         # Nenhum embedding deve ser gerado (lista de chunks novos vazia)
         mock_encode.assert_not_called()
+
+
+def test_index_workspace_reports_metrics_and_incremental_graph_strategy(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    app_file = workspace_dir / "app.py"
+    app_file.write_text("def run_app():\n    return 1\n", encoding="utf-8")
+
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        first = index_workspace(workspace_dir, index_dir)
+        app_file.write_text("def run_app():\n    return 2\n", encoding="utf-8")
+        second = index_workspace(workspace_dir, index_dir)
+
+    assert first.files_scanned == 1
+    assert first.files_eligible == 1
+    assert first.chunks_generated >= 1
+    assert set(first.phase_durations_s) == {"scan", "hash", "chunk", "embed", "persist", "graph"}
+    assert first.graph_nodes > 0
+    assert first.graph_bytes > 0
+    assert second.graph_strategy == "incremental-code"
 
 
 def test_index_workspace_unchanged_files_skip_hashing_via_mtime_size(tmp_path):

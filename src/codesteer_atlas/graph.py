@@ -3,14 +3,24 @@ import json
 import os
 import posixpath
 import sys
+import threading
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from codesteer_atlas.config import GRAPH_FILENAME, GRAPH_PATH_MAX_HOPS, GRAPH_TOP_HUBS_LIMIT
 from codesteer_atlas.markdown_links import extract_markdown_link_targets
+from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
 from codesteer_atlas.viewer import write_graph_html
+
+_GRAPH_CACHE_LOCK = threading.Lock()
+_GRAPH_CACHE: Dict[str, Any] = {
+    "path": None,
+    "mtime_ns": None,
+    "size": None,
+    "graph": None,
+}
 
 
 def _stem_to_paths(manifest) -> Dict[str, List[str]]:
@@ -108,21 +118,83 @@ def _build_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str]]]:
     return adjacency
 
 
-def build_and_write(storage, manifest, index_path: Path) -> Path:
-    """
-    Reconstrói `graph.json` inteiro a partir do estado atual do índice.
-    """
-    rows = storage.get_graph_projection()
-    manifest_files = set(manifest.files.keys())
-    name_to_paths = _stem_to_paths(manifest)
-    nodes: Dict[str, dict] = {}
-    edges: List[dict] = []
-    edge_keys = set()
-
-    def _add_node(node_id: str, **data) -> None:
-        if node_id in nodes:
+def _clear_graph_cache(graph_path: Optional[Path] = None) -> None:
+    with _GRAPH_CACHE_LOCK:
+        cached_path = _GRAPH_CACHE.get("path")
+        if graph_path is not None and cached_path is not None and Path(cached_path) != Path(graph_path):
             return
-        nodes[node_id] = {"id": node_id, **data}
+        _GRAPH_CACHE.update({"path": None, "mtime_ns": None, "size": None, "graph": None})
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp_path, path)
+
+
+def _graph_metadata(graph: dict, index_path: Path) -> dict:
+    graph_path = Path(index_path) / GRAPH_FILENAME
+    html_path = Path(index_path) / "graph.html"
+    return {
+        "graph_nodes": len(graph.get("nodes", [])),
+        "graph_edges": len(graph.get("edges", [])),
+        "graph_bytes": graph_path.stat().st_size if graph_path.exists() else 0,
+        "graph_html_bytes": html_path.stat().st_size if html_path.exists() else 0,
+    }
+
+
+def _persist_graph(graph: dict, index_path: Path) -> tuple[Path, dict]:
+    index_path = Path(index_path)
+    index_path.mkdir(parents=True, exist_ok=True)
+    graph_path = index_path / GRAPH_FILENAME
+    _write_json_atomic(graph_path, graph)
+    _clear_graph_cache(graph_path)
+
+    try:
+        write_graph_html(graph, index_path)
+    except Exception as e:
+        print(f"[atlas] Falha ao gerar graph.html: {e}", file=sys.stderr)
+
+    return graph_path, _graph_metadata(graph, index_path)
+
+
+def _build_empty_graph(manifest) -> dict:
+    return {
+        "graph_version": "1.0",
+        "generated_at": manifest.last_indexed_at,
+        "workspace_repo": manifest.repos_indexed[0] if manifest.repos_indexed else "",
+        "import_languages": ["python", "javascript", "typescript"],
+        "nodes": [],
+        "edges": [],
+        "metrics": {
+            "node_count": 0,
+            "edge_count": 0,
+            "top_hubs": [],
+        },
+    }
+
+
+def _add_contribution_from_rows(
+    file_path: str,
+    rows: Iterable[dict],
+    raw_imports: List[str],
+    manifest_files: set[str],
+    name_to_paths: Dict[str, List[str]],
+    nodes: Dict[str, dict],
+    edges: List[dict],
+    edge_keys: set[tuple[str, str, str]],
+) -> None:
+    file_kind = "doc" if file_path.lower().endswith(".md") else "file"
+    file_node_id = f"file:{file_path}"
+    if file_node_id not in nodes:
+        nodes[file_node_id] = {
+            "id": file_node_id,
+            "kind": file_kind,
+            "label": posixpath.basename(file_path),
+            "file_path": file_path,
+            "lines": None,
+        }
 
     def _add_edge(source: str, target: str, kind: str) -> None:
         key = (source, target, kind)
@@ -131,13 +203,7 @@ def build_and_write(storage, manifest, index_path: Path) -> Path:
         edge_keys.add(key)
         edges.append({"source": source, "target": target, "kind": kind})
 
-    for file_path in sorted(manifest_files):
-        kind = "doc" if file_path.lower().endswith(".md") else "file"
-        _add_node(f"file:{file_path}", kind=kind, label=posixpath.basename(file_path), file_path=file_path, lines=None)
-
     for row in rows:
-        file_path = row["file_path"]
-        file_node_id = f"file:{file_path}"
         references = decode_references_json(row.get("references_json"))
         is_markdown = row["language"] == "markdown"
         if is_markdown:
@@ -147,13 +213,13 @@ def build_and_write(storage, manifest, index_path: Path) -> Path:
             node_id = f"sym:{file_path}#{row['scope_name']}"
             node_kind = "symbol"
         lines = [row["start_line"], row["end_line"]]
-        _add_node(
-            node_id,
-            kind=node_kind,
-            label=row["scope_name"],
-            file_path=file_path,
-            lines=lines,
-        )
+        nodes[node_id] = {
+            "id": node_id,
+            "kind": node_kind,
+            "label": row["scope_name"],
+            "file_path": file_path,
+            "lines": lines,
+        }
         _add_edge(file_node_id, node_id, "contains")
 
         if is_markdown:
@@ -175,13 +241,13 @@ def build_and_write(storage, manifest, index_path: Path) -> Path:
             if ref.kind == "annotation":
                 signature = f"{ref.key}:{ref.text or ''}"
                 rat_id = f"rat:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
-                _add_node(
-                    rat_id,
-                    kind="rationale",
-                    label=ref.text or "",
-                    file_path=file_path,
-                    lines=lines,
-                )
+                nodes[rat_id] = {
+                    "id": rat_id,
+                    "kind": "rationale",
+                    "label": ref.text or "",
+                    "file_path": file_path,
+                    "lines": lines,
+                }
                 _add_edge(node_id, rat_id, "annotates")
                 continue
             if ref.kind not in {"cite", "wikilink"}:
@@ -193,21 +259,23 @@ def build_and_write(storage, manifest, index_path: Path) -> Path:
             if target_id in nodes:
                 _add_edge(node_id, target_id, "cites")
 
-    for file_path, raw_imports in manifest.files_imports.items():
-        source_id = f"file:{file_path}"
-        if source_id not in nodes:
+    source_id = f"file:{file_path}"
+    for raw_import in raw_imports:
+        target_path = None
+        if file_path.endswith(".py"):
+            target_path = _resolve_python_import(file_path, raw_import, manifest_files)
+        elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
+            target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
+        if target_path is None:
             continue
-        for raw_import in raw_imports:
-            target_path = None
-            if file_path.endswith(".py"):
-                target_path = _resolve_python_import(file_path, raw_import, manifest_files)
-            elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
-                target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
-            if target_path is None:
-                continue
-            target_id = f"file:{target_path}"
-            if target_id in nodes:
-                _add_edge(source_id, target_id, "imports")
+        target_id = f"file:{target_path}"
+        if target_id in nodes:
+            _add_edge(source_id, target_id, "imports")
+
+
+def _finalize_graph(graph: dict) -> dict:
+    nodes = {node["id"]: dict(node) for node in graph.get("nodes", [])}
+    edges = list(graph.get("edges", []))
 
     degree_by_id = {node_id: 0 for node_id in nodes}
     for edge in edges:
@@ -223,34 +291,129 @@ def build_and_write(storage, manifest, index_path: Path) -> Path:
         key=lambda item: (-item["degree"], item["id"]),
     )[:GRAPH_TOP_HUBS_LIMIT]
 
-    graph = {
-        "graph_version": "1.0",
-        "generated_at": manifest.last_indexed_at,
-        "workspace_repo": manifest.repos_indexed[0] if manifest.repos_indexed else "",
-        "import_languages": ["python", "javascript", "typescript"],
-        "nodes": sorted(nodes.values(), key=lambda node: node["id"]),
-        "edges": sorted(edges, key=lambda edge: (edge["source"], edge["target"], edge["kind"])),
-        "metrics": {
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "top_hubs": top_hubs,
-        },
+    graph["nodes"] = sorted(nodes.values(), key=lambda node: node["id"])
+    graph["edges"] = sorted(edges, key=lambda edge: (edge["source"], edge["target"], edge["kind"]))
+    graph["metrics"] = {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "top_hubs": top_hubs,
     }
+    return graph
 
-    index_path = Path(index_path)
-    index_path.mkdir(parents=True, exist_ok=True)
-    graph_path = index_path / GRAPH_FILENAME
-    tmp_path = graph_path.with_suffix(".json.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(graph, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp_path, graph_path)
 
-    try:
-        write_graph_html(graph, index_path)
-    except Exception as e:
-        print(f"[atlas] Falha ao gerar graph.html: {e}", file=sys.stderr)
+def _graph_rows_from_chunks(chunks: List[CodeChunk]) -> Dict[str, List[dict]]:
+    rows_by_file: Dict[str, List[dict]] = {}
+    for chunk in chunks:
+        rows_by_file.setdefault(chunk.file_path, []).append(
+            {
+                "file_path": chunk.file_path,
+                "scope_type": chunk.scope_type,
+                "scope_name": chunk.scope_name,
+                "language": chunk.language,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "content": chunk.content if chunk.language == "markdown" else None,
+                "references_json": json.dumps(chunk.references or [], ensure_ascii=False),
+            }
+        )
+    return rows_by_file
 
+
+def build_and_write(storage, manifest, index_path: Path, return_metadata: bool = False):
+    """
+    Reconstrói `graph.json` inteiro a partir do estado atual do índice.
+    """
+    rows = storage.get_graph_projection()
+    manifest_files = set(manifest.files.keys())
+    name_to_paths = _stem_to_paths(manifest)
+    rows_by_file: Dict[str, List[dict]] = {}
+    for row in rows:
+        rows_by_file.setdefault(row["file_path"], []).append(row)
+
+    nodes: Dict[str, dict] = {
+        f"file:{file_path}": {
+            "id": f"file:{file_path}",
+            "kind": "doc" if file_path.lower().endswith(".md") else "file",
+            "label": posixpath.basename(file_path),
+            "file_path": file_path,
+            "lines": None,
+        }
+        for file_path in sorted(manifest_files)
+    }
+    edges: List[dict] = []
+    edge_keys: set[tuple[str, str, str]] = set()
+    for file_path in sorted(manifest_files):
+        _add_contribution_from_rows(
+            file_path=file_path,
+            rows=rows_by_file.get(file_path, []),
+            raw_imports=manifest.files_imports.get(file_path, []),
+            manifest_files=manifest_files,
+            name_to_paths=name_to_paths,
+            nodes=nodes,
+            edges=edges,
+            edge_keys=edge_keys,
+        )
+
+    graph = _finalize_graph(_build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges})
+    graph_path, metadata = _persist_graph(graph, index_path)
+    if return_metadata:
+        return graph_path, metadata
     return graph_path
+
+
+def build_and_write_incremental(
+    index_path: Path,
+    manifest,
+    updated_chunks: List[CodeChunk],
+    updated_file_paths: set[str],
+) -> tuple[Path, dict]:
+    """
+    Atualiza `graph.json` a partir do grafo anterior quando apenas arquivos de
+    código já existentes mudaram, evitando rebuild completo do índice.
+    """
+    graph = load_graph(index_path)
+    nodes = {node["id"]: dict(node) for node in graph.get("nodes", [])}
+    removed_node_ids = {
+        node_id
+        for node_id, node in nodes.items()
+        if node.get("file_path") in updated_file_paths and node.get("kind") in {"symbol", "section", "rationale"}
+    }
+    for node_id in removed_node_ids:
+        nodes.pop(node_id, None)
+
+    kept_edges: List[dict] = []
+    for edge in graph.get("edges", []):
+        if edge["source"] in removed_node_ids or edge["target"] in removed_node_ids:
+            continue
+        if edge["kind"] in {"contains", "imports"} and edge["source"].startswith("file:"):
+            source_file = edge["source"][len("file:") :]
+            if source_file in updated_file_paths:
+                continue
+        kept_edges.append(edge)
+
+    edge_keys = {(edge["source"], edge["target"], edge["kind"]) for edge in kept_edges}
+    manifest_files = set(manifest.files.keys())
+    name_to_paths = _stem_to_paths(manifest)
+    rows_by_file = _graph_rows_from_chunks(updated_chunks)
+
+    for file_path in updated_file_paths:
+        _add_contribution_from_rows(
+            file_path=file_path,
+            rows=rows_by_file.get(file_path, []),
+            raw_imports=manifest.files_imports.get(file_path, []),
+            manifest_files=manifest_files,
+            name_to_paths=name_to_paths,
+            nodes=nodes,
+            edges=kept_edges,
+            edge_keys=edge_keys,
+        )
+
+    updated_graph = _build_empty_graph(manifest) | {
+        "nodes": list(nodes.values()),
+        "edges": kept_edges,
+    }
+    updated_graph = _finalize_graph(updated_graph)
+    return _persist_graph(updated_graph, index_path)
 
 
 def load_graph(index_dir: Path) -> dict:
@@ -260,10 +423,29 @@ def load_graph(index_dir: Path) -> dict:
             "graph.json não encontrado. Execute atlas_index para gerar o grafo "
             "(índices anteriores a 2.1.0 não possuem grafo)."
         )
+    stat = graph_path.stat()
+    with _GRAPH_CACHE_LOCK:
+        if (
+            _GRAPH_CACHE.get("path") == str(graph_path.resolve())
+            and _GRAPH_CACHE.get("mtime_ns") == stat.st_mtime_ns
+            and _GRAPH_CACHE.get("size") == stat.st_size
+            and _GRAPH_CACHE.get("graph") is not None
+        ):
+            return _GRAPH_CACHE["graph"]
+
     with open(graph_path, "r", encoding="utf-8") as f:
         graph = json.load(f)
     graph["_nodes_by_id"] = {node["id"]: node for node in graph.get("nodes", [])}
     graph["_adjacency"] = _build_adjacency(graph)
+    with _GRAPH_CACHE_LOCK:
+        _GRAPH_CACHE.update(
+            {
+                "path": str(graph_path.resolve()),
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+                "graph": graph,
+            }
+        )
     return graph
 
 

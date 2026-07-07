@@ -15,7 +15,7 @@ from codesteer_atlas.config import (
 )
 from codesteer_atlas.chunker import ASTChunker
 from codesteer_atlas.embeddings import EmbeddingEngine
-from codesteer_atlas.graph import build_and_write
+from codesteer_atlas.graph import build_and_write, build_and_write_incremental
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
 from codesteer_atlas.storage import StorageBackend
@@ -321,6 +321,8 @@ def _index_workspace_locked(
     incremental, chunking, embeddings e persistência.
     """
     start_time = time.time()
+    phase_started_at = time.perf_counter()
+    phase_durations_s: dict[str, float] = {}
     progress = IndexProgressReporter(enabled=report_progress)
 
     scan_roots = _resolve_scan_roots(workspace_path, paths)
@@ -355,6 +357,7 @@ def _index_workspace_locked(
     )
     progress.tick("scan", 1, 1)
     progress.phase_done("scan")
+    phase_durations_s["scan"] = round(time.perf_counter() - phase_started_at, 4)
     if files_ignored_size:
         print(f"Arquivos ignorados (> 2MB): {files_ignored_size}", file=sys.stderr)
 
@@ -393,6 +396,7 @@ def _index_workspace_locked(
     new_hashes: dict[str, str] = {}
 
     hash_total = len(current_files)
+    phase_started_at = time.perf_counter()
     if hash_total == 0:
         progress.tick("hash", 1, 1)
     for hash_index, (rel_posix, file_path) in enumerate(current_files.items(), start=1):
@@ -426,6 +430,7 @@ def _index_workspace_locked(
         progress.tick("hash", hash_index, hash_total)
 
     progress.phase_done("hash")
+    phase_durations_s["hash"] = round(time.perf_counter() - phase_started_at, 4)
 
     # Arquivos que estavam no escopo do manifest mas não existem mais (deletados)
     deleted_files = set(files_in_scope_from_manifest.keys()) - set(current_files.keys())
@@ -443,6 +448,7 @@ def _index_workspace_locked(
     processed_imports: dict[str, list] = {}
 
     chunk_total = len(files_to_process)
+    phase_started_at = time.perf_counter()
     if chunk_total == 0:
         progress.tick("chunk", 1, 1)
     for chunk_index, (rel_posix, file_path) in enumerate(files_to_process.items(), start=1):
@@ -459,8 +465,10 @@ def _index_workspace_locked(
         progress.tick("chunk", chunk_index, chunk_total)
 
     progress.phase_done("chunk")
+    phase_durations_s["chunk"] = round(time.perf_counter() - phase_started_at, 4)
 
     # Gera embeddings em lote apenas para os chunks novos/alterados [GA-06]
+    phase_started_at = time.perf_counter()
     if all_new_chunks:
         chunk_texts = [chunk.content for chunk in all_new_chunks]
         embedding_engine = EmbeddingEngine()
@@ -477,6 +485,7 @@ def _index_workspace_locked(
         progress.tick("embed", 1, 1)
 
     progress.phase_done("embed")
+    phase_durations_s["embed"] = round(time.perf_counter() - phase_started_at, 4)
 
     git_sha = get_git_head_sha(workspace_path)
 
@@ -486,6 +495,7 @@ def _index_workspace_locked(
     # - Caso contrário (incremental ou parcial): usa storage para deletar arquivos
     #   alterados/removidos e inserir os novos chunks, preservando o restante.
     progress.tick("persist", 0, 1)
+    phase_started_at = time.perf_counter()
     if existing_manifest is None or (full and not paths):
         storage.store_chunks(all_new_chunks, git_head_sha=git_sha, files_meta=current_meta)
         chunks_persisted = storage.update_manifest_after_incremental(
@@ -533,25 +543,66 @@ def _index_workspace_locked(
 
     progress.tick("persist", 1, 1)
     progress.phase_done("persist")
+    phase_durations_s["persist"] = round(time.perf_counter() - phase_started_at, 4)
 
     progress.tick("graph", 0, 1)
+    phase_started_at = time.perf_counter()
+    graph_strategy = "full"
+    graph_metrics = {
+        "graph_nodes": 0,
+        "graph_edges": 0,
+        "graph_bytes": 0,
+        "graph_html_bytes": 0,
+    }
     try:
-        build_and_write(storage, manifest, index_path)
+        changed_file_paths = set(files_to_process.keys())
+        previous_file_paths = set(existing_files.keys())
+        has_only_existing_code_updates = (
+            bool(changed_file_paths)
+            and not deleted_files
+            and changed_file_paths.issubset(previous_file_paths)
+            and all(not path.lower().endswith(".md") for path in changed_file_paths)
+        )
+
+        if not changed_file_paths and not deleted_files and (index_path / "graph.json").exists():
+            graph_strategy = "skipped-unchanged"
+        elif has_only_existing_code_updates and (index_path / "graph.json").exists():
+            _graph_path, graph_metrics = build_and_write_incremental(
+                index_path=index_path,
+                manifest=manifest,
+                updated_chunks=all_new_chunks,
+                updated_file_paths=changed_file_paths,
+            )
+            graph_strategy = "incremental-code"
+        else:
+            _graph_path, graph_metrics = build_and_write(
+                storage, manifest, index_path, return_metadata=True
+            )
     except Exception as e:
         print(f"[atlas] Falha ao reconstruir graph.json: {e}", file=sys.stderr)
     progress.tick("graph", 1, 1)
     progress.phase_done("graph")
+    phase_durations_s["graph"] = round(time.perf_counter() - phase_started_at, 4)
     progress.finish()
 
     duration_s = time.time() - start_time
 
     return IndexStats(
         files_processed=files_processed,
+        files_scanned=len(current_files),
+        files_eligible=len(eligible_files),
         files_skipped_unchanged=files_skipped_unchanged,
         files_removed=files_removed,
         chunks_persisted=chunks_persisted,
+        chunks_generated=len(all_new_chunks),
         duration_s=round(duration_s, 3),
         git_head_sha=git_sha,
+        phase_durations_s=phase_durations_s,
+        graph_strategy=graph_strategy,
+        graph_nodes=graph_metrics["graph_nodes"],
+        graph_edges=graph_metrics["graph_edges"],
+        graph_bytes=graph_metrics["graph_bytes"],
+        graph_html_bytes=graph_metrics["graph_html_bytes"],
     )
 
 

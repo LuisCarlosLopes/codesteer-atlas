@@ -215,6 +215,44 @@ def test_graph_projection_returns_columns_without_vector(temp_storage):
     assert "vector" not in rows[0]
 
 
+def test_graph_projection_avoids_loading_code_content(temp_storage):
+    temp_storage.store_chunks(
+        [
+            CodeChunk(
+                id="c1",
+                file_path="src/app.py",
+                repo="test-project",
+                start_line=1,
+                end_line=3,
+                scope_type="function",
+                scope_name="run",
+                language="python",
+                content="def run():\n    return 1",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=MOCK_VECTOR,
+            ),
+            CodeChunk(
+                id="c2",
+                file_path="docs/guide.md",
+                repo="test-project",
+                start_line=1,
+                end_line=3,
+                scope_type="section",
+                scope_name="Guide",
+                language="markdown",
+                content="# Guide\n\nbody",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=MOCK_VECTOR,
+            ),
+        ]
+    )
+
+    rows = {row["file_path"]: row for row in temp_storage.get_graph_projection()}
+
+    assert rows["src/app.py"]["content"] is None
+    assert rows["docs/guide.md"]["content"] == "# Guide\n\nbody"
+
+
 def test_search_hybrid_on_legacy_table_without_references_column_returns_empty_refs(temp_storage):
     temp_storage.index_dir.mkdir(parents=True, exist_ok=True)
     db = lancedb.connect(str(temp_storage.db_path))

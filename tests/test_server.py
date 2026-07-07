@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from codesteer_atlas.models import IndexManifest, IndexStats, SearchResult
@@ -925,6 +926,8 @@ def test_atlas_index_dry_run_does_not_create_index(tmp_path):
     assert paths.get("src") == 2
     assert paths.get("README.md") == 1
     assert result["total_eligible_files"] == 3
+    assert result["recommended_mode"] in {"workspace", "paths"}
+    assert "message" in result
 
 
 def test_atlas_index_dry_run_respects_atlasignore(tmp_path):
@@ -1271,11 +1274,20 @@ def test_atlas_index_paths_non_empty_full_false_remains_synchronous(tmp_path):
 
     mock_stats = IndexStats(
         files_processed=2,
+        files_scanned=2,
+        files_eligible=2,
         files_skipped_unchanged=0,
         files_removed=0,
         chunks_persisted=5,
+        chunks_generated=5,
         duration_s=0.1,
         git_head_sha="sha123",
+        phase_durations_s={"scan": 0.01, "hash": 0.01, "chunk": 0.01, "embed": 0.01, "persist": 0.01, "graph": 0.01},
+        graph_strategy="full",
+        graph_nodes=12,
+        graph_edges=8,
+        graph_bytes=100,
+        graph_html_bytes=200,
     )
 
     with (
@@ -1287,8 +1299,10 @@ def test_atlas_index_paths_non_empty_full_false_remains_synchronous(tmp_path):
 
     result = json.loads(result_json)
     assert result["files_processed"] == 2
+    assert result["files_scanned"] == 2
     assert result["chunks_persisted"] == 5
     assert result["git_head_sha"] == "sha123"
+    assert result["graph_strategy"] == "full"
     assert "skipped_reason" not in result
     mock_index.assert_called_once()
     mock_spawn.assert_not_called()
@@ -1321,6 +1335,23 @@ def test_atlas_index_sync_propagates_skipped_reason(tmp_path):
     assert "message" in result
 
 
+def test_atlas_index_dry_run_recommends_partial_paths_for_large_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    for folder in ("src", "docs", "packages"):
+        target = workspace / folder
+        target.mkdir(parents=True, exist_ok=True)
+        for index in range(90):
+            suffix = ".md" if folder == "docs" else ".py"
+            target_file = target / f"f_{index}{suffix}"
+            target_file.write_text("def run():\n    pass\n", encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"):
+        result = json.loads(atlas_index(workspace=str(workspace), dry_run=True))
+
+    assert result["recommended_mode"] == "paths"
+    assert result["recommended_paths"]
+
+
 def test_spawn_index_subprocess_skips_when_locked(tmp_path):
     """Quando `is_reindex_locked=True`, NÃO chama `subprocess.Popen` e retorna status='skipped'."""
     workspace = tmp_path / "workspace"
@@ -1338,6 +1369,27 @@ def test_spawn_index_subprocess_skips_when_locked(tmp_path):
     assert result["status"] == "skipped"
     assert result["reason"] == "reindex_in_progress"
     mock_popen.assert_not_called()
+
+
+def test_spawn_background_reindex_skips_recent_manifest_with_same_git_head(tmp_path, capsys):
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+    manifest = MOCK_MANIFEST.model_copy(
+        update={"last_indexed_at": datetime.now(timezone.utc).isoformat()}
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+        patch("codesteer_atlas.server._index_workspace_root", return_value=tmp_path),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server._spawn_index_subprocess") as mock_spawn,
+    ):
+        _spawn_background_reindex()
+
+    assert "índice recente" in capsys.readouterr().err.lower()
+    mock_spawn.assert_not_called()
 
 
 def test_spawn_index_subprocess_started_with_full_and_paths(tmp_path):

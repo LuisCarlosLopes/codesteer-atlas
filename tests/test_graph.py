@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -229,6 +230,18 @@ def test_graph_write_is_atomic_and_json_is_valid(temp_storage):
     assert graph_path.exists()
     assert not (temp_storage.index_dir / "graph.json.tmp").exists()
     assert json.loads(graph_path.read_text(encoding="utf-8"))["graph_version"] == "1.0"
+
+
+def test_load_graph_reuses_process_cache(temp_storage):
+    manifest = _make_base_graph_index(temp_storage)
+    build_and_write(temp_storage, manifest, temp_storage.index_dir)
+
+    first = load_graph(temp_storage.index_dir)
+
+    with patch("builtins.open", side_effect=AssertionError("nao deveria reler graph.json")):
+        second = load_graph(temp_storage.index_dir)
+
+    assert first is second
 
 
 def test_python_import_resolution_ignores_stdlib(temp_storage):

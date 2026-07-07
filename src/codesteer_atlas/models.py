@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -90,6 +90,12 @@ class IndexStats(BaseModel):
     """
 
     files_processed: int = Field(..., description="Total de arquivos novos/alterados processados")
+    files_scanned: int = Field(
+        0, description="Total de arquivos elegíveis inspecionados durante a varredura"
+    )
+    files_eligible: int = Field(
+        0, description="Total de arquivos elegíveis encontrados após filtros/ignores"
+    )
     files_skipped_unchanged: int = Field(
         ..., description="Arquivos cujo hash não mudou e foram pulados (incremental)"
     )
@@ -97,10 +103,25 @@ class IndexStats(BaseModel):
         ..., description="Arquivos removidos do índice por terem sido deletados do workspace"
     )
     chunks_persisted: int = Field(..., description="Total de chunks persistidos no índice")
+    chunks_generated: int = Field(
+        0, description="Total de chunks gerados para arquivos novos/alterados nesta execução"
+    )
     duration_s: float = Field(..., description="Duração total da indexação em segundos")
     git_head_sha: Optional[str] = Field(
         None, description="SHA do commit HEAD no momento da indexação"
     )
+    phase_durations_s: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Duração por fase da indexação (scan/hash/chunk/embed/persist/graph)",
+    )
+    graph_strategy: Optional[str] = Field(
+        None,
+        description="Estratégia usada para atualizar o grafo (ex: full, incremental-code, skipped-unchanged)",
+    )
+    graph_nodes: int = Field(0, description="Total de nós gravados em graph.json")
+    graph_edges: int = Field(0, description="Total de arestas gravadas em graph.json")
+    graph_bytes: int = Field(0, description="Tamanho final de graph.json em bytes")
+    graph_html_bytes: int = Field(0, description="Tamanho final de graph.html em bytes")
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",

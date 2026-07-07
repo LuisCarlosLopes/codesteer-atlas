@@ -4,9 +4,12 @@ Servidor MCP (Model Context Protocol) local para busca semântica em bases de c�
 
 Tudo roda 100% local e offline — o código-fonte nunca é enviado para serviços externos.
 
-### Documentação Visual
+### Documentação
 
-Para entender de forma visual os conceitos do Model Context Protocol (MCP), o pipeline de indexação incremental por AST, e o funcionamento da busca híbrida semântica do Atlas, consulte a 📖 [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/)
+| Recurso | Descrição |
+| -------- | ---------- |
+| 📖 [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/) | Conceitos MCP, busca híbrida e indexação (site interativo) |
+| 📘 [Guia didático — Indexação, Grafo e MCP](docs/guia-indexacao-grafo-mcp.md) | Pipeline completo, diagramas, multi-repo, `atlas_graph` e `graph.html` |
 
 ## Funcionalidades
 
