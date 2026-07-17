@@ -4,6 +4,21 @@ from pathlib import Path
 
 from codesteer_atlas.config import GRAPH_HTML_FILENAME, GRAPH_VIEWER_MAX_FULL_NODES
 
+# Bundle UMD do force-graph (d3-force embutido) vendorizado localmente para
+# manter o graph.html 100% autocontido/offline (abre via file://, sem CDN).
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+_FORCE_GRAPH_LIB_PATH = _VENDOR_DIR / "force-graph.min.js"
+_FORCE_GRAPH_LIB_CACHE: str | None = None
+
+
+def _load_force_graph_lib() -> str:
+    """Lê (e memoiza) o bundle vendorizado do force-graph."""
+    global _FORCE_GRAPH_LIB_CACHE
+    if _FORCE_GRAPH_LIB_CACHE is None:
+        _FORCE_GRAPH_LIB_CACHE = _FORCE_GRAPH_LIB_PATH.read_text(encoding="utf-8")
+    return _FORCE_GRAPH_LIB_CACHE
+
+
 _HTML_TEMPLATE = """<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -203,15 +218,15 @@ _HTML_TEMPLATE = """<!doctype html>
       color: #ffffff;
       border-bottom-color: rgba(255, 255, 255, 0.74);
     }
-    canvas {
+    #graph {
       position: relative;
       z-index: 1;
-      display: block;
       width: 100%;
       height: 100vh;
       cursor: grab;
     }
-    canvas.dragging { cursor: grabbing; }
+    #graph.dragging { cursor: grabbing; }
+    #graph canvas { display: block; }
     @media (max-width: 980px) {
       .shell { grid-template-columns: 1fr; }
       .sidebar {
@@ -220,7 +235,7 @@ _HTML_TEMPLATE = """<!doctype html>
         border-bottom: 1px solid var(--border);
       }
       .stage,
-      canvas { min-height: 56vh; height: 56vh; }
+      #graph { min-height: 56vh; height: 56vh; }
     }
   </style>
 </head>
@@ -258,7 +273,7 @@ _HTML_TEMPLATE = """<!doctype html>
 
       <div class="panel-block">
         <div class="section-title">Detalhes</div>
-        <div id="details" class="details small muted">Selecione um nó para focar o subgrafo local.</div>
+        <div id="details" class="details small muted">Selecione um no para focar o subgrafo local.</div>
       </div>
 
       <div class="panel-block" id="debug-panel" hidden>
@@ -268,11 +283,12 @@ _HTML_TEMPLATE = """<!doctype html>
     </aside>
 
     <main class="stage">
-      <canvas id="graph"></canvas>
+      <div id="graph"></div>
     </main>
   </div>
 
   <script id="graph-data" type="application/json">__GRAPH_JSON__</script>
+  <script>__FORCE_GRAPH_LIB__</script>
   <script>
     const bootstrapStartedAt = performance.now();
     const graph = JSON.parse(document.getElementById("graph-data").textContent);
@@ -280,6 +296,8 @@ _HTML_TEMPLATE = """<!doctype html>
     const debugEnabled =
       /(?:\\?|&)debug=1\\b/.test(location.search) ||
       /(?:^|[#&])debug(?:=1)?\\b/.test(location.hash);
+
+    // Paleta compartilhada com o modelo de dados do grafo (graph.py).
     const colorByKind = {
       file: "#7aa2f7",
       doc: "#f1c27d",
@@ -288,88 +306,70 @@ _HTML_TEMPLATE = """<!doctype html>
       rationale: "#b392f0",
     };
     const edgeStyleByKind = {
-      contains: { color: "#5b6777", alpha: 0.12, width: 0.8 },
-      imports: { color: "#7aa2f7", alpha: 0.30, width: 1.05 },
-      links_to: { color: "#f1c27d", alpha: 0.34, width: 1.12 },
-      cites: { color: "#76c7b7", alpha: 0.38, width: 1.20 },
-      annotates: { color: "#b392f0", alpha: 0.34, width: 1.08 },
+      contains: { color: "#5b6777", alpha: 0.14, width: 0.6 },
+      imports: { color: "#7aa2f7", alpha: 0.32, width: 1.05 },
+      links_to: { color: "#f1c27d", alpha: 0.36, width: 1.12 },
+      cites: { color: "#76c7b7", alpha: 0.40, width: 1.20 },
+      annotates: { color: "#b392f0", alpha: 0.36, width: 1.08 },
     };
-    const canvas = document.getElementById("graph");
-    const ctx = canvas.getContext("2d");
-    const title = document.getElementById("title");
-    const subtitle = document.getElementById("subtitle");
-    const notice = document.getElementById("notice");
-    const loadAllButton = document.getElementById("load-all");
-    const details = document.getElementById("details");
-    const counts = document.getElementById("counts");
-    const legend = document.getElementById("legend");
-    const nodeFilters = document.getElementById("node-filters");
-    const edgeFilters = document.getElementById("edge-filters");
-    const search = document.getElementById("search");
-    const searchResults = document.getElementById("search-results");
-    const resetView = document.getElementById("reset-view");
-    const clearFocus = document.getElementById("clear-focus");
-    const debugPanel = document.getElementById("debug-panel");
-    const debugStats = document.getElementById("debug-stats");
+    const NODE_REL_SIZE = 4;
+
+    // Perfil de renderizacao (mesmos knobs expostos por write_graph_html).
     const physicsThreshold = viewer.render_profile?.physics_threshold || 250;
-    const pixelRatioCap = viewer.render_profile?.pixel_ratio_cap || 1.5;
     const focusLabelZoomThreshold = viewer.render_profile?.focus_label_zoom_threshold || 0.34;
     const contextLabelZoomThreshold = viewer.render_profile?.label_zoom_threshold || 0.82;
     const minZoom = viewer.render_profile?.min_zoom || 0.18;
     const maxZoom = viewer.render_profile?.max_zoom || 10;
-    const zoomStepIn = viewer.render_profile?.zoom_step_in || 1.12;
-    const zoomStepOut = viewer.render_profile?.zoom_step_out || 0.9;
-    const nodes = graph.nodes.map(node => ({ ...node, x: 0, y: 0, vx: 0, vy: 0 }));
-    const edges = graph.edges.slice();
-    const nodesById = new Map(nodes.map(node => [node.id, node]));
-    const nodeKinds = [...new Set(nodes.map(node => node.kind))];
-    const edgeKinds = [...new Set(edges.map(edge => edge.kind))];
+
+    const rawNodes = graph.nodes || [];
+    const rawEdges = graph.edges || [];
+    const nodesById = new Map(rawNodes.map(node => [node.id, node]));
+    const nodeKinds = [...new Set(rawNodes.map(node => node.kind))];
+    const edgeKinds = [...new Set(rawEdges.map(edge => edge.kind))];
     const activeNodeKinds = new Set(nodeKinds);
     const activeEdgeKinds = new Set(edgeKinds);
     const summaryFocusIds = new Set(viewer.focus_node_ids || []);
     const highlightHubIds = new Set(viewer.highlight_hub_ids || []);
     const nodeIdsByKind = new Map(nodeKinds.map(kind => [kind, []]));
-    const edgesByKind = new Map(edgeKinds.map(kind => [kind, []]));
-    const adjacency = new Map(nodes.map(node => [node.id, []]));
+    const adjacency = new Map(rawNodes.map(node => [node.id, []]));
+    for (const node of rawNodes) {
+      nodeIdsByKind.get(node.kind).push(node.id);
+    }
+    for (const edge of rawEdges) {
+      if (adjacency.has(edge.source)) adjacency.get(edge.source).push({ id: edge.target, kind: edge.kind });
+      if (adjacency.has(edge.target)) adjacency.get(edge.target).push({ id: edge.source, kind: edge.kind });
+    }
+
     const state = {
-      scale: 1,
-      offsetX: 0,
-      offsetY: 0,
-      draggingNode: null,
-      panning: false,
-      lastX: 0,
-      lastY: 0,
       selectedId: null,
       hoveredId: null,
       search: "",
       showAll: !viewer.hubs_only,
+      focusIds: new Set(),
+      matchedIds: new Set(),
+      visibleNodeCount: 0,
+      visibleEdgeCount: 0,
     };
-    const perf = {
-      bootstrapMs: 0,
-      layoutMs: 0,
-      averageDrawMs: 0,
-      lastDrawMs: 0,
-      draws: 0,
-    };
-    const visibleCache = {
-      dirty: true,
-      nodeIds: [],
-      nodeSet: new Set(),
-      edges: [],
-      matchedNodeIds: new Set(),
-      focusNodeIds: new Set(),
-      hubNodeIds: new Set(),
-      searchResultCount: 0,
-    };
+    const perf = { bootstrapMs: 0 };
 
-    for (const node of nodes) {
-      nodeIdsByKind.get(node.kind).push(node.id);
-    }
-    for (const edge of edges) {
-      edgesByKind.get(edge.kind).push(edge);
-      if (adjacency.has(edge.source)) adjacency.get(edge.source).push({ id: edge.target, kind: edge.kind });
-      if (adjacency.has(edge.target)) adjacency.get(edge.target).push({ id: edge.source, kind: edge.kind });
-    }
+    const elements = {
+      graph: document.getElementById("graph"),
+      title: document.getElementById("title"),
+      subtitle: document.getElementById("subtitle"),
+      notice: document.getElementById("notice"),
+      loadAll: document.getElementById("load-all"),
+      details: document.getElementById("details"),
+      counts: document.getElementById("counts"),
+      legend: document.getElementById("legend"),
+      nodeFilters: document.getElementById("node-filters"),
+      edgeFilters: document.getElementById("edge-filters"),
+      search: document.getElementById("search"),
+      searchResults: document.getElementById("search-results"),
+      resetView: document.getElementById("reset-view"),
+      clearFocus: document.getElementById("clear-focus"),
+      debugPanel: document.getElementById("debug-panel"),
+      debugStats: document.getElementById("debug-stats"),
+    };
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -381,14 +381,9 @@ _HTML_TEMPLATE = """<!doctype html>
     }
 
     function rgba(hex, alpha) {
-      const clean = hex.replace("#", "");
+      const clean = String(hex || "#94a3b8").replace("#", "");
       const expanded =
-        clean.length === 3
-          ? clean
-              .split("")
-              .map(char => char + char)
-              .join("")
-          : clean;
+        clean.length === 3 ? clean.split("").map(char => char + char).join("") : clean;
       const value = Number.parseInt(expanded, 16);
       const r = (value >> 16) & 255;
       const g = (value >> 8) & 255;
@@ -401,220 +396,212 @@ _HTML_TEMPLATE = """<!doctype html>
       return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
     }
 
-    function invalidateVisibility() {
-      visibleCache.dirty = true;
+    function endpointId(endpoint) {
+      return typeof endpoint === "object" && endpoint !== null ? endpoint.id : endpoint;
     }
 
-    function radiusFor(node) {
-      const degree = Math.min(node.degree || 0, 18);
-      const base = node.kind === "file" || node.kind === "doc" ? 4.1 : 3.2;
-      return base + degree * 0.16;
+    function nodeRadius(node) {
+      return Math.sqrt(Math.max(1, 1 + Math.min(node.degree || 0, 18) * 0.7)) * NODE_REL_SIZE;
     }
 
-    function setupCanvas() {
-      const ratio = Math.min(window.devicePixelRatio || 1, pixelRatioCap);
-      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
-      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    }
-
-    function screenPoint(node, width, height) {
-      return {
-        x: width / 2 + node.x * state.scale + state.offsetX,
-        y: height / 2 + node.y * state.scale + state.offsetY,
-      };
-    }
-
-    function fitView() {
-      const visibility = currentVisibility();
-      if (!visibility.nodeIds.length) {
-        return;
+    // Reconstroi o subconjunto visivel a partir dos filtros e do modo hubs-only.
+    function buildVisibleData() {
+      const nodeSet = new Set();
+      for (const node of rawNodes) {
+        if (!activeNodeKinds.has(node.kind)) continue;
+        if (!state.showAll && summaryFocusIds.size && !summaryFocusIds.has(node.id)) continue;
+        nodeSet.add(node.id);
       }
-      const width = canvas.clientWidth || 1;
-      const height = canvas.clientHeight || 1;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      for (const nodeId of visibility.nodeIds) {
-        const node = nodesById.get(nodeId);
-        minX = Math.min(minX, node.x);
-        maxX = Math.max(maxX, node.x);
-        minY = Math.min(minY, node.y);
-        maxY = Math.max(maxY, node.y);
-      }
-      const spanX = Math.max(maxX - minX, 140);
-      const spanY = Math.max(maxY - minY, 140);
-      const padding = Math.min(width, height) * 0.16;
-      state.scale = Math.max(0.22, Math.min(1.45, Math.min((width - padding) / spanX, (height - padding) / spanY)));
-      state.offsetX = -((minX + maxX) / 2) * state.scale;
-      state.offsetY = -((minY + maxY) / 2) * state.scale;
-    }
-
-    function centerOnNode(nodeId) {
-      const node = nodesById.get(nodeId);
-      if (!node) {
-        return;
-      }
-      state.scale = Math.max(state.scale, 0.96);
-      state.offsetX = -(node.x * state.scale);
-      state.offsetY = -(node.y * state.scale);
-    }
-
-    function currentVisibility() {
-      if (!visibleCache.dirty) {
-        return visibleCache;
-      }
-
-      const nodeIds = [];
-      for (const kind of nodeKinds) {
-        if (!activeNodeKinds.has(kind)) {
-          continue;
-        }
-        for (const nodeId of nodeIdsByKind.get(kind) || []) {
-          if (!state.showAll && summaryFocusIds.size && !summaryFocusIds.has(nodeId)) {
-            continue;
-          }
-          nodeIds.push(nodeId);
+      const links = [];
+      for (const edge of rawEdges) {
+        if (!activeEdgeKinds.has(edge.kind)) continue;
+        if (nodeSet.has(edge.source) && nodeSet.has(edge.target)) {
+          links.push({ source: edge.source, target: edge.target, kind: edge.kind });
         }
       }
+      const nodes = rawNodes.filter(node => nodeSet.has(node.id));
+      state.visibleNodeCount = nodes.length;
+      state.visibleEdgeCount = links.length;
+      return { nodes, links, nodeSet };
+    }
 
-      const nodeSet = new Set(nodeIds);
-      const visibleEdges = [];
-      for (const kind of edgeKinds) {
-        if (!activeEdgeKinds.has(kind)) {
-          continue;
-        }
-        for (const edge of edgesByKind.get(kind) || []) {
-          if (nodeSet.has(edge.source) && nodeSet.has(edge.target)) {
-            visibleEdges.push(edge);
-          }
-        }
-      }
-
-      const matchedNodeIds = new Set();
-      const focusNodeIds = new Set();
-      const hubNodeIds = new Set();
+    // Foco = correspondencias de busca (ou selecao) + vizinhanca 1-hop.
+    function refreshFocus(nodeSet) {
+      const matched = new Set();
+      const focus = new Set();
       if (state.search) {
-        for (const nodeId of nodeIds) {
-          const node = nodesById.get(nodeId);
+        for (const node of rawNodes) {
+          if (nodeSet && !nodeSet.has(node.id)) continue;
           const label = String(node.label || "").toLowerCase();
-          if (nodeId.toLowerCase().includes(state.search) || label.includes(state.search)) {
-            matchedNodeIds.add(nodeId);
-            focusNodeIds.add(nodeId);
+          if (node.id.toLowerCase().includes(state.search) || label.includes(state.search)) {
+            matched.add(node.id);
+            focus.add(node.id);
           }
         }
-        for (const nodeId of matchedNodeIds) {
-          for (const neighbor of adjacency.get(nodeId) || []) {
-            if (nodeSet.has(neighbor.id)) {
-              focusNodeIds.add(neighbor.id);
-            }
-          }
-        }
-      } else if (state.selectedId && nodeSet.has(state.selectedId)) {
-        focusNodeIds.add(state.selectedId);
-        for (const neighbor of adjacency.get(state.selectedId) || []) {
-          if (nodeSet.has(neighbor.id)) {
-            focusNodeIds.add(neighbor.id);
-          }
+      } else if (state.selectedId && (!nodeSet || nodeSet.has(state.selectedId))) {
+        focus.add(state.selectedId);
+      }
+      for (const nodeId of focus.size ? [...focus] : []) {
+        for (const neighbor of adjacency.get(nodeId) || []) {
+          if (!nodeSet || nodeSet.has(neighbor.id)) focus.add(neighbor.id);
         }
       }
-
-      for (const nodeId of highlightHubIds) {
-        if (nodeSet.has(nodeId)) {
-          hubNodeIds.add(nodeId);
-        }
-      }
-
-      visibleCache.nodeIds = nodeIds;
-      visibleCache.nodeSet = nodeSet;
-      visibleCache.edges = visibleEdges;
-      visibleCache.matchedNodeIds = matchedNodeIds;
-      visibleCache.focusNodeIds = focusNodeIds;
-      visibleCache.hubNodeIds = hubNodeIds;
-      visibleCache.searchResultCount = matchedNodeIds.size;
-      visibleCache.dirty = false;
-      return visibleCache;
+      state.matchedIds = matched;
+      state.focusIds = focus;
     }
 
-    function seedLayout() {
-      const ordered = nodes
-        .slice()
-        .sort((left, right) => (right.degree || 0) - (left.degree || 0) || left.id.localeCompare(right.id));
-      const kindRing = new Map(nodeKinds.map((kind, index) => [kind, 140 + index * 38]));
-      const angleStep = (Math.PI * 2) / Math.max(ordered.length, 1);
-      ordered.forEach((node, index) => {
-        const ring = kindRing.get(node.kind) + Math.min(node.degree || 0, 12) * 3;
-        const angle = angleStep * index;
-        const driftX = ((index % 7) - 3) * 4;
-        const driftY = ((index % 11) - 5) * 3;
-        node.x = Math.cos(angle) * ring + driftX;
-        node.y = Math.sin(angle) * ring + driftY;
-        node.vx = 0;
-        node.vy = 0;
-      });
+    function colorForNode(node) {
+      const base = colorByKind[node.kind] || "#94a3b8";
+      let alpha = 0.9;
+      if (state.focusIds.size && !state.focusIds.has(node.id)) {
+        alpha = 0.1;
+      } else if (!state.focusIds.size && viewer.hubs_only && !state.showAll && !highlightHubIds.has(node.id)) {
+        alpha = 0.45;
+      }
+      if (state.matchedIds.has(node.id)) alpha = 1;
+      if (node.id === state.selectedId || node.id === state.hoveredId) alpha = 1;
+      return rgba(base, alpha);
     }
 
-    function runInitialLayout() {
-      const startedAt = performance.now();
-      seedLayout();
-      let iterations = 0;
-      if (nodes.length <= 90) {
-        iterations = 42;
-      } else if (nodes.length <= physicsThreshold) {
-        iterations = 18;
+    function colorForLink(link) {
+      const style = edgeStyleByKind[link.kind] || { color: "#94a3b8", alpha: 0.18 };
+      let alpha = style.alpha;
+      if (state.focusIds.size) {
+        const inFocus = state.focusIds.has(endpointId(link.source)) && state.focusIds.has(endpointId(link.target));
+        alpha = inFocus ? Math.min(0.62, style.alpha + 0.24) : 0.03;
       }
-      for (let iter = 0; iter < iterations; iter++) {
-        const repulsion = 1800 / (1 + iter * 0.08);
-        for (let i = 0; i < nodes.length; i++) {
-          const a = nodes[i];
-          for (let j = i + 1; j < nodes.length; j++) {
-            const b = nodes[j];
-            let dx = a.x - b.x;
-            let dy = a.y - b.y;
-            const dist2 = Math.max(dx * dx + dy * dy, 0.5);
-            const dist = Math.sqrt(dist2);
-            const force = repulsion / dist2;
-            dx /= dist;
-            dy /= dist;
-            a.vx += dx * force;
-            a.vy += dy * force;
-            b.vx -= dx * force;
-            b.vy -= dy * force;
-          }
-        }
-        for (const edge of edges) {
-          const source = nodesById.get(edge.source);
-          const target = nodesById.get(edge.target);
-          if (!source || !target) {
-            continue;
-          }
-          const dx = target.x - source.x;
-          const dy = target.y - source.y;
-          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
-          const desired = edge.kind === "contains" ? 56 : 104;
-          const force = (dist - desired) * 0.0045;
-          source.vx += dx * force;
-          source.vy += dy * force;
-          target.vx -= dx * force;
-          target.vy -= dy * force;
-        }
-        for (const node of nodes) {
-          node.vx += -node.x * 0.00075;
-          node.vy += -node.y * 0.00075;
-          node.x += node.vx;
-          node.y += node.vy;
-          node.vx *= 0.82;
-          node.vy *= 0.82;
-        }
+      return rgba(style.color, alpha);
+    }
+
+    function widthForLink(link) {
+      return (edgeStyleByKind[link.kind] || { width: 1 }).width;
+    }
+
+    function drawNodeDecorations(node, ctx, scale) {
+      if (node.x === undefined || node.y === undefined) return;
+      const dimmed = state.focusIds.size && !state.focusIds.has(node.id);
+      const radius = nodeRadius(node);
+      const isHub = highlightHubIds.has(node.id);
+
+      if (isHub && !dimmed && scale >= 0.7) {
+        ctx.beginPath();
+        ctx.lineWidth = 1 / scale;
+        ctx.strokeStyle = rgba("#ffffff", 0.2);
+        ctx.arc(node.x, node.y, radius + 2.4, 0, Math.PI * 2);
+        ctx.stroke();
       }
-      perf.layoutMs = performance.now() - startedAt;
-      graph.viewer.layout_mode = iterations ? (nodes.length <= 90 ? "relaxed" : "light-relaxed") : "radial-seeded";
-      return iterations > 0;
+
+      const forced =
+        node.id === state.selectedId ||
+        node.id === state.hoveredId ||
+        state.matchedIds.has(node.id);
+      const shouldLabel = scale >= focusLabelZoomThreshold && (forced || scale >= contextLabelZoomThreshold);
+      if (!shouldLabel || (dimmed && !forced)) return;
+
+      const strong = forced;
+      const text = truncateLabel(node.label || node.id, strong ? 34 : 22);
+      const fontSize = (strong ? 12 : 11) / scale;
+      ctx.font = `${fontSize}px "Avenir Next", "Segoe UI", sans-serif`;
+      const padX = 6 / scale;
+      const width = ctx.measureText(text).width + padX * 2;
+      const height = (strong ? 20 : 18) / scale;
+      const labelX = node.x + radius + 3 / scale;
+      const labelY = node.y - height - 3 / scale;
+      ctx.fillStyle = strong ? "rgba(9, 13, 18, 0.92)" : "rgba(13, 17, 23, 0.82)";
+      ctx.strokeStyle = strong ? "rgba(122, 162, 247, 0.34)" : "rgba(148, 163, 184, 0.16)";
+      ctx.lineWidth = 1 / scale;
+      if (ctx.roundRect) {
+        ctx.beginPath();
+        ctx.roundRect(labelX, labelY, width, height, 8 / scale);
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillRect(labelX, labelY, width, height);
+      }
+      ctx.fillStyle = strong ? "#f8fbff" : "#dbe5f0";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, labelX + padX, labelY + height / 2);
+    }
+
+    const Graph = ForceGraph()(elements.graph)
+      .backgroundColor("rgba(0,0,0,0)")
+      .nodeId("id")
+      .nodeRelSize(NODE_REL_SIZE)
+      .nodeVal(node => 1 + Math.min(node.degree || 0, 18) * 0.7)
+      .nodeColor(colorForNode)
+      .nodeLabel(node => escapeHtml(node.label || node.id))
+      .linkColor(colorForLink)
+      .linkWidth(widthForLink)
+      .nodeCanvasObjectMode(() => "after")
+      .nodeCanvasObject(drawNodeDecorations)
+      .onNodeClick(node => selectNode(node.id))
+      .onNodeHover(node => {
+        state.hoveredId = node ? node.id : null;
+        elements.graph.classList.toggle("dragging", false);
+      })
+      .onBackgroundClick(() => clearSelection());
+
+    if (typeof Graph.minZoom === "function") Graph.minZoom(minZoom);
+    if (typeof Graph.maxZoom === "function") Graph.maxZoom(maxZoom);
+
+    // Guardrail de fisica: grafos grandes recebem menos ticks para nao travar.
+    const heavy = rawNodes.length > physicsThreshold;
+    Graph.cooldownTicks(heavy ? 80 : 220).cooldownTime(heavy ? 4000 : 9000);
+    graph.viewer = graph.viewer || {};
+    graph.viewer.layout_mode = heavy ? "force-graph-light" : "force-graph";
+    Graph.d3Force("charge").strength(heavy ? -80 : -140);
+    if (Graph.d3Force("link")) {
+      Graph.d3Force("link").distance(link => (link.kind === "contains" ? 26 : 62));
+    }
+
+    let didInitialFit = false;
+    const fitPadding = 48;
+    Graph.onEngineStop(() => {
+      if (!didInitialFit) {
+        didInitialFit = true;
+        Graph.zoomToFit(500, fitPadding);
+      }
+    });
+
+    function applyData() {
+      const data = buildVisibleData();
+      refreshFocus(data.nodeSet);
+      Graph.graphData({ nodes: data.nodes, links: data.links });
+      renderCounters();
+      renderDebug();
+    }
+
+    function refreshPaint() {
+      // Re-emite os acessores para reavaliar cores/labels sem reheatar o layout.
+      Graph.nodeColor(colorForNode).linkColor(colorForLink);
+    }
+
+    function selectNode(nodeId) {
+      if (!nodesById.has(nodeId)) return;
+      state.selectedId = nodeId;
+      state.search = "";
+      elements.search.value = "";
+      renderDetails(nodesById.get(nodeId));
+      refreshFocus(buildVisibleData().nodeSet);
+      refreshPaint();
+      const node = nodesById.get(nodeId);
+      if (node && node.x !== undefined) {
+        Graph.centerAt(node.x, node.y, 600);
+        Graph.zoom(Math.max(Graph.zoom(), 1.6), 600);
+      }
+      renderCounters();
+    }
+
+    function clearSelection() {
+      state.selectedId = null;
+      renderDetails(null);
+      refreshFocus(buildVisibleData().nodeSet);
+      refreshPaint();
+      renderCounters();
     }
 
     function renderLegend() {
-      legend.innerHTML = nodeKinds
+      elements.legend.innerHTML = nodeKinds
         .map(kind => {
           const total = (nodeIdsByKind.get(kind) || []).length;
           return `
@@ -645,49 +632,45 @@ _HTML_TEMPLATE = """<!doctype html>
           } else {
             activeSet.delete(input.dataset.value);
           }
-          invalidateVisibility();
-          draw();
+          applyData();
         });
       });
     }
 
-    function renderCounters(visibility) {
-      const totalNodes = viewer.node_count || graph.metrics?.node_count || nodes.length;
-      const totalEdges = viewer.edge_count || graph.metrics?.edge_count || edges.length;
+    function renderCounters() {
+      const totalNodes = viewer.node_count || graph.metrics?.node_count || rawNodes.length;
+      const totalEdges = viewer.edge_count || graph.metrics?.edge_count || rawEdges.length;
       const summary = [
-        ["Nos visiveis", `${visibility.nodeIds.length} / ${totalNodes}`],
-        ["Arestas visiveis", `${visibility.edges.length} / ${totalEdges}`],
+        ["Nos visiveis", `${state.visibleNodeCount} / ${totalNodes}`],
+        ["Arestas visiveis", `${state.visibleEdgeCount} / ${totalEdges}`],
         ["Layout", graph.viewer.layout_mode || viewer.layout_mode || "auto"],
       ];
-      counts.innerHTML = summary
+      elements.counts.innerHTML = summary
         .map(([label, value]) => `<div class="metric-row"><span class="muted">${label}</span><span>${escapeHtml(value)}</span></div>`)
         .join("");
       if (state.search) {
-        searchResults.textContent = visibility.searchResultCount
-          ? `${visibility.searchResultCount} correspondencia(s) em foco`
+        elements.searchResults.textContent = state.matchedIds.size
+          ? `${state.matchedIds.size} correspondencia(s) em foco`
           : "Nenhuma correspondencia encontrada";
       } else if (state.selectedId) {
-        searchResults.textContent = "Foco local ativo";
+        elements.searchResults.textContent = "Foco local ativo";
       } else if (!state.showAll && viewer.hubs_only) {
-        searchResults.textContent = "Resumo por hubs ativo";
+        elements.searchResults.textContent = "Resumo por hubs ativo";
       } else {
-        searchResults.textContent = "";
+        elements.searchResults.textContent = "";
       }
     }
 
-    function renderDebug(visibility) {
-      if (!debugEnabled) {
-        return;
-      }
-      debugPanel.hidden = false;
-      debugStats.innerHTML = [
+    function renderDebug() {
+      if (!debugEnabled) return;
+      elements.debugPanel.hidden = false;
+      elements.debugStats.innerHTML = [
         ["Bootstrap", `${perf.bootstrapMs.toFixed(1)} ms`],
-        ["Layout inicial", `${perf.layoutMs.toFixed(1)} ms`],
-        ["Draw medio", `${perf.averageDrawMs.toFixed(2)} ms`],
-        ["Ultimo draw", `${perf.lastDrawMs.toFixed(2)} ms`],
         ["Layout mode", graph.viewer.layout_mode || viewer.layout_mode || "auto"],
-        ["Pixel ratio", `${Math.min(window.devicePixelRatio || 1, pixelRatioCap).toFixed(2)}`],
-        ["Foco", visibility.focusNodeIds.size ? `${visibility.focusNodeIds.size} nos` : "inativo"],
+        ["Nos visiveis", `${state.visibleNodeCount}`],
+        ["Arestas visiveis", `${state.visibleEdgeCount}`],
+        ["Zoom", `${Graph.zoom().toFixed(2)}`],
+        ["Foco", state.focusIds.size ? `${state.focusIds.size} nos` : "inativo"],
       ]
         .map(([label, value]) => `<div class="metric-row"><span class="muted">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`)
         .join("");
@@ -695,14 +678,11 @@ _HTML_TEMPLATE = """<!doctype html>
 
     function renderDetails(node) {
       if (!node) {
-        details.innerHTML = '<span class="muted">Selecione um no para focar o subgrafo local.</span>';
+        elements.details.innerHTML = '<span class="muted">Selecione um no para focar o subgrafo local.</span>';
         return;
       }
       const neighbors = (adjacency.get(node.id) || [])
-        .map(item => ({
-          edgeKind: item.kind,
-          node: nodesById.get(item.id),
-        }))
+        .map(item => ({ edgeKind: item.kind, node: nodesById.get(item.id) }))
         .filter(item => item.node)
         .slice(0, 20);
       const lines = Array.isArray(node.lines) ? node.lines.join("-") : "-";
@@ -716,7 +696,7 @@ _HTML_TEMPLATE = """<!doctype html>
           `
         )
         .join("");
-      details.innerHTML = `
+      elements.details.innerHTML = `
         <div class="details-list">
           <div><strong>${escapeHtml(node.label || node.id)}</strong></div>
           <div><span class="muted">id</span><br><code>${escapeHtml(node.id)}</code></div>
@@ -736,330 +716,62 @@ _HTML_TEMPLATE = """<!doctype html>
           } catch (_) {}
         };
       }
-      details.querySelectorAll("[data-node]").forEach(element => {
+      elements.details.querySelectorAll("[data-node]").forEach(element => {
         element.addEventListener("click", () => selectNode(element.dataset.node));
       });
     }
 
-    function selectNode(nodeId) {
-      if (!nodesById.has(nodeId)) {
-        return;
-      }
-      state.selectedId = nodeId;
-      renderDetails(nodesById.get(nodeId));
-      centerOnNode(nodeId);
-      invalidateVisibility();
-      draw();
+    function resizeGraph() {
+      Graph.width(elements.graph.clientWidth || 1).height(elements.graph.clientHeight || 1);
     }
 
-    function clearSelection() {
+    elements.search.addEventListener("input", () => {
+      state.search = elements.search.value.trim().toLowerCase();
       state.selectedId = null;
-      renderDetails(null);
-      invalidateVisibility();
-      draw();
-    }
-
-    function nodeVisual(nodeId, visibility) {
-      const isSelected = state.selectedId === nodeId;
-      const isHovered = state.hoveredId === nodeId;
-      const isMatched = visibility.matchedNodeIds.has(nodeId);
-      const inFocus = visibility.focusNodeIds.has(nodeId);
-      const isHub = visibility.hubNodeIds.has(nodeId);
-      let alpha = 0.88;
-      let emphasis = 0;
-      if (visibility.focusNodeIds.size) {
-        alpha = inFocus ? 0.92 : 0.12;
-        emphasis = inFocus ? 1 : 0;
-      } else if (viewer.hubs_only && !state.showAll && !isHub) {
-        alpha = 0.18;
-      }
-      if (isMatched) {
-        alpha = 1;
-        emphasis = 2;
-      }
-      if (isHub) {
-        alpha = Math.max(alpha, 0.84);
-      }
-      if (isHovered) {
-        alpha = 1;
-        emphasis = Math.max(emphasis, 2);
-      }
-      if (isSelected) {
-        alpha = 1;
-        emphasis = 3;
-      }
-      return { alpha, emphasis, isHub, isMatched };
-    }
-
-    function labelNodeIds(visibility) {
-      const ids = new Set();
-      if (state.selectedId && visibility.nodeSet.has(state.selectedId)) {
-        ids.add(state.selectedId);
-      }
-      if (state.hoveredId && visibility.nodeSet.has(state.hoveredId)) {
-        ids.add(state.hoveredId);
-      }
-      if (state.scale >= contextLabelZoomThreshold) {
-        for (const nodeId of visibility.matchedNodeIds) {
-          ids.add(nodeId);
-        }
-        for (const nodeId of visibility.hubNodeIds) {
-          ids.add(nodeId);
-        }
-      }
-      return ids;
-    }
-
-    function drawLabel(node, x, y, strong) {
-      const text = truncateLabel(node.label || node.id, strong ? 34 : 22);
-      ctx.font = strong ? '12px "Avenir Next", "Segoe UI", sans-serif' : '11px "Avenir Next", "Segoe UI", sans-serif';
-      const metrics = ctx.measureText(text);
-      const width = metrics.width + 12;
-      const height = strong ? 20 : 18;
-      const labelX = x + 10;
-      const labelY = y - height - 8;
-      ctx.fillStyle = strong ? "rgba(9, 13, 18, 0.92)" : "rgba(13, 17, 23, 0.82)";
-      ctx.strokeStyle = strong ? "rgba(122, 162, 247, 0.34)" : "rgba(148, 163, 184, 0.16)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(labelX, labelY, width, height, 9);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = strong ? "#f8fbff" : "#dbe5f0";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, labelX + 6, labelY + height / 2 + 0.3);
-    }
-
-    function draw() {
-      const drawStartedAt = performance.now();
-      const visibility = currentVisibility();
-      const width = canvas.clientWidth || 1;
-      const height = canvas.clientHeight || 1;
-      ctx.clearRect(0, 0, width, height);
-
-      renderCounters(visibility);
-
-      for (const edge of visibility.edges) {
-        const source = nodesById.get(edge.source);
-        const target = nodesById.get(edge.target);
-        if (!source || !target) {
-          continue;
-        }
-        const sourceVisual = nodeVisual(edge.source, visibility);
-        const targetVisual = nodeVisual(edge.target, visibility);
-        const style = edgeStyleByKind[edge.kind] || { color: "#94a3b8", alpha: 0.18, width: 1 };
-        const edgeAlpha = visibility.focusNodeIds.size
-          ? sourceVisual.alpha * targetVisual.alpha * 0.72
-          : style.alpha;
-        const a = screenPoint(source, width, height);
-        const b = screenPoint(target, width, height);
-        ctx.beginPath();
-        ctx.strokeStyle = rgba(style.color, Math.max(0.04, Math.min(0.58, edgeAlpha)));
-        ctx.lineWidth = style.width + (sourceVisual.emphasis && targetVisual.emphasis ? 0.3 : 0);
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-      }
-
-      for (const nodeId of visibility.nodeIds) {
-        const node = nodesById.get(nodeId);
-        const point = screenPoint(node, width, height);
-        const radius = radiusFor(node);
-        const visual = nodeVisual(nodeId, visibility);
-        if (visual.emphasis >= 2) {
-          ctx.beginPath();
-          ctx.fillStyle = rgba(colorByKind[node.kind] || "#94a3b8", visual.emphasis === 3 ? 0.18 : 0.12);
-          ctx.arc(point.x, point.y, radius + (visual.emphasis === 3 ? 8 : 6), 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.beginPath();
-        ctx.fillStyle = rgba(colorByKind[node.kind] || "#94a3b8", visual.alpha);
-        ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-        ctx.fill();
-        if (visual.isHub && state.scale >= 0.70) {
-          ctx.beginPath();
-          ctx.lineWidth = 1;
-          ctx.strokeStyle = rgba("#ffffff", 0.18);
-          ctx.arc(point.x, point.y, radius + 2.2, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-      }
-
-      const shouldDrawContextLabels = state.scale >= contextLabelZoomThreshold;
-      const shouldDrawFocusLabels = state.scale >= focusLabelZoomThreshold;
-      if (shouldDrawFocusLabels) {
-        const labels = labelNodeIds(visibility);
-        if (labels.size || shouldDrawContextLabels) {
-          for (const nodeId of labels) {
-            const node = nodesById.get(nodeId);
-            if (!node) {
-              continue;
-            }
-            const point = screenPoint(node, width, height);
-            const strong = nodeId === state.selectedId || nodeId === state.hoveredId || visibility.matchedNodeIds.has(nodeId);
-            drawLabel(node, point.x, point.y, strong);
-          }
-        }
-      }
-
-      perf.lastDrawMs = performance.now() - drawStartedAt;
-      perf.draws += 1;
-      perf.averageDrawMs += (perf.lastDrawMs - perf.averageDrawMs) / perf.draws;
-      renderDebug(visibility);
-    }
-
-    function nodeAt(clientX, clientY) {
-      const visibility = currentVisibility();
-      const width = canvas.clientWidth || 1;
-      const height = canvas.clientHeight || 1;
-      for (let index = visibility.nodeIds.length - 1; index >= 0; index -= 1) {
-        const nodeId = visibility.nodeIds[index];
-        const node = nodesById.get(nodeId);
-        const point = screenPoint(node, width, height);
-        const radius = radiusFor(node) + 2;
-        if ((clientX - point.x) ** 2 + (clientY - point.y) ** 2 <= radius ** 2) {
-          return node;
-        }
-      }
-      return null;
-    }
-
-    canvas.addEventListener("mousedown", event => {
-      state.lastX = event.offsetX;
-      state.lastY = event.offsetY;
-      const node = nodeAt(event.offsetX, event.offsetY);
-      if (node) {
-        state.draggingNode = node;
-        state.hoveredId = node.id;
-        selectNode(node.id);
-      } else {
-        state.panning = true;
-        canvas.classList.add("dragging");
-      }
+      refreshFocus(buildVisibleData().nodeSet);
+      refreshPaint();
+      renderCounters();
+      renderDebug();
     });
 
-    canvas.addEventListener("mousemove", event => {
-      const dx = event.offsetX - state.lastX;
-      const dy = event.offsetY - state.lastY;
-      state.lastX = event.offsetX;
-      state.lastY = event.offsetY;
-      if (state.draggingNode) {
-        state.draggingNode.x += dx / state.scale;
-        state.draggingNode.y += dy / state.scale;
-        draw();
-        return;
-      }
-      if (state.panning) {
-        state.offsetX += dx;
-        state.offsetY += dy;
-        draw();
-        return;
-      }
-      const hovered = nodeAt(event.offsetX, event.offsetY);
-      const hoveredId = hovered ? hovered.id : null;
-      if (hoveredId !== state.hoveredId) {
-        state.hoveredId = hoveredId;
-        draw();
-      }
-    });
+    elements.resetView.addEventListener("click", () => Graph.zoomToFit(500, fitPadding));
 
-    canvas.addEventListener("mouseleave", () => {
-      if (state.hoveredId !== null) {
-        state.hoveredId = null;
-        draw();
-      }
-    });
-
-    window.addEventListener("mouseup", () => {
-      state.draggingNode = null;
-      state.panning = false;
-      canvas.classList.remove("dragging");
-    });
-
-    canvas.addEventListener(
-      "wheel",
-      event => {
-        event.preventDefault();
-        const width = canvas.clientWidth || 1;
-        const height = canvas.clientHeight || 1;
-        const worldX = (event.offsetX - width / 2 - state.offsetX) / state.scale;
-        const worldY = (event.offsetY - height / 2 - state.offsetY) / state.scale;
-        const nextScale = Math.max(
-          minZoom,
-          Math.min(maxZoom, state.scale * (event.deltaY < 0 ? zoomStepIn : zoomStepOut))
-        );
-        state.scale = nextScale;
-        state.offsetX = event.offsetX - width / 2 - worldX * nextScale;
-        state.offsetY = event.offsetY - height / 2 - worldY * nextScale;
-        draw();
-      },
-      { passive: false }
-    );
-
-    canvas.addEventListener("click", event => {
-      const node = nodeAt(event.offsetX, event.offsetY);
-      if (node) {
-        selectNode(node.id);
-      }
-    });
-
-    search.addEventListener("input", () => {
-      state.search = search.value.trim().toLowerCase();
-      invalidateVisibility();
-      draw();
-    });
-
-    resetView.addEventListener("click", () => {
-      fitView();
-      draw();
-    });
-
-    clearFocus.addEventListener("click", () => {
-      search.value = "";
+    elements.clearFocus.addEventListener("click", () => {
+      elements.search.value = "";
       state.search = "";
       state.hoveredId = null;
       clearSelection();
     });
 
-    loadAllButton.addEventListener("click", () => {
+    elements.loadAll.addEventListener("click", () => {
       state.showAll = true;
-      notice.hidden = true;
-      loadAllButton.hidden = true;
-      invalidateVisibility();
-      fitView();
-      draw();
+      elements.notice.hidden = true;
+      elements.loadAll.hidden = true;
+      didInitialFit = false;
+      applyData();
     });
 
-    window.addEventListener("resize", () => {
-      setupCanvas();
-      fitView();
-      draw();
-    });
+    window.addEventListener("resize", resizeGraph);
 
-    title.textContent = graph.workspace_repo || "Atlas Graph";
-    subtitle.textContent = `${graph.generated_at || ""} · ${viewer.node_count || graph.metrics?.node_count || nodes.length} nos`;
-    renderFilterGroup(nodeFilters, nodeKinds, activeNodeKinds);
-    renderFilterGroup(edgeFilters, edgeKinds, activeEdgeKinds);
+    elements.title.textContent = graph.workspace_repo || "Atlas Graph";
+    elements.subtitle.textContent = `${graph.generated_at || ""} · ${viewer.node_count || graph.metrics?.node_count || rawNodes.length} nos`;
+    renderFilterGroup(elements.nodeFilters, nodeKinds, activeNodeKinds);
+    renderFilterGroup(elements.edgeFilters, edgeKinds, activeEdgeKinds);
     renderLegend();
     if (viewer.hubs_only) {
-      notice.hidden = false;
-      notice.textContent = viewer.notice || "Resumo por hubs ativo para manter o mapa fluido.";
-      loadAllButton.hidden = false;
+      elements.notice.hidden = false;
+      elements.notice.textContent = viewer.notice || "Resumo por hubs ativo para manter o mapa fluido.";
+      elements.loadAll.hidden = false;
     }
     if (debugEnabled) {
-      debugPanel.hidden = false;
+      elements.debugPanel.hidden = false;
     }
 
-    const usedRelaxation = runInitialLayout();
-    if (!usedRelaxation && !viewer.hubs_only) {
-      notice.hidden = false;
-      notice.textContent =
-        `Layout rapido aplicado (${nodes.length} nos); a fisica completa fica limitada a ${physicsThreshold} nos para evitar travamento.`;
-    }
-    setupCanvas();
-    fitView();
+    resizeGraph();
+    applyData();
+    renderDetails(null);
     perf.bootstrapMs = performance.now() - bootstrapStartedAt;
-    draw();
+    renderDebug();
   </script>
 </body>
 </html>
@@ -1067,7 +779,7 @@ _HTML_TEMPLATE = """<!doctype html>
 
 
 def write_graph_html(graph: dict, index_dir: Path) -> Path:
-    """Gera `graph.html` autocontido com o grafo embutido em JSON."""
+    """Gera `graph.html` autocontido com o grafo e o force-graph embutidos."""
     graph_for_view = json.loads(json.dumps(graph))
     metrics = graph_for_view.get("metrics", {})
     node_count = len(graph_for_view.get("nodes", []))
@@ -1115,7 +827,8 @@ def write_graph_html(graph: dict, index_dir: Path) -> Path:
     json_payload = json.dumps(graph_for_view, ensure_ascii=False, separators=(",", ":")).replace(
         "</", "<\\/"
     )
-    html = _HTML_TEMPLATE.replace("__GRAPH_JSON__", json_payload)
+    html = _HTML_TEMPLATE.replace("__FORCE_GRAPH_LIB__", _load_force_graph_lib())
+    html = html.replace("__GRAPH_JSON__", json_payload)
 
     index_dir = Path(index_dir)
     index_dir.mkdir(parents=True, exist_ok=True)
