@@ -37,7 +37,7 @@ def test_write_graph_html_embeds_parseable_graph_json(tmp_path):
     assert embedded["viewer"]["render_profile"]["max_zoom"] == 10
 
 
-def test_graph_html_has_no_external_urls(tmp_path):
+def test_graph_html_has_no_external_resource_loads(tmp_path):
     graph = {
         "workspace_repo": "repo",
         "generated_at": "2026-06-05T12:00:00Z",
@@ -48,10 +48,37 @@ def test_graph_html_has_no_external_urls(tmp_path):
 
     html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
 
-    assert re.search(r"https?://|//cdn", html) is None
+    # O force-graph e vendorizado inline: nao pode haver nenhum carregamento
+    # externo (CDN, <script src>, <link>, @import ou url(http)) — abre via file://.
+    # URIs de namespace (http://www.w3.org/...) dentro do bundle nao sao rede.
+    assert "<script src=" not in html
+    assert "<link " not in html
+    assert "@import" not in html
+    assert "//cdn" not in html
+    assert re.search(r'src\s*=\s*["\']https?://', html) is None
+    assert re.search(r'href\s*=\s*["\']https?://', html) is None
+    assert re.search(r"url\(\s*['\"]?https?://", html) is None
+    assert re.search(r"\b(fetch|XMLHttpRequest|WebSocket)\s*\(", html) is None
+    # ... e a lib force-graph esta de fato embutida.
+    assert "ForceGraph" in html
 
 
-def test_graph_html_escapes_script_breakout_sequences(tmp_path):
+def test_graph_html_embeds_vendored_force_graph_bundle(tmp_path):
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [{"id": "n1", "kind": "symbol", "label": "Node 1", "degree": 1}],
+        "edges": [],
+        "metrics": {"node_count": 1, "edge_count": 0, "top_hubs": []},
+    }
+
+    html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+
+    # O placeholder foi substituido pelo bundle UMD real (nao sobra marcador).
+    assert "__FORCE_GRAPH_LIB__" not in html
+    # Assinatura do UMD do force-graph (exporta o global ForceGraph).
+    assert ".ForceGraph=" in html
+    assert len(html) > 150_000  # bundle (~177 KB) esta de fato embutido
     graph = {
         "workspace_repo": "repo",
         "generated_at": "2026-06-05T12:00:00Z",
@@ -110,7 +137,7 @@ def test_large_graph_marks_hubs_only_flag_in_embed(tmp_path):
     assert embedded["viewer"]["notice"] == "Grafo grande: exibindo hubs e vizinhanca 1-hop por padrao."
 
 
-def test_viewer_template_has_obsidian_like_dark_theme_and_on_demand_labels(tmp_path):
+def test_viewer_template_embeds_force_graph_with_dark_theme_and_on_demand_labels(tmp_path):
     graph = {
         "workspace_repo": "repo",
         "generated_at": "2026-06-05T12:00:00Z",
@@ -123,8 +150,12 @@ def test_viewer_template_has_obsidian_like_dark_theme_and_on_demand_labels(tmp_p
 
     assert "color-scheme: dark" in html
     assert 'class="shell"' in html
+    # Renderer force-graph vendorizado e inicializado inline sobre <div id="graph">.
+    assert "ForceGraph()" in html
+    assert 'ForceGraph()(elements.graph)' in html
+    # Labels sob demanda continuam guiadas pelos thresholds de zoom.
     assert "focusLabelZoomThreshold" in html
-    assert "labelNodeIds(visibility)" in html
+    assert "drawNodeDecorations" in html
     assert 'viewer.render_profile?.label_zoom_threshold || 0.82' in html
 
 
@@ -141,7 +172,7 @@ def test_viewer_template_has_performance_guardrails_and_debug_hooks(tmp_path):
 
     assert 'viewer.render_profile?.physics_threshold || 250' in html
     assert 'viewer.render_profile?.max_zoom || 10' in html
-    assert "Math.min(window.devicePixelRatio || 1, pixelRatioCap)" in html
-    assert "const visibleCache = {" in html
-    assert 'const debugPanel = document.getElementById("debug-panel");' in html
-    assert "Layout rapido aplicado" in html
+    # Fisica limitada em grafos grandes (cooldown menor) + painel de debug via ?debug=1.
+    assert "cooldownTicks" in html
+    assert 'id="debug-panel"' in html
+    assert "debugEnabled" in html
