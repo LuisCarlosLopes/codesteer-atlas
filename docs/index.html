@@ -247,7 +247,7 @@
           <div class="pipeline-card">
             <span class="step-num">6</span>
             <h4>Graph</h4>
-            <p>Reconstrói <code>graph.json</code> e gera o visualizador offline <code>graph.html</code> a partir do índice atual.</p>
+            <p>Atualiza <code>graph.json</code>/<code>graph.html</code> com a estratégia mais barata possível: pula se nada mudou, faz rebuild incremental quando só código já indexado foi alterado, ou reconstrói tudo nos demais casos.</p>
           </div>
         </div>
 
@@ -905,12 +905,20 @@ def encode(self, texts: list[str]) -> list[list[float]]:
               <span class="tool-type">Indexador</span>
             </div>
             <p class="tool-desc">
-              Indexa ou reindexa o workspace. <code>dry_run=true</code> lista candidatos.
+              Indexa ou reindexa o workspace. <code>dry_run=true</code> lista candidatos e,
+              em workspaces grandes (&gt; 200 arquivos elegíveis), recomenda <code>paths</code>
+              específicos em vez de indexação completa.
               Workspace inteiro ou <code>full=true</code> rodam em background; <code>paths</code> específicos são síncronos.
-              Regenera <code>graph.json</code> e <code>graph.html</code>.
+              Atualiza <code>graph.json</code>/<code>graph.html</code> conforme a estratégia mais barata (ver fase Graph acima).
             </p>
             <div class="tool-args">
               <strong>Argumentos:</strong> <code>workspace</code>, <code>paths</code>, <code>full</code>, <code>dry_run</code>
+            </div>
+            <div class="tool-args">
+              <strong>Retorno inclui:</strong> <code>phase_durations_s</code> (tempo por fase),
+              <code>graph_strategy</code> (<code>full</code>/<code>incremental-code</code>/<code>skipped-unchanged</code>),
+              <code>files_scanned</code>, <code>files_eligible</code>, <code>chunks_generated</code>,
+              <code>graph_nodes</code>, <code>graph_edges</code>, <code>graph_bytes</code>, <code>graph_html_bytes</code>
             </div>
           </div>
         </div>
