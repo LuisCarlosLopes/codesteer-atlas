@@ -47,12 +47,14 @@ Use as tools deste power sempre que precisar:
 
 - `atlas_search(query, top_k, repo, language, path_prefix, include_content)` — busca híbrida. Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo.
 - `atlas_map(repo, path_prefix, max_depth)` — mapa hierárquico de classes/funções/métodos do workspace.
-- `atlas_status()` — diagnóstico do índice (existência, total de chunks, modelo, staleness).
+- `atlas_graph(mode, target, source, top_n)` — consulta o grafo derivado para hubs, caminhos entre nós e explain com rationale/notas ligadas.
+- `atlas_status()` — diagnóstico do índice (existência, total de chunks, modelo, staleness, `graph_available`, `graph_viewer_path`).
 - `atlas_index(workspace, paths, full, dry_run)` — (re)indexa o workspace; use `dry_run=true` antes de indexar pastas ainda não indexadas.
 
 ## Boas práticas
 
 - **Fluxo em 2 passos:** localize com `atlas_search` (metadados por padrão), depois `Read` nas linhas retornadas ou `include_content=true` só nos hits relevantes.
+- Reindexe após atualizar para índices `2.1.0+` para habilitar `atlas_graph`, `graph.json` e `graph.html`; índices `2.0.0` continuam buscáveis, mas sem grafo.
 - Prefira `atlas_search`/`atlas_map` a ler arquivos inteiros para localizar código — é muito mais econômico em tokens.
 - Antes de indexar um workspace inteiro pela primeira vez, rode `atlas_index` com `dry_run=true` e confirme com o usuário quais pastas indexar.
 - Se `atlas_status` indicar `is_stale: true`, sugira reindexar antes de confiar nos resultados de busca.

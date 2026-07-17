@@ -6,7 +6,7 @@ import posixpath
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -38,13 +38,22 @@ os.environ.setdefault("LANCE_LOG", "off")
 import anyio  # noqa: E402
 from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
-from codesteer_atlas.config import DEFAULT_INDEX_DIR, SUPPORTED_EXTENSIONS  # noqa: E402
+from codesteer_atlas.config import (  # noqa: E402
+    BACKGROUND_REINDEX_MIN_INTERVAL_S,
+    DEFAULT_INDEX_DIR,
+    GRAPH_FILENAME,
+    GRAPH_HTML_FILENAME,
+    GRAPH_PATH_MAX_HOPS,
+    SUPPORTED_EXTENSIONS,
+)
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
+from codesteer_atlas.graph import bfs_path, explain, hubs, load_graph  # noqa: E402
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
 from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
     slugify_heading,
 )
+from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
@@ -101,6 +110,26 @@ ROOTS_LIST_TIMEOUT_S = 5.0
 # primeira resolução entre threads (FastMCP roda tools sync em threadpool) [R].
 _ROOTS_RESOLUTION_DONE = False
 _ROOTS_RESOLUTION_LOCK = threading.Lock()
+
+
+def _recommend_dry_run_paths(candidates: list[dict], total_eligible: int) -> tuple[str, list[str], str]:
+    ranked = sorted(
+        (candidate for candidate in candidates if "/" not in candidate["path"]),
+        key=lambda item: (-item["eligible_files"], item["path"]),
+    )
+    preferred_names = {"src", "docs", "app", "apps", "packages", "backend", "frontend"}
+    recommended = [
+        candidate["path"]
+        for candidate in ranked
+        if candidate["path"] in preferred_names or candidate["eligible_files"] > 1
+    ][:3]
+    if total_eligible > 200 and recommended:
+        return (
+            "paths",
+            recommended,
+            "Workspace grande detectado; prefira indexação parcial primeiro.",
+        )
+    return ("workspace", [], "Workspace pequeno/médio; indexação completa é razoável.")
 
 
 def _discover_index_dir(base: Path) -> Optional[Path]:
@@ -355,6 +384,8 @@ def get_status_data() -> dict:
     """Função auxiliar para obter os metadados e status de diagnóstico do índice."""
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     reindexing = is_reindex_locked(INDEX_DIR_PATH)
+    graph_path = storage.index_dir / GRAPH_FILENAME
+    graph_viewer_path = storage.index_dir / GRAPH_HTML_FILENAME
 
     if not storage.exists():
         return {
@@ -371,6 +402,8 @@ def get_status_data() -> dict:
             "is_stale": False,
             "languages_indexed": [],
             "reindexing": reindexing,
+            "graph_available": False,
+            "graph_viewer_path": None,
         }
 
     try:
@@ -397,6 +430,8 @@ def get_status_data() -> dict:
             "is_stale": is_stale,
             "languages_indexed": manifest.languages_indexed,
             "reindexing": reindexing,
+            "graph_available": graph_path.exists(),
+            "graph_viewer_path": str(graph_viewer_path.resolve()) if graph_viewer_path.exists() else None,
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
@@ -405,7 +440,20 @@ def get_status_data() -> dict:
             "error": str(e),
             "index_resolution": INDEX_RESOLUTION_SOURCE,
             "reindexing": reindexing,
+            "graph_available": False,
+            "graph_viewer_path": None,
         }
+
+
+def _resolve_note_candidates(name_to_paths: dict, key: str) -> list[str]:
+    if key in name_to_paths:
+        return sorted(name_to_paths[key])
+    prefix = f"{key}-"
+    matches = []
+    for stem, paths in name_to_paths.items():
+        if stem.startswith(prefix):
+            matches.extend(paths)
+    return sorted(matches)
 
 
 # --- MCP Tools ---
@@ -454,6 +502,7 @@ def atlas_search(
         and `content` only when include_content=true), `total_chunks_searched`, and
         `query_time_ms`. Markdown results may also include `markdown_references`
         ({file_path, anchor, resolved_section}) for links to other `.md` files.
+        Code results may include `rationale_refs` ({kind, key, note_path?, text?, candidates?}).
     """
     start_time = time.time()
 
@@ -551,6 +600,29 @@ def atlas_search(
                         ref["candidates"] = target.candidates
                     markdown_references.append(ref)
                 item["markdown_references"] = markdown_references
+        elif r.references:
+            rationale_refs = []
+            for raw_ref in r.references:
+                ref = deserialize_rationale_ref(raw_ref)
+                if ref is None:
+                    continue
+                if ref.kind == "annotation":
+                    rationale_refs.append(
+                        {"kind": "annotation", "key": ref.key, "text": ref.text}
+                    )
+                    continue
+                candidates = _resolve_note_candidates(name_to_paths, ref.key)
+                resolved = candidates[0] if len(candidates) == 1 else None
+                entry = {
+                    "kind": ref.kind,
+                    "key": ref.key,
+                    "note_path": resolved,
+                }
+                if len(candidates) > 1:
+                    entry["candidates"] = candidates
+                rationale_refs.append(entry)
+            if rationale_refs:
+                item["rationale_refs"] = rationale_refs
 
         serialized_results.append(item)
 
@@ -561,6 +633,58 @@ def atlas_search(
     }
 
     return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
+
+
+@app.tool()
+def atlas_graph(
+    mode: str,
+    target: Optional[str] = None,
+    source: Optional[str] = None,
+    top_n: int = 10,
+    ctx: "Context | None" = None,
+) -> str:
+    """
+    Query the derived knowledge graph for hubs, paths, or neighborhood explanations.
+
+    Call this directly when the question is about connectivity, rationale, or
+    centrality in the indexed workspace. It reads the derived `graph.json`
+    produced by `atlas_index`; it does not rebuild the graph itself.
+
+    Args:
+        mode: One of `hubs`, `path`, or `explain`.
+        target: Required for `path` and `explain`. Accepts exact node id, exact label,
+            or a unique suffix.
+        source: Required for `path`. Accepts exact node id, exact label, or a unique suffix.
+        top_n: Number of hubs to return for `hubs` mode. Must be between 1 and 50.
+
+    Returns:
+        JSON string for the selected mode.
+    """
+    _resolve_index_dir_via_roots(ctx)
+
+    if mode not in {"hubs", "path", "explain"}:
+        raise ValueError("O parâmetro 'mode' deve ser 'hubs', 'path' ou 'explain'.")
+    if top_n < 1 or top_n > 50:
+        raise ValueError("O parâmetro 'top_n' deve estar entre 1 e 50.")
+
+    graph = load_graph(INDEX_DIR_PATH)
+
+    if mode == "hubs":
+        payload = {"mode": "hubs", "items": hubs(graph, top_n)}
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    if mode == "path":
+        if not source or not target:
+            raise ValueError("Os parâmetros 'source' e 'target' são obrigatórios em mode='path'.")
+        payload = bfs_path(graph, source, target, max_hops=GRAPH_PATH_MAX_HOPS)
+        payload["mode"] = "path"
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    if not target:
+        raise ValueError("O parâmetro 'target' é obrigatório em mode='explain'.")
+    payload = explain(graph, target)
+    payload["mode"] = "explain"
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
 @app.tool()
@@ -808,6 +932,13 @@ def atlas_index(
             "candidates": candidates,
             "total_eligible_files": total_eligible,
         }
+        recommended_mode, recommended_paths, message = _recommend_dry_run_paths(
+            candidates, total_eligible
+        )
+        response["recommended_mode"] = recommended_mode
+        if recommended_paths:
+            response["recommended_paths"] = recommended_paths
+        response["message"] = message
         return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
     print(
@@ -850,11 +981,20 @@ def atlas_index(
         "workspace": str(workspace_path),
         "indexed_paths": list(paths) if paths else "all",
         "files_processed": stats.files_processed,
+        "files_scanned": stats.files_scanned,
+        "files_eligible": stats.files_eligible,
         "files_skipped_unchanged": stats.files_skipped_unchanged,
         "files_removed": stats.files_removed,
         "chunks_persisted": stats.chunks_persisted,
+        "chunks_generated": stats.chunks_generated,
         "duration_s": stats.duration_s,
         "git_head_sha": stats.git_head_sha,
+        "phase_durations_s": stats.phase_durations_s,
+        "graph_strategy": stats.graph_strategy,
+        "graph_nodes": stats.graph_nodes,
+        "graph_edges": stats.graph_edges,
+        "graph_bytes": stats.graph_bytes,
+        "graph_html_bytes": stats.graph_html_bytes,
     }
     if stats.skipped_reason:
         response["skipped_reason"] = stats.skipped_reason
@@ -980,6 +1120,29 @@ def _spawn_background_reindex() -> None:
             file=sys.stderr,
         )
         return
+
+    try:
+        manifest = storage.get_manifest()
+        indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
+        if indexed_at.tzinfo is None:
+            indexed_at = indexed_at.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
+        current_git_sha = get_git_head_sha(workspace_path)
+        if (
+            age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
+            and manifest.git_head_sha is not None
+            and current_git_sha is not None
+            and manifest.git_head_sha == current_git_sha
+        ):
+            print(
+                "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
+                file=sys.stderr,
+            )
+            return
+    except Exception:
+        # Falha em heurística de debounce nunca deve impedir o fallback seguro:
+        # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
+        pass
 
     log_path = INDEX_DIR_PATH / "background_reindex.log"
     print(

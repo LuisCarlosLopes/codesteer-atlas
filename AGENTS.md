@@ -8,6 +8,7 @@ Use as tools do MCP **antes** de `grep`/`rg`/`find`/glob ou leitura em massa.
 | --- | --- |
 | Onde algo está implementado | `atlas_search` |
 | Estrutura do projeto | `atlas_map` |
+| Conectividade, hubs e rationale | `atlas_graph` |
 | Diagnóstico do índice | `atlas_status` |
 | (Re)indexar | `atlas_index` |
 

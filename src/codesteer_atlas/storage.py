@@ -3,10 +3,18 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Dict, List, Optional
+
 import lancedb
-from codesteer_atlas.config import CANDIDATES_LIMIT, DEFAULT_INDEX_DIR, MIN_INDEX_VERSION, RRF_K
+from codesteer_atlas.config import (
+    CANDIDATES_LIMIT,
+    CURRENT_INDEX_VERSION,
+    DEFAULT_INDEX_DIR,
+    MIN_INDEX_VERSION,
+    RRF_K,
+)
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
 from codesteer_atlas.models import CodeChunk, IndexManifest, SearchResult
+from codesteer_atlas.rationale import decode_references_json, encode_references_json
 
 
 def _write_manifest_atomic(manifest_path: Path, manifest: IndexManifest) -> None:
@@ -53,6 +61,12 @@ class StorageBackend:
         self.db_path = self.index_dir / "lancedb"
         self.manifest_path = self.index_dir / "manifest.json"
 
+    def _chunk_to_row(self, chunk: CodeChunk) -> Dict[str, Any]:
+        row = chunk.model_dump()
+        row["references_json"] = encode_references_json(chunk.references)
+        row.pop("references", None)
+        return row
+
     def exists(self) -> bool:
         """Verifica se o índice e o banco de dados LanceDB existem."""
         return self.manifest_path.exists() and self.db_path.exists()
@@ -74,7 +88,7 @@ class StorageBackend:
         db = lancedb.connect(str(self.db_path))
 
         # Prepara a lista de dicionários para inserção
-        data_to_insert = [chunk.model_dump() for chunk in chunks]
+        data_to_insert = [self._chunk_to_row(chunk) for chunk in chunks]
 
         # Sobrescreve a tabela se já existir para evitar duplicações no MVP
         table_name = "chunks"
@@ -106,7 +120,7 @@ class StorageBackend:
             last_indexed_at=timestamp,
             git_head_sha=git_head_sha,
             languages_indexed=languages,
-            index_version="2.0.0",
+            index_version=CURRENT_INDEX_VERSION,
             files=files,
             files_meta=files_meta or {},
         )
@@ -126,7 +140,7 @@ class StorageBackend:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         db = lancedb.connect(str(self.db_path))
 
-        data_to_insert = [chunk.model_dump() for chunk in chunks]
+        data_to_insert = [self._chunk_to_row(chunk) for chunk in chunks]
 
         if "chunks" in _table_names(db):
             table = db.open_table("chunks")
@@ -147,6 +161,7 @@ class StorageBackend:
         files: Dict[str, str],
         git_head_sha: Optional[str] = None,
         files_meta: Optional[Dict[str, list]] = None,
+        files_imports: Optional[Dict[str, list]] = None,
     ) -> int:
         """
         Recalcula `total_chunks`/`repos_indexed`/`languages_indexed` a partir da
@@ -175,9 +190,10 @@ class StorageBackend:
             last_indexed_at=timestamp,
             git_head_sha=git_head_sha,
             languages_indexed=languages,
-            index_version="2.0.0",
+            index_version=CURRENT_INDEX_VERSION,
             files=files,
             files_meta=files_meta or {},
+            files_imports=files_imports or {},
         )
 
         _write_manifest_atomic(self.manifest_path, manifest)
@@ -331,6 +347,7 @@ class StorageBackend:
                     content=item["content"],
                     score=float(rrf_scores[chunk_id]),
                     repo=item["repo"],
+                    references=decode_references_json(item.get("references_json")),
                 )
             )
 
@@ -377,6 +394,119 @@ class StorageBackend:
             .to_arrow()
         )
         return arrow_table.to_pylist()
+
+    def get_graph_projection(self) -> List[Dict[str, Any]]:
+        """
+        Retorna a projeção mínima necessária para reconstruir `graph.json`,
+        sempre sem a coluna `vector`.
+
+        Para reduzir uso de memória em workspaces grandes, só carrega `content`
+        dos chunks Markdown, já que chunks de código usam apenas refs de
+        rationale/imports no rebuild do grafo.
+        """
+        if not self.exists():
+            return []
+
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+
+        base_columns = [
+            "file_path",
+            "scope_type",
+            "scope_name",
+            "language",
+            "start_line",
+            "end_line",
+            "references_json",
+        ]
+
+        code_rows: List[Dict[str, Any]] = []
+        markdown_rows: List[Dict[str, Any]] = []
+
+        try:
+            code_arrow = (
+                table.search()
+                .where("language != 'markdown'", prefilter=True)
+                .select(base_columns)
+                .to_arrow()
+            )
+            code_rows = code_arrow.to_pylist()
+            for row in code_rows:
+                row["content"] = None
+
+            markdown_arrow = (
+                table.search()
+                .where("language = 'markdown'", prefilter=True)
+                .select([*base_columns[:-1], "content", base_columns[-1]])
+                .to_arrow()
+            )
+            markdown_rows = markdown_arrow.to_pylist()
+            return code_rows + markdown_rows
+        except Exception:
+            code_arrow = (
+                table.search()
+                .where("language != 'markdown'", prefilter=True)
+                .select(base_columns[:-1])
+                .to_arrow()
+            )
+            code_rows = code_arrow.to_pylist()
+            for row in code_rows:
+                row["content"] = None
+                row["references_json"] = "[]"
+
+            markdown_arrow = (
+                table.search()
+                .where("language = 'markdown'", prefilter=True)
+                .select([*base_columns[:-1], "content"])
+                .to_arrow()
+            )
+            markdown_rows = markdown_arrow.to_pylist()
+            for row in markdown_rows:
+                row["references_json"] = "[]"
+            return code_rows + markdown_rows
+
+    def get_graph_projection_for_file_paths(self, file_paths: List[str]) -> List[Dict[str, Any]]:
+        """
+        Retorna a mesma projeção de `get_graph_projection`, mas restrita a um
+        conjunto de `file_path`s. Usado no update incremental do grafo para
+        evitar releitura do índice inteiro.
+        """
+        if not file_paths or not self.exists():
+            return []
+
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+
+        escaped_paths = [file_path.replace("'", "''") for file_path in file_paths]
+        in_clause = ", ".join(f"'{path}'" for path in escaped_paths)
+        where_clause = f"file_path IN ({in_clause})"
+        base_columns = [
+            "file_path",
+            "scope_type",
+            "scope_name",
+            "language",
+            "start_line",
+            "end_line",
+            "references_json",
+        ]
+
+        try:
+            arrow_table = table.search().where(where_clause, prefilter=True).select(
+                [*base_columns[:-1], "content", base_columns[-1]]
+            ).to_arrow()
+            rows = arrow_table.to_pylist()
+        except Exception:
+            arrow_table = (
+                table.search().where(where_clause, prefilter=True).select([*base_columns[:-1], "content"]).to_arrow()
+            )
+            rows = arrow_table.to_pylist()
+            for row in rows:
+                row["references_json"] = "[]"
+
+        for row in rows:
+            if row["language"] != "markdown":
+                row["content"] = None
+        return rows
 
     def delete_by_file_paths(self, file_paths: List[str]) -> None:
         """
