@@ -11,6 +11,8 @@ from codesteer_atlas.config import (
     DEFAULT_INDEX_DIR,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
+    SENSITIVE_BASENAMES,
+    SENSITIVE_SUFFIXES,
     SUPPORTED_EXTENSIONS,
 )
 from codesteer_atlas.chunker import ASTChunker
@@ -110,6 +112,27 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
         return None
 
 
+def is_path_within_workspace(path: Path, workspace_path: Path) -> bool:
+    """
+    Retorna True se `path` (após `resolve()`, seguindo symlinks) permanece
+    dentro de `workspace_path`. Bloqueia symlinks de arquivo que apontam para
+    fora do workspace.
+    """
+    try:
+        return path.resolve().is_relative_to(workspace_path.resolve())
+    except ValueError:
+        return False
+
+
+def _is_sensitive_basename(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in SENSITIVE_BASENAMES:
+        return True
+    if lowered.startswith(".env."):
+        return True
+    return lowered.endswith(SENSITIVE_SUFFIXES)
+
+
 def load_atlasignore_spec(workspace_path: Path) -> Optional[pathspec.PathSpec]:
     """
     Carrega o `.atlasignore` da raiz do workspace (sintaxe gitignore).
@@ -146,6 +169,9 @@ def should_ignore(
                 return True
     except ValueError:
         pass
+
+    if _is_sensitive_basename(path.name):
+        return True
 
     # Filtro adicional opcional via .atlasignore (sintaxe .gitignore)
     if atlas_spec is not None:
@@ -207,6 +233,9 @@ def _scan_workspace(
 
                 if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                     files_ignored_unsupported += 1
+                    continue
+
+                if not is_path_within_workspace(file_path, workspace_path):
                     continue
 
                 try:

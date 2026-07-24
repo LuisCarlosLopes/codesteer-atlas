@@ -22,6 +22,7 @@ from codesteer_atlas.server import (
     _file_uri_to_path,
     _list_roots_sync,
     _resolve_index_dir_via_roots,
+    _validate_workspace_allowed,
 )
 
 # Mock do manifesto de índice de teste
@@ -961,6 +962,51 @@ def test_atlas_index_paths_outside_workspace_raises_value_error(tmp_path):
             assert False, "Esperava ValueError"
         except ValueError:
             pass
+
+
+def test_atlas_index_workspace_outside_allowed_roots_raises(tmp_path):
+    """`workspace` absoluto fora das raízes permitidas -> ValueError."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", workspace / ".code-index"):
+        try:
+            atlas_index(workspace=str(outside), dry_run=True)
+            assert False, "Esperava ValueError"
+        except ValueError as exc:
+            assert "fora das raízes permitidas" in str(exc)
+
+
+def test_atlas_index_workspace_under_index_root_allowed(tmp_path):
+    """Subpastas do workspace pai do índice continuam permitidas."""
+    project = tmp_path / "project"
+    nested = project / "packages" / "api"
+    nested.mkdir(parents=True)
+    (nested / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", project / ".code-index"):
+        result = json.loads(atlas_index(workspace=str(nested), dry_run=True))
+
+    assert result["total_eligible_files"] == 1
+
+
+def test_validate_workspace_allowed_accepts_mcp_root(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+
+    class FakeRoot:
+        uri = f"file://{project}"
+
+    class FakeCtx:
+        async def list_roots(self):
+            return [FakeRoot()]
+
+    monkeypatch.setattr("codesteer_atlas.server.INDEX_DIR_PATH", project / ".code-index")
+    monkeypatch.setattr("codesteer_atlas.server._list_roots_sync", lambda ctx: [project])
+
+    _validate_workspace_allowed(project, FakeCtx())
 
 
 def test_atlas_index_docstring_instructs_asking_user():
