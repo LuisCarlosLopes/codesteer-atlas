@@ -37,6 +37,35 @@ GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
 
+# Basenames de arquivos sensíveis ignorados por padrão na indexação (credenciais/chaves)
+SENSITIVE_BASENAMES = frozenset(
+    {
+        ".dockerconfigjson",
+        ".env",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ecdsa.pub",
+        "id_ed25519",
+        "id_ed25519.pub",
+        "id_rsa",
+        "id_rsa.pub",
+    }
+)
+
+# Sufixos de arquivos sensíveis ignorados por padrão (chaves/certificados)
+SENSITIVE_SUFFIXES = (
+    ".key",
+    ".keystore",
+    ".p12",
+    ".pem",
+    ".pfx",
+)
+
 # Padrões de arquivos e pastas que devem ser ignorados durante a varredura
 IGNORE_DIRS = {
     ".git",

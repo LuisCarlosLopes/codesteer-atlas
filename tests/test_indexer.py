@@ -7,8 +7,10 @@ from codesteer_atlas.indexer import (
     cli,
     get_git_head_sha,
     index_workspace,
+    is_path_within_workspace,
     load_atlasignore_spec,
     should_ignore,
+    _scan_workspace,
 )
 from codesteer_atlas.storage import StorageBackend
 
@@ -336,6 +338,48 @@ def test_should_ignore_without_atlas_spec_is_unchanged(tmp_path):
     """Sem `atlas_spec` (None), `should_ignore` mantém o comportamento de regressão."""
     assert should_ignore(tmp_path / ".git", tmp_path) is True
     assert should_ignore(tmp_path / "src" / "main.py", tmp_path) is False
+
+
+def test_should_ignore_sensitive_dotenv_and_keys(tmp_path):
+    """Arquivos de credenciais/chaves comuns são ignorados por padrão."""
+    assert should_ignore(tmp_path / ".env", tmp_path) is True
+    assert should_ignore(tmp_path / "src" / ".env", tmp_path) is True
+    assert should_ignore(tmp_path / ".env.local", tmp_path) is True
+    assert should_ignore(tmp_path / "secrets" / "id_rsa", tmp_path) is True
+    assert should_ignore(tmp_path / "certs" / "server.pem", tmp_path) is True
+    assert should_ignore(tmp_path / "src" / "main.py", tmp_path) is False
+
+
+def test_is_path_within_workspace_rejects_symlink_escape(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("leaked", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    link = workspace / "link.txt"
+    link.symlink_to(secret)
+
+    assert is_path_within_workspace(link, workspace) is False
+    assert is_path_within_workspace(workspace / "local.txt", workspace) is True
+
+
+def test_scan_workspace_skips_symlink_outside_workspace(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("leaked", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ok.txt").write_text("ok", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(outside / "secret.txt")
+
+    files, _, _, _ = _scan_workspace(workspace, [workspace])
+    names = {path.name for path in files}
+
+    assert "ok.txt" in names
+    assert "link.txt" not in names
 
 
 def load_atlasignore_spec_from_text(tmp_path, content: str):

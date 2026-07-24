@@ -346,6 +346,59 @@ def resolve_index_dir(
     return DEFAULT_INDEX_DIR
 
 
+def _allowed_workspace_roots(ctx: "Context | None" = None) -> list[Path]:
+    """
+    Raízes de filesystem permitidas para o parâmetro `workspace` da tool
+    `atlas_index` (anti-leitura arbitrária via MCP).
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(root: Path) -> None:
+        resolved = root.resolve()
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            roots.append(resolved)
+
+    index_root = _index_workspace_root()
+    if index_root.exists():
+        _add(index_root)
+
+    for root in _list_roots_sync(ctx):
+        _add(root)
+
+    env = os.environ
+    project_dir_value = env.get("CLAUDE_PROJECT_DIR")
+    if not project_dir_value:
+        workspace_paths = env.get("WORKSPACE_FOLDER_PATHS")
+        if workspace_paths:
+            project_dir_value = workspace_paths.split(os.pathsep)[0]
+    if project_dir_value:
+        project_dir = Path(project_dir_value)
+        if project_dir.exists():
+            _add(project_dir)
+
+    return roots
+
+
+def _validate_workspace_allowed(workspace_path: Path, ctx: "Context | None" = None) -> None:
+    """Levanta ValueError se `workspace_path` estiver fora das raízes permitidas."""
+    allowed_roots = _allowed_workspace_roots(ctx)
+    if not allowed_roots:
+        return
+
+    resolved = workspace_path.resolve()
+    for root in allowed_roots:
+        if resolved == root or resolved.is_relative_to(root):
+            return
+
+    allowed_display = ", ".join(str(root) for root in allowed_roots)
+    raise ValueError(
+        f"O workspace '{resolved}' está fora das raízes permitidas: {allowed_display}."
+    )
+
+
 def _index_not_found_error(storage: "StorageBackend") -> FileNotFoundError:
     """Mensagem de erro acionável listando os 3 mecanismos de resolução do índice."""
     return FileNotFoundError(
@@ -874,6 +927,8 @@ def atlas_index(
 
     if not workspace_path.exists() or not workspace_path.is_dir():
         raise ValueError(f"O diretório do workspace '{workspace_path}' não existe.")
+
+    _validate_workspace_allowed(workspace_path, ctx)
 
     # Validação anti-traversal dos paths informados
     if paths:
