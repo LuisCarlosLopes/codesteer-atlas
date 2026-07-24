@@ -233,7 +233,7 @@ Para que agentes de codificação usem o Atlas de forma consistente, copie o blo
 ```markdown
 # Busca de código com `codesteer-atlas`
 
-Este repositório é indexado pelo MCP `codesteer-atlas`. Para localizar ou explorar código, use Atlas antes de `grep`, `rg`, `find`, glob ou leitura em massa.
+Este repositório é indexado pelo MCP `codesteer-atlas`. Para Entender como algo funciona, Pesquisar, localizar ou explorar, use Atlas antes de `grep`, `rg`, `find`, glob ou leitura em massa.
 
 ## Use assim
 
