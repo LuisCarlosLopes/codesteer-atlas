@@ -266,6 +266,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pathspec" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
     { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
 ]
@@ -279,13 +280,14 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "fastembed", specifier = ">=0.4" },
-    { name = "fastmcp", specifier = ">=0.4.1" },
+    { name = "fastmcp", specifier = ">=2.14.1,<4" },
     { name = "filelock", specifier = ">=3.12.0" },
     { name = "lancedb", specifier = ">=0.17.0,<0.34.0" },
-    { name = "mcp", specifier = ">=0.1.0" },
+    { name = "mcp", specifier = ">=1.24.0,<2" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pathspec", specifier = ">=0.12.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.5.2" },
     { name = "tree-sitter", specifier = ">=0.22.0" },
     { name = "tree-sitter-language-pack", specifier = ">=1.8.0" },
 ]
