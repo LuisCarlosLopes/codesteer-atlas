@@ -9,13 +9,15 @@ import pathspec
 from codesteer_atlas.config import (
     ATLASIGNORE_FILENAME,
     DEFAULT_INDEX_DIR,
+    GRAPH_FILENAME,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.chunker import ASTChunker
+from codesteer_atlas.brief import build_and_write_brief
+from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.embeddings import EmbeddingEngine
-from codesteer_atlas.graph import build_and_write, build_and_write_incremental
+from codesteer_atlas.graph import build_and_write, build_and_write_incremental, load_graph
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
 from codesteer_atlas.storage import StorageBackend
@@ -26,7 +28,8 @@ _PHASE_WEIGHTS = {
     "chunk": 0.30,
     "embed": 0.45,
     "persist": 0.05,
-    "graph": 0.05,
+    "graph": 0.04,
+    "brief": 0.01,
 }
 
 _PHASE_LABELS = {
@@ -36,6 +39,7 @@ _PHASE_LABELS = {
     "embed": "Gerando embeddings",
     "persist": "Persistindo no LanceDB",
     "graph": "Reconstruindo grafo",
+    "brief": "Gerando briefing do projeto",
 }
 
 
@@ -445,6 +449,7 @@ def _index_workspace_locked(
     # Processa (chunking) os arquivos novos/alterados
     all_new_chunks = []
     files_processed = 0
+    files_failed = 0
     processed_imports: dict[str, list] = {}
 
     chunk_total = len(files_to_process)
@@ -460,9 +465,21 @@ def _index_workspace_locked(
             all_new_chunks.extend(file_chunks)
             processed_imports[rel_posix] = chunker.extract_imports(file_path)
             files_processed += 1
+        except IncompatibleParserError:
+            # Falha de ambiente, não do arquivo: continuar produziria um índice vazio
+            # reportado como sucesso. Aborta a indexação inteira [D]
+            raise
         except Exception as e:
+            files_failed += 1
             print(f"Erro ao processar arquivo {file_path}: {e}", file=sys.stderr)
         progress.tick("chunk", chunk_index, chunk_total)
+
+    if files_failed:
+        print(
+            f"[atlas] ATENÇÃO: {files_failed} de {chunk_total} arquivo(s) falharam no "
+            "chunking e ficaram FORA do índice.",
+            file=sys.stderr,
+        )
 
     progress.phase_done("chunk")
     phase_durations_s["chunk"] = round(time.perf_counter() - phase_started_at, 4)
@@ -583,12 +600,38 @@ def _index_workspace_locked(
     progress.tick("graph", 1, 1)
     progress.phase_done("graph")
     phase_durations_s["graph"] = round(time.perf_counter() - phase_started_at, 4)
+
+    # O brief é sempre reconstruído por inteiro: seu valor está no ranking GLOBAL
+    # (top-N camadas/hubs/entrypoints), que uma atualização parcial não preservaria
+    progress.tick("brief", 0, 1)
+    phase_started_at = time.perf_counter()
+    brief_status = "failed"
+    brief_metrics = {"brief_bytes": 0, "brief_layers": 0, "brief_entrypoints": 0}
+    try:
+        graph_for_brief = None
+        if (index_path / GRAPH_FILENAME).exists():
+            graph_for_brief = load_graph(index_path)
+        _brief_path, brief_metrics = build_and_write_brief(
+            manifest=manifest,
+            index_path=index_path,
+            workspace_root=workspace_path,
+            graph=graph_for_brief,
+            return_metadata=True,
+        )
+        brief_status = "full" if graph_for_brief is not None else "degraded-no-graph"
+    except Exception as e:
+        print(f"[atlas] Falha ao gerar brief.json: {e}", file=sys.stderr)
+    # tick/phase_done ficam fora do try para que uma falha não dessincronize os pesos
+    progress.tick("brief", 1, 1)
+    progress.phase_done("brief")
+    phase_durations_s["brief"] = round(time.perf_counter() - phase_started_at, 4)
     progress.finish()
 
     duration_s = time.time() - start_time
 
     return IndexStats(
         files_processed=files_processed,
+        files_failed=files_failed,
         files_scanned=len(current_files),
         files_eligible=len(eligible_files),
         files_skipped_unchanged=files_skipped_unchanged,
@@ -603,6 +646,10 @@ def _index_workspace_locked(
         graph_edges=graph_metrics["graph_edges"],
         graph_bytes=graph_metrics["graph_bytes"],
         graph_html_bytes=graph_metrics["graph_html_bytes"],
+        brief_status=brief_status,
+        brief_bytes=brief_metrics["brief_bytes"],
+        brief_layers=brief_metrics["brief_layers"],
+        brief_entrypoints=brief_metrics["brief_entrypoints"],
     )
 
 
@@ -677,9 +724,17 @@ def cli(workspace: str, index_dir: str, full: bool, paths: tuple, quiet: bool):
     if stats.files_processed == 0 and stats.chunks_persisted == 0 and stats.files_removed == 0:
         click.echo("Nenhum fragmento de código elegível encontrado para indexação.")
 
-    click.echo("\n--- Indexação Concluída com Sucesso! ---")
+    # Um índice incompleto não pode ser anunciado como sucesso [D]
+    if stats.files_failed:
+        click.echo("\n--- Indexação Concluída COM FALHAS ---")
+    else:
+        click.echo("\n--- Indexação Concluída com Sucesso! ---")
     click.echo(f"Diretório do índice: {index_path}")
     click.echo(f"Arquivos processados (novos/alterados): {stats.files_processed}")
+    if stats.files_failed:
+        click.echo(
+            f"Arquivos que FALHARAM no chunking (fora do índice): {stats.files_failed}"
+        )
     click.echo(f"Arquivos inalterados (pulados): {stats.files_skipped_unchanged}")
     click.echo(f"Arquivos removidos do índice: {stats.files_removed}")
     click.echo(f"Total de chunks persistidos: {stats.chunks_persisted}")

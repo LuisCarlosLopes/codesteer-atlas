@@ -37,6 +37,27 @@ GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
 
+# Briefing pré-computado do projeto (atlas_brief). Todos os limites abaixo existem para
+# garantir custo de token com teto fixo, independente do tamanho do repositório:
+# a cardinalidade de cada lista é O(1) por construção, e o único eixo restante
+# (comprimento de path) é cortado por BRIEF_MAX_PATH_CHARS.
+BRIEF_FILENAME = "brief.json"
+BRIEF_MAX_LAYERS = 8
+BRIEF_LAYER_TOP_FILES = 3
+# Acima deste número de filhos, um diretório-container (src/, packages/...) deixa de ser
+# desdobrado em 2 níveis e volta a ser uma camada única, para não estourar BRIEF_MAX_LAYERS
+BRIEF_LAYER_SPLIT_MAX = 12
+BRIEF_MAX_ENTRYPOINTS = 6
+BRIEF_MAX_HUBS = 8
+BRIEF_MAX_LANGUAGES = 6
+# Teto de arquivos abertos na verificação de entrypoints inferidos: mantém a detecção
+# em O(1) aberturas mesmo em repositórios com milhares de candidatos
+BRIEF_ENTRYPOINT_PROBE_LIMIT = 12
+BRIEF_ENTRYPOINT_PROBE_MAX_BYTES = 65536
+BRIEF_MAX_PATH_CHARS = 90
+BRIEF_LEVEL0_MAX_CHARS = 2000
+BRIEF_LEVEL1_MAX_CHARS = 5000
+
 # Padrões de arquivos e pastas que devem ser ignorados durante a varredura
 IGNORE_DIRS = {
     ".git",

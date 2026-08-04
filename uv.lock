@@ -254,7 +254,7 @@ wheels = [
 
 [[package]]
 name = "codesteer-atlas"
-version = "1.4.2"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -289,7 +289,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.5.2" },
     { name = "tree-sitter", specifier = ">=0.22.0" },
-    { name = "tree-sitter-language-pack", specifier = ">=1.8.0" },
+    { name = "tree-sitter-language-pack", specifier = ">=1.8.0,<2" },
 ]
 
 [package.metadata.requires-dev]

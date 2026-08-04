@@ -1,6 +1,6 @@
 [project]
 name = "codesteer-atlas"
-version = "1.4.2"
+version = "2.0.0"
 description = "Servidor MCP local para busca semântica em bases de código usando LanceDB e Tree-sitter"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -11,7 +11,10 @@ dependencies = [
     "lancedb>=0.17.0,<0.34.0",
     "fastembed>=0.4",
     "tree-sitter>=0.22.0",
-    "tree-sitter-language-pack>=1.8.0",
+    # A API do chunker (parse(str), root_node(), node.kind()) vem do language-pack.
+    # O teto evita que um ambiente resolvido fora do uv.lock (ex.: uvx --from git+...)
+    # caia numa major com a API clássica baseada em bytes. Ver ASTChunker._verify_parser_api
+    "tree-sitter-language-pack>=1.8.0,<2",
     "mcp>=1.24.0,<2",
     "fastmcp>=2.14.1,<4",
     "pydantic>=2.0.0",

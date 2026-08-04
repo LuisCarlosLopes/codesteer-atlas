@@ -23,7 +23,7 @@ def _write_manifest_atomic(manifest_path: Path, manifest: IndexManifest) -> None
     usa `os.replace`, atômico tanto em POSIX quanto no Windows).
 
     Evita que `get_manifest()` (chamado pelo processo do servidor MCP a cada
-    `atlas_search`/`atlas_status`/`atlas_map`) leia um JSON parcial enquanto o
+    `atlas_search`/`atlas_status`/`atlas_brief`) leia um JSON parcial enquanto o
     subprocesso de reindex em background está regravando o manifesto [GA-XX].
     """
     tmp_path = manifest_path.with_suffix(".json.tmp")
@@ -355,9 +355,11 @@ class StorageBackend:
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """
-        Retorna apenas as colunas necessárias para montar o mapa de arquitetura
-        (file_path, scope_type, scope_name), sem a coluna `vector` e sem usar
-        `to_pandas()` — projeção via Arrow para performance [F][M].
+        Projeção enxuta de `file_path`/`scope_type`/`scope_name`, sem a coluna `vector`
+        e sem `to_pandas()` — via Arrow, por performance [F][M].
+
+        Sem chamador em produção desde a remoção da tool `atlas_map`; permanece como
+        utilitário de inspeção do índice (usado pela suíte de testes).
         """
         if not self.exists():
             return []

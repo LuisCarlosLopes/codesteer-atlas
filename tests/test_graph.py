@@ -316,3 +316,139 @@ def test_relative_ts_imports_resolve_with_suffixes_and_bare_imports_are_ignored(
     )
 
     assert import_targets == ["file:src/dir/index.ts", "file:src/lib.tsx"]
+
+
+# --- Resolução de imports absolutos em layout src/ --------------------------
+
+
+def test_infer_package_roots_detecta_src_layout():
+    """A raiz de código é o pai do pacote mais externo, deduzida pelos __init__.py."""
+    from codesteer_atlas.graph import infer_package_roots
+
+    files = {
+        "src/demo/__init__.py",
+        "src/demo/core.py",
+        "src/demo/sub/__init__.py",
+        "src/demo/sub/util.py",
+        "tests/test_core.py",
+    }
+
+    roots = infer_package_roots(files)
+
+    assert "" in roots
+    assert "src" in roots
+    # Determinístico e da raiz mais rasa para a mais profunda
+    assert roots == sorted(roots, key=lambda root: (len(root), root))
+
+
+def test_infer_package_roots_em_layout_plano():
+    """Sem `src/`, a raiz continua sendo a do workspace — nada de raiz inventada."""
+    from codesteer_atlas.graph import infer_package_roots
+
+    roots = infer_package_roots({"demo/__init__.py", "demo/core.py"})
+
+    assert roots == [""]
+
+
+def test_resolve_module_path_absoluto_em_src_layout():
+    """
+    `import demo.core` precisa casar com `src/demo/core.py`: as chaves do manifest são
+    relativas ao workspace, então sem raiz de pacote nenhum import absoluto resolvia.
+    """
+    from codesteer_atlas.graph import resolve_module_path
+
+    files = {"src/demo/__init__.py", "src/demo/core.py", "src/demo/sub/__init__.py"}
+
+    assert resolve_module_path("demo.core", files) == "src/demo/core.py"
+    assert resolve_module_path("demo", files) == "src/demo/__init__.py"
+    assert resolve_module_path("demo.sub", files) == "src/demo/sub/__init__.py"
+    assert resolve_module_path("inexistente.modulo", files) is None
+
+
+def test_resolve_python_import_relativo_continua_funcionando():
+    """Imports relativos se ancoram no próprio arquivo e não devem usar raízes."""
+    from codesteer_atlas.graph import _resolve_python_import
+
+    files = {"src/demo/core.py", "src/demo/util.py"}
+
+    resolvido = _resolve_python_import("src/demo/core.py", ".util", files)
+
+    assert resolvido == "src/demo/util.py"
+
+
+def _make_src_layout_index(temp_storage):
+    """Índice mínimo em layout `src/` com um import absoluto entre dois módulos."""
+    chunks = [
+        CodeChunk(
+            id="sym-core",
+            file_path="src/demo/core.py",
+            repo="demo",
+            start_line=1,
+            end_line=4,
+            scope_type="function",
+            scope_name="run",
+            language="python",
+            content="def run():\n    return helper()",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+        CodeChunk(
+            id="sym-util",
+            file_path="src/demo/util.py",
+            repo="demo",
+            start_line=1,
+            end_line=3,
+            scope_type="function",
+            scope_name="helper",
+            language="python",
+            content="def helper():\n    return 1",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=MOCK_VECTOR,
+        ),
+    ]
+    temp_storage.store_chunks(chunks)
+    return temp_storage.get_manifest().model_copy(
+        update={
+            "files": {
+                "src/demo/__init__.py": "h0",
+                "src/demo/core.py": "h1",
+                "src/demo/util.py": "h2",
+            },
+            "files_imports": {"src/demo/core.py": ["demo.util"]},
+        }
+    )
+
+
+def test_build_and_write_cria_aresta_imports_em_src_layout(temp_storage):
+    """
+    Regressão do bug que deixava o grafo praticamente sem arestas `imports`: um
+    import absoluto num layout `src/` tem de virar aresta entre os dois arquivos.
+    """
+    manifest = _make_src_layout_index(temp_storage)
+    graph_path = build_and_write(temp_storage, manifest, temp_storage.index_dir)
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    import_edges = [edge for edge in graph["edges"] if edge["kind"] == "imports"]
+
+    assert import_edges == [
+        {
+            "source": "file:src/demo/core.py",
+            "target": "file:src/demo/util.py",
+            "kind": "imports",
+        }
+    ]
+
+
+def test_import_resolvido_gera_grau_para_ranqueamento(temp_storage):
+    """
+    A aresta `imports` tem de contar no `degree` (que ignora apenas `contains`), pois
+    é dele que dependem os hubs do `atlas_graph` e o ranking do `atlas_brief`.
+    """
+    manifest = _make_src_layout_index(temp_storage)
+    graph_path = build_and_write(temp_storage, manifest, temp_storage.index_dir)
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    degrees = {node["id"]: node["degree"] for node in graph["nodes"]}
+
+    assert degrees["file:src/demo/core.py"] == 1
+    assert degrees["file:src/demo/util.py"] == 1

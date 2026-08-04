@@ -90,6 +90,11 @@ class IndexStats(BaseModel):
     """
 
     files_processed: int = Field(..., description="Total de arquivos novos/alterados processados")
+    files_failed: int = Field(
+        0,
+        description="Arquivos que falharam no chunking e ficaram fora do índice."
+        " Valor > 0 significa índice incompleto, ainda que a execução termine sem erro",
+    )
     files_scanned: int = Field(
         0, description="Total de arquivos elegíveis inspecionados durante a varredura"
     )
@@ -112,7 +117,7 @@ class IndexStats(BaseModel):
     )
     phase_durations_s: Dict[str, float] = Field(
         default_factory=dict,
-        description="Duração por fase da indexação (scan/hash/chunk/embed/persist/graph)",
+        description="Duração por fase da indexação (scan/hash/chunk/embed/persist/graph/brief)",
     )
     graph_strategy: Optional[str] = Field(
         None,
@@ -122,6 +127,14 @@ class IndexStats(BaseModel):
     graph_edges: int = Field(0, description="Total de arestas gravadas em graph.json")
     graph_bytes: int = Field(0, description="Tamanho final de graph.json em bytes")
     graph_html_bytes: int = Field(0, description="Tamanho final de graph.html em bytes")
+    # 'status' e não 'strategy': o brief é sempre reconstruído por inteiro, não há caminho incremental
+    brief_status: Optional[str] = Field(
+        None,
+        description="Status da geração do brief (full | degraded-no-graph | failed)",
+    )
+    brief_bytes: int = Field(0, description="Tamanho final de brief.json em bytes")
+    brief_layers: int = Field(0, description="Total de camadas mantidas no brief")
+    brief_entrypoints: int = Field(0, description="Total de entrypoints detectados no brief")
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",

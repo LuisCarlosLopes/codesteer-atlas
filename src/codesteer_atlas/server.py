@@ -46,6 +46,7 @@ from codesteer_atlas.config import (  # noqa: E402
     GRAPH_PATH_MAX_HOPS,
     SUPPORTED_EXTENSIONS,
 )
+from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
 from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
 from codesteer_atlas.graph import bfs_path, explain, hubs, load_graph  # noqa: E402
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
@@ -476,8 +477,8 @@ def atlas_search(
 
     Runs a semantic hybrid search (vector + BM25, fused via RRF) over pre-indexed chunks
     of source code (classes/functions/methods) and documents (Markdown, text, JSON/YAML/
-    TOML). Pass natural language or exact symbols. For a structural overview instead, use
-    `atlas_map`.
+    TOML). Pass natural language or exact symbols. To get your bearings in an unfamiliar
+    project first, use `atlas_brief`.
 
     Token-efficient two-pass pattern: by default this returns metadata only (file_path,
     lines, symbol, type, score). Locate first, then read the exact lines with `Read`, or
@@ -688,100 +689,66 @@ def atlas_graph(
 
 
 @app.tool()
-def atlas_map(
-    repo: Optional[str] = None,
-    path_prefix: Optional[str] = None,
-    max_depth: int = 3,
-    query: Optional[str] = None,  # Aceito para compatibilidade com clientes MCP que injetam 'query'
-    ctx: "Context | None" = None,
-) -> str:
+def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
     """
-    Retrieve a structured hierarchical tree map of classes, methods, and functions in the workspace.
+    Get a pre-computed, token-bounded briefing that orients you in an unfamiliar project.
 
-    Provides a compact, token-efficient overview of the codebase's architecture and
-    logical structure. Use this to understand how the project is organized, list
-    classes/functions/methods within folders, or find entrypoints without retrieving
-    full file contents. To find a specific implementation, concept, or document instead
-    — or to explore/investigate any area of the project — use `atlas_search`.
+    Call this FIRST, once, when you start working on a project you do not already know.
+    It replaces the usual orientation ritual (listing directories, reading the README,
+    opening several files just to get your bearings) with a single small response.
 
-    If the index does not exist yet, this raises an actionable error explaining how to
-    build it (see `atlas_index`).
+    Returns a ranked summary: `identity` (repo, language distribution, size),
+    `layers` (the main directories, what role each plays, and their most important files),
+    `entrypoints` (how the project is actually started), and `hubs` (the most connected
+    files — the ones whose change propagates furthest). Every list is ranked and capped,
+    so the response size does NOT grow with the size of the repository.
+
+    Do NOT call this to enumerate symbols or files: by design it reports at most a handful
+    of layers and a few files per layer. Use `atlas_search` (optionally with `path_prefix`)
+    to find a specific implementation, and `atlas_graph` to explore connectivity.
+    Do NOT call it more than once per session — the briefing only changes after
+    `atlas_index` re-runs.
+
+    Facts are derived deterministically from the index; nothing is guessed. Entries carry
+    `confidence` (`declared` when read from a manifest such as pyproject/package.json,
+    `inferred` when detected in code) and `warnings` reports known gaps, e.g.
+    `graph_unavailable`, `no_import_edges`, `low_symbol_coverage`, `index_stale`.
+
+    Staleness is detected by comparing the indexed git HEAD with the current one, so
+    uncommitted edits are not detected (same limitation as `atlas_status`).
 
     Args:
-        repo: Optional repository name to filter the map.
-        path_prefix: Optional file path prefix to filter the map to a specific directory.
-        max_depth: Maximum directory depth level in the hierarchical map. Defaults to 3.
-        query: Optional search query (accepted for client compatibility and ignored).
+        level: Detail level. `0` is a minimal orientation (identity plus directory roles);
+            `1` (default) adds per-layer top files, entrypoints and hubs.
 
     Returns:
-        JSON string with `map` (indented text tree of files and their symbols),
-        `total_files`, `total_symbols`, and `repo`.
+        JSON string with `identity`, `layers`, `entrypoints`, `hubs`, `warnings`,
+        `is_stale` and `next` (suggested follow-up calls).
     """
+    if level not in (0, 1):
+        raise ValueError("O parâmetro 'level' deve ser 0 ou 1.")
+
     _resolve_index_dir_via_roots(ctx)
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     if not storage.exists():
         raise _index_not_found_error(storage)
 
-    # Coleta apenas as colunas necessárias (sem vector, sem to_pandas) [F][M]
-    chunks = storage.get_symbols()
+    # Ausência de brief.json não é erro: índices de versões anteriores não o possuem, e
+    # falhar aqui devolveria ao agente exatamente o ritual caro que esta tool elimina
+    brief = load_brief(INDEX_DIR_PATH)
+    computed_at_query_time = brief is None
+    if brief is None:
+        brief = build_brief_lazily(
+            storage.get_manifest(), INDEX_DIR_PATH, _index_workspace_root()
+        )
 
-    # Aplica os filtros informados (repo não está disponível em get_symbols;
-    # path_prefix é aplicado sobre file_path)
-    if path_prefix:
-        prefix = PurePath(path_prefix).as_posix()
-        chunks = [c for c in chunks if c["file_path"].startswith(prefix)]
-
-    # Constrói a estrutura hierárquica
-    # file_path -> list of symbols
-    hierarchy: dict = {}
-    total_symbols = 0
-    unique_files = set()
-
-    for chunk in chunks:
-        file_path = chunk["file_path"]
-        unique_files.add(file_path)
-
-        # Filtra por profundidade do caminho
-        path_parts = Path(file_path).parts
-        if len(path_parts) > max_depth + 1:
-            # Agrupa em nível de diretório limite
-            parent_dir = "/".join(path_parts[:max_depth]) + "/..."
-            if parent_dir not in hierarchy:
-                hierarchy[parent_dir] = []
-            continue
-
-        if file_path not in hierarchy:
-            hierarchy[file_path] = []
-
-        # Não adiciona o símbolo genérico 'module' no mapa para economizar tokens
-        if chunk["scope_type"] != "module":
-            hierarchy[file_path].append({"name": chunk["scope_name"], "type": chunk["scope_type"]})
-            total_symbols += 1
-
-    # Formata a árvore de arquitetura textual de forma compacta, sem emojis [G]
-    lines = []
-
-    # Ordena caminhos de arquivo para consistência
-    for file_path in sorted(hierarchy.keys()):
-        symbols = hierarchy[file_path]
-        lines.append(file_path)
-
-        # Ordena símbolos por nome
-        sorted_symbols = sorted(symbols, key=lambda s: s["name"])
-        for sym in sorted_symbols:
-            prefix_label = {"class": "class", "function": "func", "method": "method"}.get(
-                sym["type"], sym["type"]
-            )
-            lines.append(f"  {prefix_label} {sym['name']}")
-
-    response = {
-        "map": "\n".join(lines),
-        "total_files": len(unique_files),
-        "total_symbols": total_symbols,
-        "repo": repo if repo else "all",
-    }
-
-    return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
+    payload = render_brief(
+        brief,
+        level,
+        current_git_sha=get_git_head_sha(_index_workspace_root()),
+        computed_at_query_time=computed_at_query_time,
+    )
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
 @app.tool()
@@ -791,7 +758,7 @@ def atlas_status(ctx: "Context | None" = None) -> str:
 
     Use this only for explicit diagnostics (e.g. the user asks about index health,
     staleness, or which repos/languages are indexed) or to decide whether `atlas_index`
-    should be run. It is NOT a precondition for `atlas_search`/`atlas_map` — call those
+    should be run. It is NOT a precondition for `atlas_search`/`atlas_brief` — call those
     directly; they raise an actionable error themselves if the index is missing.
     Never indexes anything itself.
 
@@ -981,6 +948,7 @@ def atlas_index(
         "workspace": str(workspace_path),
         "indexed_paths": list(paths) if paths else "all",
         "files_processed": stats.files_processed,
+        "files_failed": stats.files_failed,
         "files_scanned": stats.files_scanned,
         "files_eligible": stats.files_eligible,
         "files_skipped_unchanged": stats.files_skipped_unchanged,
@@ -995,7 +963,17 @@ def atlas_index(
         "graph_edges": stats.graph_edges,
         "graph_bytes": stats.graph_bytes,
         "graph_html_bytes": stats.graph_html_bytes,
+        "brief_status": stats.brief_status,
+        "brief_bytes": stats.brief_bytes,
+        "brief_layers": stats.brief_layers,
+        "brief_entrypoints": stats.brief_entrypoints,
     }
+    if stats.files_failed:
+        response["warning"] = (
+            f"{stats.files_failed} arquivo(s) falharam no chunking e ficaram fora do "
+            "índice; a busca sobre eles retornará vazio. Consulte "
+            f"{INDEX_DIR_PATH / 'background_reindex.log'} ou o stderr para os erros."
+        )
     if stats.skipped_reason:
         response["skipped_reason"] = stats.skipped_reason
         response["message"] = (

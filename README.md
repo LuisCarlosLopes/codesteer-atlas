@@ -169,7 +169,7 @@ Com o cliente MCP conectado (veja [Instalação](#instalação)) e o projeto ind
 | Tool | Descrição |
 |---|---|
 | `atlas_search` | Busca híbrida (vetorial + BM25 + RRF). Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo. Filtros: `repo`, `language`, `path_prefix`. Resultados de código podem incluir `rationale_refs`. |
-| `atlas_map` | Mapa hierárquico de classes/funções/métodos do workspace indexado. |
+| `atlas_brief` | Briefing pré-computado do projeto, com custo de tokens limitado por teto fixo: identidade, camadas, entrypoints e hubs. Primeira tool a chamar num projeto desconhecido. `level=0` (mínimo) ou `level=1` (padrão). |
 | `atlas_graph` | Consulta o grafo derivado do índice: `hubs`, `path` e `explain`, conectando código, markdown e rationale. |
 | `atlas_index` | Indexa/reindexa o workspace. Suporta `dry_run` para listar candidatos antes de indexar. Também regenera `.code-index/graph.json` e `.code-index/graph.html`. |
 | `atlas_status` | Status e metadados de diagnóstico do índice (existência, total de chunks, modelo, staleness, `graph_available`, `graph_viewer_path`). |
@@ -237,8 +237,8 @@ Este repositório é indexado pelo MCP `codesteer-atlas`. Para Entender como alg
 
 ## Use assim
 
+- `atlas_brief`: se orientar num projeto desconhecido — chame primeiro, uma vez
 - `atlas_search`: localizar função, classe, método, símbolo ou conceito
-- `atlas_map`: entender a estrutura do projeto sem abrir muitos arquivos
 - `atlas_graph`: inspecionar hubs, paths e conexões entre código, markdown e rationale
 - `atlas_status`: usar só quando houver suspeita de índice ausente ou desatualizado
 - `atlas_index`: reindexar após mudanças grandes ou índice stale
