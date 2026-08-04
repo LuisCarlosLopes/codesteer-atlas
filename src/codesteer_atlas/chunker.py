@@ -36,6 +36,22 @@ _SQL_STATEMENT_SCOPE_TYPES = {
 }
 
 
+class IncompatibleParserError(RuntimeError):
+    """
+    Ambiente com uma API de parser incompatível com a que este chunker usa.
+
+    Existem duas APIs mutuamente exclusivas em circulação: a do
+    `tree-sitter-language-pack` recente (`parse(str)`, `root_node()`, `node.kind()`),
+    usada aqui, e a clássica do pacote `tree-sitter` (`parse(bytes)`, `root_node` e
+    `node.type` como properties). Elas não têm interseção — suportar as duas exigiria
+    duplicar todo o caminho de navegação da AST.
+
+    Levantada UMA vez, na criação do primeiro parser, em vez de virar uma falha
+    silenciosa por arquivo: sem isso um ambiente errado produz um índice vazio e
+    ainda assim reporta sucesso [D].
+    """
+
+
 class ASTChunker:
     """
     Responsável por parsear arquivos de código-fonte usando Tree-sitter e extrair
@@ -45,6 +61,42 @@ class ASTChunker:
     def __init__(self):
         # Dicionário para armazenar parsers cacheificados por linguagem
         self.parsers = {}
+        self._api_verified = False
+
+    def _verify_parser_api(self, parser) -> None:
+        """
+        Confere, uma única vez, que o parser obtido expõe a API esperada.
+
+        O ambiente do servidor MCP não é o mesmo da `.venv` local: quando registrado
+        via `uvx --from git+...`, ele resolve dependências pelos ranges do
+        `pyproject.toml` e ignora o `uv.lock`, podendo cair numa versão com a API
+        antiga sem nenhum aviso.
+        """
+        if self._api_verified:
+            return
+
+        try:
+            tree = parser.parse("x = 1\n")
+            root = tree.root_node()
+            root.kind()
+        except Exception as e:
+            try:
+                from importlib.metadata import version
+
+                installed = version("tree-sitter-language-pack")
+            except Exception:
+                installed = "desconhecida"
+            raise IncompatibleParserError(
+                "API do Tree-sitter incompatível com este chunker "
+                f"(tree-sitter-language-pack instalada: {installed}). "
+                "Esperado: parse(str), tree.root_node() e node.kind() como métodos. "
+                f"Erro ao verificar: {e}. "
+                "Atualize o ambiente que executa o servidor MCP — se ele foi registrado "
+                "com 'uvx --from git+...', limpe o cache do uv (uv cache clean) para "
+                "forçar uma nova resolução das dependências."
+            ) from e
+
+        self._api_verified = True
 
     def _get_parser(self, language_name: str):
         """Retorna o parser correspondente para a linguagem ou cria um novo."""
@@ -54,7 +106,11 @@ class ASTChunker:
             except Exception:
                 # Se falhar em carregar a gramática, retorna None
                 self.parsers[language_name] = None
-        return self.parsers[language_name]
+
+        parser = self.parsers[language_name]
+        if parser is not None:
+            self._verify_parser_api(parser)
+        return parser
 
     def _generate_chunk_id(
         self, content: str, file_path: str, start_line: int, end_line: int
@@ -242,7 +298,9 @@ class ASTChunker:
         except Exception:
             return []
 
-        # API tree-sitter v0.22+: parse() aceita str diretamente
+        # API do tree-sitter-language-pack: parse() recebe str (a API clássica do
+        # pacote `tree-sitter` exige bytes e é incompatível) — garantida por
+        # `_verify_parser_api`
         tree = parser.parse(source_text)
         if not tree:
             return []

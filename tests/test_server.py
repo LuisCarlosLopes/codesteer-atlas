@@ -12,7 +12,7 @@ from codesteer_atlas.server import (
     atlas_graph,
     atlas_status,
     atlas_search,
-    atlas_map,
+    atlas_brief,
     atlas_index,
     main,
     resolve_index_dir,
@@ -735,53 +735,6 @@ def test_atlas_search_wikilink_with_anchor_resolves_section():
                 "resolved_section": "Visão Geral",
             }
         ]
-
-
-def test_atlas_map_generation():
-    """
-    Testa o retorno da ferramenta atlas_map formatando os chunks
-    em formato de árvore hierárquica legível.
-    """
-    # Projeção de símbolos (file_path/scope_type/scope_name), sem vector/content
-    mock_symbols = [
-        {
-            "file_path": "src/controllers/user.py",
-            "scope_type": "class",
-            "scope_name": "UserController",
-        },
-        {
-            "file_path": "src/controllers/user.py",
-            "scope_type": "method",
-            "scope_name": "UserController.create",
-        },
-    ]
-
-    with (
-        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
-        patch("codesteer_atlas.storage.StorageBackend.get_symbols", return_value=mock_symbols),
-        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
-    ):
-        result_json = atlas_map(max_depth=3)
-        result = json.loads(result_json)
-
-        assert result["total_files"] == 1
-        assert result["total_symbols"] == 2
-        assert "UserController" in result["map"]
-        assert "UserController.create" in result["map"]
-        assert "src/controllers/user.py" in result["map"]
-
-        # Sem emojis na saída
-        for char in result["map"]:
-            assert ord(char) < 0x1F000, f"Emoji encontrado no map: {char!r}"
-
-        # JSON sem indentação (separators compactos)
-        assert "\n" not in result_json or result_json.count("\n") == result["map"].count("\n")
-
-        # Testa compatibilidade ao passar o argumento query opcional (deve ser ignorado)
-        result_json_with_query = atlas_map(max_depth=3, query="agents triad flow")
-        result_with_query = json.loads(result_json_with_query)
-        assert result_with_query["total_files"] == 1
-        assert result_with_query["total_symbols"] == 2
 
 
 def test_resolve_index_dir_precedence_arg_over_env_and_discovery(tmp_path):
@@ -1662,3 +1615,158 @@ def test_atlas_status_includes_graph_availability_and_viewer_path(tmp_path):
 
     assert result["graph_available"] is True
     assert result["graph_viewer_path"] == str(graph_html.resolve())
+
+
+# --- atlas_brief -----------------------------------------------------------
+
+
+def _write_brief_fixture(index_dir: Path, git_head_sha="sha_12345"):
+    """Grava um brief.json mínimo e válido no índice de teste."""
+    index_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "brief_version": "1.0",
+        "generated_at": "2026-08-04T16:17:48.499369+00:00",
+        "index_version": "2.1.0",
+        "git_head_sha": git_head_sha,
+        "workspace_repo": "my-project",
+        "source": {"graph_available": True, "import_edges": 0},
+        "identity": {
+            "repo": "my-project",
+            "files": 3,
+            "chunks": 10,
+            "symbols": 4,
+            "primary_language": "python",
+            "doc_ratio": 0.33,
+            "languages": [{"name": "python", "files": 2, "pct": 67}],
+        },
+        "layers": [
+            {
+                "path": "src/app",
+                "role": "source",
+                "files": 2,
+                "languages": ["python"],
+                "symbols": 4,
+                "top": [{"p": "core.py", "sym": 4, "deg": 1}],
+                "rank_basis": "symbols",
+            }
+        ],
+        "layers_truncated": 0,
+        "entrypoints": [
+            {
+                "file_path": "src/app/core.py",
+                "symbol": "main",
+                "kind": "console_script",
+                "name": "demo",
+                "confidence": "declared",
+                "evidence": "pyproject.toml [project.scripts]",
+            }
+        ],
+        "hubs": [{"id": "file:src/app/core.py", "label": "core.py", "kind": "file", "degree": 1}],
+        "warnings": [],
+    }
+    (index_dir / "brief.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_atlas_brief_level_invalido_levanta_valueerror():
+    """Apenas os níveis 0 e 1 existem na v1; qualquer outro é erro de parâmetro."""
+    for level in (2, -1):
+        try:
+            atlas_brief(level=level)
+        except ValueError as e:
+            assert "level" in str(e)
+        else:
+            raise AssertionError(f"level={level} deveria levantar ValueError")
+
+
+def test_atlas_brief_sem_indice_levanta_erro_acionavel(tmp_path):
+    """Sem índice, o erro precisa dizer como criá-lo — é o único raise da tool."""
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+    ):
+        try:
+            atlas_brief()
+        except FileNotFoundError as e:
+            assert "atlas_index" in str(e)
+        else:
+            raise AssertionError("deveria levantar FileNotFoundError")
+
+
+def test_atlas_brief_le_brief_json_existente(tmp_path):
+    """Com brief.json presente, a tool serve do arquivo sem recomputar."""
+    index_dir = tmp_path / ".code-index"
+    _write_brief_fixture(index_dir)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_12345"),
+    ):
+        result = json.loads(atlas_brief(level=1))
+
+    assert result["computed_at_query_time"] is False
+    assert result["identity"]["repo"] == "my-project"
+    assert result["entrypoints"][0]["confidence"] == "declared"
+    assert result["is_stale"] is False
+
+
+def test_atlas_brief_computa_sem_varrer_a_tabela(tmp_path):
+    """
+    O brief deriva de manifest + graph.json apenas. Uma varredura da tabela LanceDB
+    tornaria o caminho de recomputação inviável em repositórios grandes.
+    """
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir(parents=True)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.storage.StorageBackend.get_graph_projection") as mock_projection,
+        patch("codesteer_atlas.storage.StorageBackend.get_symbols") as mock_symbols,
+    ):
+        result = json.loads(atlas_brief(level=1))
+
+    assert not mock_projection.called
+    assert not mock_symbols.called
+    assert result["computed_at_query_time"] is True
+    assert "brief_recomputed_at_query_time" in result["warnings"]
+
+
+def test_atlas_brief_reporta_is_stale(tmp_path):
+    """Staleness compara o SHA gravado no brief com o HEAD atual do workspace."""
+    index_dir = tmp_path / ".code-index"
+    _write_brief_fixture(index_dir, git_head_sha="sha_antigo")
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_novo"),
+    ):
+        result = json.loads(atlas_brief(level=1))
+
+    assert result["is_stale"] is True
+    assert result["stale_reason"] == "git_head_changed"
+    assert "index_stale" in result["warnings"]
+
+
+def test_atlas_brief_level0_e_subconjunto_de_level1(tmp_path):
+    """Os dois níveis descrevem o mesmo projeto; o 0 apenas mostra menos campos."""
+    index_dir = tmp_path / ".code-index"
+    _write_brief_fixture(index_dir)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_12345"),
+    ):
+        level0 = json.loads(atlas_brief(level=0))
+        level1 = json.loads(atlas_brief(level=1))
+
+    assert level0["identity"]["repo"] == level1["identity"]["repo"]
+    assert level0["identity"]["files"] == level1["identity"]["files"]
+    assert [layer["path"] for layer in level0["layers"]] == [
+        layer["path"] for layer in level1["layers"]
+    ]
+    assert len(json.dumps(level0)) < len(json.dumps(level1))

@@ -1,3 +1,7 @@
+from unittest.mock import patch
+
+import pytest
+
 from codesteer_atlas.chunker import ASTChunker, _CHUNK_MAX_CHARS
 
 
@@ -459,3 +463,53 @@ def test_chunk_sql_fallback_to_text_when_unparseable(tmp_path):
     assert len(chunks) >= 1
     assert all(c.language == "sql" for c in chunks)
     assert all(c.scope_type == "chunk" for c in chunks)
+
+
+def test_verify_parser_api_aceita_ambiente_correto():
+    """No ambiente suportado a verificação passa e é feita uma única vez."""
+    from codesteer_atlas.chunker import ASTChunker
+
+    chunker = ASTChunker()
+    assert chunker._api_verified is False
+    assert chunker._get_parser("python") is not None
+    assert chunker._api_verified is True
+
+
+def test_verify_parser_api_levanta_erro_acionavel_em_api_incompativel():
+    """
+    A API clássica (`parse(bytes)`) é incompatível e precisa falhar alto, com uma
+    mensagem que diga o que fazer — nunca virar falha silenciosa por arquivo.
+    """
+    from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
+
+    class _ParserApiAntiga:
+        def parse(self, source):
+            if isinstance(source, str):
+                raise TypeError("source must be a bytestring or a callable, not str")
+            return object()
+
+    chunker = ASTChunker()
+    with pytest.raises(IncompatibleParserError) as exc:
+        chunker._verify_parser_api(_ParserApiAntiga())
+
+    mensagem = str(exc.value)
+    assert "tree-sitter-language-pack" in mensagem
+    assert "uv cache clean" in mensagem
+
+
+def test_chunk_file_propaga_erro_de_api_incompativel(tmp_path):
+    """
+    O erro de ambiente não pode ser confundido com "arquivo problemático": ele sobe
+    por `chunk_file` para o indexador poder abortar a execução inteira.
+    """
+    from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
+
+    source = tmp_path / "app.py"
+    source.write_text("def f():\n    pass\n", encoding="utf-8")
+
+    chunker = ASTChunker()
+    with patch.object(
+        ASTChunker, "_verify_parser_api", side_effect=IncompatibleParserError("boom")
+    ):
+        with pytest.raises(IncompatibleParserError):
+            chunker.chunk_file(source, "repo")

@@ -1,5 +1,7 @@
 import json
 from unittest.mock import patch
+
+import pytest
 from click.testing import CliRunner
 from filelock import FileLock
 from codesteer_atlas.config import REINDEX_LOCK_FILENAME
@@ -172,7 +174,15 @@ def test_index_workspace_reports_metrics_and_incremental_graph_strategy(tmp_path
     assert first.files_scanned == 1
     assert first.files_eligible == 1
     assert first.chunks_generated >= 1
-    assert set(first.phase_durations_s) == {"scan", "hash", "chunk", "embed", "persist", "graph"}
+    assert set(first.phase_durations_s) == {
+        "scan",
+        "hash",
+        "chunk",
+        "embed",
+        "persist",
+        "graph",
+        "brief",
+    }
     assert first.graph_nodes > 0
     assert first.graph_bytes > 0
     assert second.graph_strategy == "incremental-code"
@@ -742,3 +752,116 @@ def test_index_progress_reporter_emits_graph_phase(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "Reconstruindo grafo" in captured.err
+
+
+def test_phase_weights_somam_um():
+    """
+    Os pesos de fase alimentam o cálculo de progresso; se não somarem 1.0 o reporte
+    fica errado, e uma fase sem label quebra `tick`/`phase_done` com KeyError.
+    """
+    from codesteer_atlas.indexer import _PHASE_LABELS, _PHASE_WEIGHTS
+
+    assert abs(sum(_PHASE_WEIGHTS.values()) - 1.0) < 1e-9
+    assert set(_PHASE_WEIGHTS) == set(_PHASE_LABELS)
+
+
+def test_index_workspace_gera_brief_json(tmp_path):
+    """A indexação produz o briefing pré-computado junto com o grafo."""
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    index_dir = tmp_path / ".code-index"
+
+    with patch(
+        "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    brief_path = index_dir / "brief.json"
+    assert brief_path.exists()
+    assert stats.brief_status == "full"
+    assert stats.brief_bytes > 0
+    assert stats.brief_layers >= 1
+
+    payload = json.loads(brief_path.read_text(encoding="utf-8"))
+    assert payload["brief_version"] == "1.0"
+    assert payload["identity"]["files"] == 1
+
+
+def test_indexacao_nao_falha_quando_brief_falha(tmp_path):
+    """
+    Uma falha ao gerar o brief é degradação, não erro fatal: a indexação em si
+    (chunks no LanceDB) precisa concluir normalmente.
+    """
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    index_dir = tmp_path / ".code-index"
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch(
+            "codesteer_atlas.indexer.build_and_write_brief",
+            side_effect=RuntimeError("falha simulada"),
+        ),
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    assert stats.brief_status == "failed"
+    assert stats.chunks_persisted > 0
+    assert not (index_dir / "brief.json").exists()
+
+
+def test_indexacao_aborta_em_api_de_parser_incompativel(tmp_path):
+    """
+    Ambiente com API de parser errada tem de abortar a indexação, não produzir um
+    índice vazio e reportar sucesso — foi exatamente essa a falha silenciosa que
+    degradou o índice em produção.
+    """
+    from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
+
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    index_dir = tmp_path / ".code-index"
+
+    with patch.object(
+        ASTChunker, "chunk_file", side_effect=IncompatibleParserError("api incompativel")
+    ):
+        with pytest.raises(IncompatibleParserError):
+            index_workspace(workspace_dir, index_dir)
+
+
+def test_falha_de_arquivo_e_contada_e_nao_aborta(tmp_path):
+    """
+    Uma falha pontual de arquivo continua sendo tolerada, mas passa a ser CONTADA em
+    `files_failed` para que o índice incompleto seja detectável.
+    """
+    from codesteer_atlas.chunker import ASTChunker
+
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    (workspace_dir / "ok.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
+    (workspace_dir / "ruim.py").write_text("def ruim():\n    return 2\n", encoding="utf-8")
+    index_dir = tmp_path / ".code-index"
+
+    original = ASTChunker.chunk_file
+
+    def _falha_em_ruim(self, file_path, repo_name):
+        if file_path.name == "ruim.py":
+            raise ValueError("arquivo problematico")
+        return original(self, file_path, repo_name)
+
+    with (
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode
+        ),
+        patch.object(ASTChunker, "chunk_file", _falha_em_ruim),
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    assert stats.files_failed == 1
+    assert stats.files_processed == 1
+    assert stats.chunks_persisted > 0

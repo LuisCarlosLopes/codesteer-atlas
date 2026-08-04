@@ -44,34 +44,96 @@ def _resolve_note_matches(name_to_paths: Dict[str, List[str]], key: str) -> List
     return sorted(prefix_matches)
 
 
-def _resolve_python_import(source_path: str, raw_import: str, manifest_files: set[str]) -> Optional[str]:
+# Diretórios que convencionalmente hospedam pacotes sem serem parte do nome do módulo
+_CONVENTIONAL_SOURCE_ROOTS = ("src", "lib")
+
+
+def infer_package_roots(manifest_files: set[str]) -> List[str]:
+    """
+    Deduz os prefixos de diretório que NÃO fazem parte do nome do módulo.
+
+    Um import absoluto como `codesteer_atlas.config` precisa casar com
+    `src/codesteer_atlas/config.py`, mas as chaves do manifest são relativas ao
+    workspace. Sem descobrir que `src/` é raiz de código, nenhum import absoluto
+    resolve num layout `src/` — que é justamente o deste projeto.
+
+    A dedução parte dos `__init__.py`: sobe enquanto o diretório-pai também for
+    pacote, e a raiz é o pai do pacote mais externo. Retorna sempre a raiz do
+    workspace ("") como fallback, e a lista é ordenada para tornar a resolução
+    determinística.
+    """
+    package_dirs = {
+        posixpath.dirname(file_path)
+        for file_path in manifest_files
+        if posixpath.basename(file_path) == "__init__.py"
+    }
+
+    roots = {""}
+    for package_dir in package_dirs:
+        outermost = package_dir
+        while True:
+            parent = posixpath.dirname(outermost)
+            if parent == outermost or parent not in package_dirs:
+                break
+            outermost = parent
+        roots.add(posixpath.dirname(outermost))
+
+    # Layouts sem `__init__.py` (namespace packages, módulos soltos em src/)
+    for candidate in _CONVENTIONAL_SOURCE_ROOTS:
+        prefix = f"{candidate}/"
+        if any(file_path.startswith(prefix) for file_path in manifest_files):
+            roots.add(candidate)
+
+    # Raiz do workspace primeiro; depois as mais rasas — determinístico
+    return sorted(roots, key=lambda root: (len(root), root))
+
+
+def resolve_module_path(
+    module: str, manifest_files: set[str], package_roots: Optional[List[str]] = None
+) -> Optional[str]:
+    """
+    Resolve um módulo pontuado absoluto (`pacote.modulo`) para um caminho do manifest,
+    testando cada raiz de código deduzida. Vai encurtando o caminho à direita para
+    também casar `from pacote.modulo import nome`, em que a última parte é um símbolo.
+    """
+    if package_roots is None:
+        package_roots = infer_package_roots(manifest_files)
+
+    parts = [part for part in module.split(".") if part]
+    while parts:
+        joined = "/".join(parts)
+        for root in package_roots:
+            base = posixpath.join(root, joined) if root else joined
+            for candidate in (f"{base}.py", posixpath.join(base, "__init__.py")):
+                normalized = posixpath.normpath(candidate)
+                if normalized in manifest_files:
+                    return normalized
+        parts = parts[:-1]
+    return None
+
+
+def _resolve_python_import(
+    source_path: str,
+    raw_import: str,
+    manifest_files: set[str],
+    package_roots: Optional[List[str]] = None,
+) -> Optional[str]:
     leading_dots = len(raw_import) - len(raw_import.lstrip("."))
     module_part = raw_import.lstrip(".")
     module_parts = [part for part in module_part.split(".") if part]
 
-    candidates: List[str] = []
-    if leading_dots:
-        source_dir = posixpath.dirname(source_path)
-        base = source_dir
-        for _ in range(max(leading_dots - 1, 0)):
-            base = posixpath.dirname(base)
-        suffix = "/".join(module_parts) if module_parts else ""
-        resolved_base = posixpath.normpath(posixpath.join(base, suffix)) if suffix else base
-        candidates.extend(
-            [
-                f"{resolved_base}.py",
-                posixpath.join(resolved_base, "__init__.py"),
-            ]
-        )
-    else:
-        parts = module_parts
-        while parts:
-            joined = "/".join(parts)
-            candidates.append(f"{joined}.py")
-            candidates.append(posixpath.join(joined, "__init__.py"))
-            parts = parts[:-1]
+    if not leading_dots:
+        return resolve_module_path(module_part, manifest_files, package_roots)
 
-    for candidate in candidates:
+    # Import relativo: a âncora é o diretório do próprio arquivo, sem raízes de pacote
+    source_dir = posixpath.dirname(source_path)
+    base = source_dir
+    for _ in range(max(leading_dots - 1, 0)):
+        base = posixpath.dirname(base)
+    suffix = "/".join(module_parts) if module_parts else ""
+    resolved_base = posixpath.normpath(posixpath.join(base, suffix)) if suffix else base
+
+    for candidate in (f"{resolved_base}.py", posixpath.join(resolved_base, "__init__.py")):
         normalized = posixpath.normpath(candidate)
         if normalized in manifest_files:
             return normalized
@@ -184,6 +246,7 @@ def _add_contribution_from_rows(
     nodes: Dict[str, dict],
     edges: List[dict],
     edge_keys: set[tuple[str, str, str]],
+    package_roots: Optional[List[str]] = None,
 ) -> None:
     file_kind = "doc" if file_path.lower().endswith(".md") else "file"
     file_node_id = f"file:{file_path}"
@@ -263,7 +326,9 @@ def _add_contribution_from_rows(
     for raw_import in raw_imports:
         target_path = None
         if file_path.endswith(".py"):
-            target_path = _resolve_python_import(file_path, raw_import, manifest_files)
+            target_path = _resolve_python_import(
+                file_path, raw_import, manifest_files, package_roots
+            )
         elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
             target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
         if target_path is None:
@@ -326,6 +391,7 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
     rows = storage.get_graph_projection()
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
+    package_roots = infer_package_roots(manifest_files)
     rows_by_file: Dict[str, List[dict]] = {}
     for row in rows:
         rows_by_file.setdefault(row["file_path"], []).append(row)
@@ -352,6 +418,7 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
             nodes=nodes,
             edges=edges,
             edge_keys=edge_keys,
+            package_roots=package_roots,
         )
 
     graph = _finalize_graph(_build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges})
@@ -394,6 +461,7 @@ def build_and_write_incremental(
     edge_keys = {(edge["source"], edge["target"], edge["kind"]) for edge in kept_edges}
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
+    package_roots = infer_package_roots(manifest_files)
     rows_by_file = _graph_rows_from_chunks(updated_chunks)
 
     for file_path in updated_file_paths:
@@ -406,6 +474,7 @@ def build_and_write_incremental(
             nodes=nodes,
             edges=kept_edges,
             edge_keys=edge_keys,
+            package_roots=package_roots,
         )
 
     updated_graph = _build_empty_graph(manifest) | {
