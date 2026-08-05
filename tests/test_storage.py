@@ -1,6 +1,8 @@
-import pytest
 import json
+
 import lancedb
+import pytest
+
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.storage import StorageBackend
 
@@ -138,7 +140,7 @@ def test_store_chunks_persists_references_json_and_search_returns_references(tem
     )
 
     temp_storage.store_chunks([chunk])
-    results = temp_storage.search_hybrid(query_vector=vec, query_text="main", filters={}, top_k=1)
+    results = temp_storage.search_hybrid(query_vector=vec, query_text="main", filters={}, top_k=1).results
 
     assert results[0].references == ["cite:dec-002", "why:cache local"]
 
@@ -182,7 +184,7 @@ def test_append_chunks_preserves_references_for_old_and_new_rows(temp_storage):
         ]
     )
 
-    results = temp_storage.search_hybrid(query_vector=vec, query_text="def", filters={}, top_k=5)
+    results = temp_storage.search_hybrid(query_vector=vec, query_text="def", filters={}, top_k=5).results
     refs_by_path = {result.file_path: result.references for result in results}
 
     assert refs_by_path["src/old.py"] == ["why:legado"]
@@ -297,7 +299,7 @@ def test_search_hybrid_on_legacy_table_without_references_column_returns_empty_r
 
     results = temp_storage.search_hybrid(
         query_vector=MOCK_VECTOR, query_text="legacy", filters={}, top_k=1
-    )
+    ).results
 
     assert results[0].references == []
 
@@ -360,7 +362,7 @@ def test_hybrid_search_with_filters(temp_storage):
     # 1. Busca ampla sem filtros por "login" (deve encontrar no FTS e vetor)
     results = temp_storage.search_hybrid(
         query_vector=vec_auth, query_text="login", filters={}, top_k=5
-    )
+    ).results
     assert len(results) >= 1
     # Chunks c1 e c3 usam o mesmo vetor aproximado, c1 tem match FTS no termo 'login'
     assert results[0].scope_name == "login"
@@ -368,7 +370,7 @@ def test_hybrid_search_with_filters(temp_storage):
     # 2. Busca com filtro por repositório "project-b"
     results_repo = temp_storage.search_hybrid(
         query_vector=vec_auth, query_text="authenticated", filters={"repo": "project-b"}, top_k=5
-    )
+    ).results
     # c1 tem o texto 'authenticated' mas é do project-a. Logo, deve filtrar e trazer apenas c3 do project-b.
     assert len(results_repo) == 1
     assert results_repo[0].repo == "project-b"
@@ -380,7 +382,7 @@ def test_hybrid_search_with_filters(temp_storage):
         query_text="connect",
         filters={"path_prefix": "src/database/"},
         top_k=5,
-    )
+    ).results
     assert len(results_path) == 1
     assert results_path[0].file_path == "src/database/connection.py"
 
@@ -428,7 +430,7 @@ def test_hybrid_search_prefilter_returns_full_top_k(temp_storage):
 
     results = temp_storage.search_hybrid(
         query_vector=vec, query_text="func", filters={"language": "python"}, top_k=5
-    )
+    ).results
 
     assert len(results) == 5
     assert all(r.language == "python" for r in results)
@@ -458,7 +460,7 @@ def test_hybrid_search_filter_no_matches_returns_empty(temp_storage):
 
     results = temp_storage.search_hybrid(
         query_vector=vec, query_text="main", filters={"language": "rust"}, top_k=5
-    )
+    ).results
 
     assert results == []
 
@@ -488,7 +490,7 @@ def test_hybrid_search_path_prefix_escapes_single_quote(temp_storage):
     # Não deve levantar exceção de SQL e deve encontrar o arquivo correto
     results = temp_storage.search_hybrid(
         query_vector=vec, query_text="run", filters={"path_prefix": "src/it's_a_dir/"}, top_k=5
-    )
+    ).results
 
     assert len(results) == 1
     assert results[0].file_path == "src/it's_a_dir/file.py"
@@ -522,7 +524,7 @@ def test_hybrid_search_path_prefix_normalizes_backslash_to_posix(temp_storage):
         query_text="DBConnection",
         filters={"path_prefix": "src\\database\\"},
         top_k=5,
-    )
+    ).results
 
     assert len(results) == 1
     assert results[0].file_path == "src/database/connection.py"
@@ -657,7 +659,7 @@ def test_append_chunks_updates_fts_index_for_new_content(temp_storage):
         query_text="zorbflex_unique_token",
         filters={},
         top_k=5,
-    )
+    ).results
 
     assert any(r.scope_name == "charge_card" for r in results)
 
@@ -815,3 +817,139 @@ def test_get_sections_by_file_path_empty_for_unknown_file(temp_storage):
     sections = temp_storage.get_sections_by_file_path("docs/unknown.md")
 
     assert sections == []
+
+
+class _FailingArmTable:
+    """Envolve a tabela real e faz falhar apenas o braço escolhido da busca híbrida."""
+
+    def __init__(self, table, fail_vector=False, fail_fts=False):
+        self._table = table
+        self._fail_vector = fail_vector
+        self._fail_fts = fail_fts
+
+    def search(self, query=None, query_type=None, **kwargs):
+        if query_type == "fts":
+            if self._fail_fts:
+                raise RuntimeError("índice FTS corrompido")
+            return self._table.search(query, query_type=query_type, **kwargs)
+        if self._fail_vector:
+            raise RuntimeError("índice vetorial corrompido")
+        return self._table.search(query, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._table, name)
+
+
+class _FailingArmDB:
+    def __init__(self, db, **flags):
+        self._db = db
+        self._flags = flags
+
+    def open_table(self, name):
+        return _FailingArmTable(self._db.open_table(name), **self._flags)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+# Vetores distintos e não-nulos: com a métrica de cosseno, o MOCK_VECTOR de zeros
+# produz similaridade indefinida e o braço vetorial não retorna nada — o que
+# mascararia justamente a degradação que estes testes querem observar.
+VEC_A = [1.0] + [0.0] * 383
+VEC_B = [0.0, 1.0] + [0.0] * 382
+
+
+def _seed_two_chunks(storage):
+    chunks = [
+        CodeChunk(
+            id="c1",
+            file_path="src/main.py",
+            repo="test-project",
+            start_line=1,
+            end_line=10,
+            scope_type="function",
+            scope_name="main",
+            language="python",
+            content="def main(): print('hello world')",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=VEC_A,
+        ),
+        CodeChunk(
+            id="c2",
+            file_path="src/utils.py",
+            repo="test-project",
+            start_line=1,
+            end_line=8,
+            scope_type="function",
+            scope_name="helper",
+            language="python",
+            content="def helper(): return 42",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=VEC_B,
+        ),
+    ]
+    storage.store_chunks(chunks)
+
+
+def _search_with_failing_arm(temp_storage, monkeypatch, **flags):
+    real_connect = lancedb.connect
+
+    def _fake_connect(uri, *args, **kwargs):
+        return _FailingArmDB(real_connect(uri, *args, **kwargs), **flags)
+
+    monkeypatch.setattr("codesteer_atlas.storage.lancedb.connect", _fake_connect)
+    return temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+
+
+def test_search_hybrid_reports_fts_unavailable_and_keeps_vector_results(
+    temp_storage, monkeypatch
+):
+    """Braço FTS quebrado degrada para só-vetorial, mas o aviso chega ao chamador."""
+    _seed_two_chunks(temp_storage)
+
+    outcome = _search_with_failing_arm(temp_storage, monkeypatch, fail_fts=True)
+
+    assert "fts_unavailable" in outcome.warnings
+    assert "vector_search_unavailable" not in outcome.warnings
+    # A degradação não pode zerar a busca: o braço vetorial ainda responde
+    assert len(outcome.results) == 2
+
+
+def test_search_hybrid_reports_vector_unavailable_and_keeps_fts_results(
+    temp_storage, monkeypatch
+):
+    """Braço vetorial quebrado degrada para só-BM25, com aviso explícito."""
+    _seed_two_chunks(temp_storage)
+
+    outcome = _search_with_failing_arm(temp_storage, monkeypatch, fail_vector=True)
+
+    assert "vector_search_unavailable" in outcome.warnings
+    assert "fts_unavailable" not in outcome.warnings
+    assert len(outcome.results) >= 1
+
+
+def test_search_hybrid_raises_when_both_arms_fail(temp_storage, monkeypatch):
+    """
+    Com os dois braços quebrados, devolver lista vazia seria indistinguível de
+    'nenhum resultado' — precisa levantar erro acionável.
+    """
+    _seed_two_chunks(temp_storage)
+
+    with pytest.raises(RuntimeError, match="reindexe|Reindexe"):
+        _search_with_failing_arm(
+            temp_storage, monkeypatch, fail_vector=True, fail_fts=True
+        )
+
+
+def test_search_hybrid_healthy_index_has_no_warnings(temp_storage):
+    """Busca saudável não deve emitir nenhum aviso de degradação."""
+    _seed_two_chunks(temp_storage)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+
+    assert outcome.warnings == []
+    assert len(outcome.results) == 2

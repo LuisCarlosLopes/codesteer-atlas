@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "codesteer-atlas": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "--from",
+        "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
+        "atlas-serve"
+      ],
+      "enabled": true
+    }
+  }
+}

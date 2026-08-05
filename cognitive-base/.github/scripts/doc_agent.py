@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from datetime import date
+from pathlib import Path
 
 BASE = os.environ.get("CB_BASE", "cognitive-base")
 AUTHOR = os.environ.get("KB_AUTHOR", "@luiscarloslopes")
@@ -19,7 +20,7 @@ MAPPING = [
     (lambda t, labels, files: t.startswith("feat:"),
      "specs", "feature", "spc"),
     (lambda t, labels, files: t.startswith("fix:") and any(
-        "traceback" in open(f, encoding="utf-8", errors="ignore").read().lower()
+        "traceback" in Path(f).read_text(encoding="utf-8", errors="ignore").lower()
         for f in files if os.path.isfile(f)
     ), "ops", "incident", "ops"),
     (lambda t, labels, files: t.startswith("refactor:") and "breaking" in t.lower(),

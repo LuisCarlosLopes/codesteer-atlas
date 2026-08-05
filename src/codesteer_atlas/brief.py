@@ -373,7 +373,7 @@ def _declared_entrypoints(workspace_root: Path, manifest_files: set, layer_paths
                 with open(pyproject, "rb") as f:
                     data = tomllib.load(f)
                 project = data.get("project") or {}
-                scripts = {}
+                scripts: dict = {}
                 scripts.update(project.get("scripts") or {})
                 scripts.update(project.get("gui-scripts") or {})
                 for name, target in sorted(scripts.items()):
@@ -422,10 +422,10 @@ def _declared_entrypoints(workspace_root: Path, manifest_files: set, layer_paths
                             "evidence": "package.json bin",
                         }
                     )
-                scripts = data.get("scripts")
-                if isinstance(scripts, dict):
+                npm_scripts = data.get("scripts")
+                if isinstance(npm_scripts, dict):
                     for name in ("start", "dev", "serve"):
-                        command = scripts.get(name)
+                        command = npm_scripts.get(name)
                         if isinstance(command, str):
                             found.append(
                                 {
@@ -670,7 +670,7 @@ def _compute_layers(
                 ),
             )[:BRIEF_LAYER_TOP_FILES]
 
-            top = []
+            top: List[dict] = []
             for file_path in ranked_files:
                 stats = per_file.get(file_path, {})
                 relative = file_path

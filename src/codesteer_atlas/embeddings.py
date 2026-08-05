@@ -1,5 +1,8 @@
 import threading
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
+
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 # Nome do modelo no formato esperado pelo fastembed (ONNX) - DECISAO-001
 # Mesmo modelo (all-MiniLM-L6-v2, 384 dims) usado anteriormente via sentence-transformers
@@ -14,8 +17,8 @@ class EmbeddingEngine:
     inicialização rápida do servidor MCP.
     """
 
-    _instance = None
-    _model = None
+    _instance: Optional["EmbeddingEngine"] = None
+    _model: Optional["TextEmbedding"] = None
     _load_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -24,7 +27,7 @@ class EmbeddingEngine:
             cls._instance = super(EmbeddingEngine, cls).__new__(cls)
         return cls._instance
 
-    def _load_model(self):
+    def _load_model(self) -> "TextEmbedding":
         """
         Lazy loading: carrega o modelo de embeddings apenas quando necessário.
 
@@ -34,11 +37,11 @@ class EmbeddingEngine:
         simultâneas do `TextEmbedding`/ONNX Runtime [GA-XX].
         """
         if self._model is not None:
-            return
+            return self._model
 
         with self._load_lock:
             if self._model is not None:
-                return
+                return self._model
 
             # Importação local tardia para evitar atraso síncrono no startup do servidor
             import onnxruntime as ort
@@ -57,6 +60,7 @@ class EmbeddingEngine:
             # (deadlock) em alguns ambientes Windows quando chamadas concorrentes
             # ao modelo competem pela inicialização do pool global do ORT [GA-XX]
             self._model = TextEmbedding(model_name=FASTEMBED_MODEL_NAME, threads=1)
+            return self._model
 
     def encode(
         self,
@@ -71,12 +75,12 @@ class EmbeddingEngine:
         if not texts:
             return []
 
-        self._load_model()
+        model = self._load_model()
 
         # fastembed.embed retorna um generator de numpy.ndarray (float32)
         total = len(texts)
         results: List[List[float]] = []
-        for index, vector in enumerate(self._model.embed(texts, batch_size=batch_size), start=1):
+        for index, vector in enumerate(model.embed(texts, batch_size=batch_size), start=1):
             results.append(vector.tolist())
             if on_progress is not None and (index % batch_size == 0 or index == total):
                 on_progress(index, total)
@@ -86,7 +90,7 @@ class EmbeddingEngine:
         """
         Gera o embedding vetorial para um único texto (ex: query de busca).
         """
-        self._load_model()
+        model = self._load_model()
 
-        embeddings = list(self._model.embed([text]))
+        embeddings = list(model.embed([text]))
         return embeddings[0].tolist()

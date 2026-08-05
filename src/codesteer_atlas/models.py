@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class CodeChunk(BaseModel):
@@ -25,6 +26,11 @@ class CodeChunk(BaseModel):
     references: List[str] = Field(
         default_factory=list, description="Refs de rationale persistidas no chunk"
     )
+
+    # Hash sha256 do arquivo de origem, anexado pelo indexer e consumido por
+    # `StorageBackend.store_chunks` para montar o mapa `files` do manifest.
+    # Privado de propósito: é estado de indexação, não coluna persistida no LanceDB.
+    _file_hash: Optional[str] = PrivateAttr(default=None)
 
 
 class IndexManifest(BaseModel):
@@ -80,6 +86,22 @@ class SearchResult(BaseModel):
     score: float
     repo: str
     references: List[str] = Field(default_factory=list)
+
+
+class SearchOutcome(BaseModel):
+    """
+    Resultado da busca híbrida acompanhado dos avisos de degradação.
+
+    Existe para que uma falha de um dos braços (vetorial ou FTS) chegue ao chamador
+    em vez de virar um resultado silenciosamente pior: sem isso, um índice FTS
+    quebrado transforma a busca híbrida em só-vetorial sem nenhum sinal.
+    """
+
+    results: List[SearchResult] = Field(default_factory=list)
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Códigos de degradação: 'vector_search_unavailable' | 'fts_unavailable'",
+    )
 
 
 class IndexStats(BaseModel):

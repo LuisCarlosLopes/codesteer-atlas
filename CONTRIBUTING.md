@@ -146,7 +146,7 @@ Ou adicione manualmente em `.mcp.json` (na raiz do projeto) ou na config global 
 
 ### Cursor
 
-Este repositório já inclui um [`.cursor/mcp.json`](.cursor/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para a raiz do seu projeto (ou para `~/.cursor/mcp.json` para configuração global) e reinicie o Cursor.
+Este repositório já inclui um [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para `.cursor/mcp.json` na raiz do seu projeto (ou para `~/.cursor/mcp.json` para configuração global) e reinicie o Cursor.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
 
@@ -177,7 +177,7 @@ Crie/edite `opencode.json` na raiz do projeto (ou `~/.config/opencode/opencode.j
 
 ### Kiro
 
-Este repositório já inclui um [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_search`, `atlas_map`, `atlas_status`). Copie esse arquivo para a raiz do seu projeto (ou para a configuração global do Kiro) e reinicie.
+Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` na raiz do seu projeto (ou para a configuração global do Kiro) e reinicie.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
 
@@ -191,7 +191,7 @@ Este repositório também é distribuído como um [Power do Kiro](https://kiro.d
 
 ### GitHub Copilot (VS Code)
 
-Este repositório já inclui um [`.vscode/mcp.json`](.vscode/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para a raiz do seu projeto.
+Este repositório já inclui um [`examples/clients/vscode/mcp.json`](examples/clients/vscode/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para `.vscode/mcp.json` na raiz do seu projeto.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima (note que o VS Code usa a chave `servers`, e não `mcpServers`).
 

@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 from filelock import FileLock
+
 from codesteer_atlas.config import REINDEX_LOCK_FILENAME
 from codesteer_atlas.indexer import (
     cli,
@@ -495,7 +496,7 @@ def test_index_workspace_file_path_always_posix(tmp_path):
         manifest = json.load(f)
 
     assert "src/controllers/user.py" in manifest["files"]
-    assert all("\\" not in path for path in manifest["files"].keys())
+    assert all("\\" not in path for path in manifest["files"])
 
 
 def test_index_workspace_partial_paths_preserves_other_folders(tmp_path):
@@ -829,9 +830,8 @@ def test_indexacao_aborta_em_api_de_parser_incompativel(tmp_path):
 
     with patch.object(
         ASTChunker, "chunk_file", side_effect=IncompatibleParserError("api incompativel")
-    ):
-        with pytest.raises(IncompatibleParserError):
-            index_workspace(workspace_dir, index_dir)
+    ), pytest.raises(IncompatibleParserError):
+        index_workspace(workspace_dir, index_dir)
 
 
 def test_falha_de_arquivo_e_contada_e_nao_aborta(tmp_path):

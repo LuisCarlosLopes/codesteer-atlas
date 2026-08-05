@@ -4,8 +4,12 @@ import sys
 import time
 from pathlib import Path, PurePath
 from typing import List, Optional
+
 import click
 import pathspec
+
+from codesteer_atlas.brief import build_and_write_brief
+from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.config import (
     ATLASIGNORE_FILENAME,
     DEFAULT_INDEX_DIR,
@@ -14,8 +18,6 @@ from codesteer_atlas.config import (
     MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.brief import build_and_write_brief
-from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.embeddings import EmbeddingEngine
 from codesteer_atlas.graph import build_and_write, build_and_write_incremental, load_graph
 from codesteer_atlas.locking import reindex_lock
@@ -86,7 +88,10 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
     # No Windows: CREATE_NO_WINDOW evita janela de console piscando a cada chamada
     # (hosts MCP GUI), e stdin=DEVNULL evita herdar um handle de stdin inválido em
     # processos sem console (OSError WinError 6)
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    # O atributo só existe no Windows; a expressão condicional só avalia esse ramo lá
+    creationflags = (
+        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # type: ignore[attr-defined]
+    )
 
     try:
         result = subprocess.run(
@@ -134,13 +139,14 @@ def should_ignore(
     path: Path, workspace_path: Path, atlas_spec: Optional[pathspec.PathSpec] = None
 ) -> bool:
     """Verifica se o arquivo ou diretório deve ser ignorado na indexação."""
-    # Ignora arquivos/pastas ocultos
-    if path.name.startswith("."):
-        # Permite apenas arquivos específicos se não estiverem na lista de ignorados
-        if path.name not in (".code-index",):
-            # Se for uma pasta como .git, deve ignorar
-            if path.is_dir() or path.parent.name.startswith("."):
-                return True
+    # Ignora ocultos, exceto o próprio `.code-index`: só descarta se for diretório
+    # (ex.: .git) ou se já estiver dentro de uma pasta oculta
+    if (
+        path.name.startswith(".")
+        and path.name not in (".code-index",)
+        and (path.is_dir() or path.parent.name.startswith("."))
+    ):
+        return True
 
     # Verifica se qualquer parte do caminho relativo contém uma pasta ignorada
     try:
@@ -496,7 +502,7 @@ def _index_workspace_locked(
         vectors = embedding_engine.encode(
             chunk_texts, batch_size=32, on_progress=_embed_progress
         )
-        for chunk, vector in zip(all_new_chunks, vectors):
+        for chunk, vector in zip(all_new_chunks, vectors, strict=True):
             chunk.vector = vector
     else:
         progress.tick("embed", 1, 1)

@@ -14,8 +14,12 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test
+  # Lint e type check independem de plataforma: rodam uma vez só, não na matriz.
+  # As versões de ruff/mypy são pinadas de propósito — sem pin, uma release nova da
+  # ferramenta amplia o conjunto de regras padrão e quebra o build sem nenhuma
+  # mudança de código (foi o que motivou o commit fa1648b).
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,10 +33,43 @@ jobs:
         run: uv sync --group dev
 
       - name: Ruff
-        run: uv run --with ruff ruff check
+        run: uv run --with ruff==0.16.1 ruff check
+
+      - name: Mypy
+        run: uv run --with mypy==2.3.0 mypy src/codesteer_atlas
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Uma quebra específica de plataforma não deve esconder o resultado das outras
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      # tests/test_embeddings.py carrega o modelo real (all-MiniLM-L6-v2, ~90MB) para
+      # validar a dimensão dos vetores. Sem cache, cada job da matriz baixa o modelo
+      # do HuggingFace de novo — 3x o tráfego e 3x a superfície de flakiness.
+      - name: Cache fastembed model
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/fastembed
+            ~/AppData/Local/fastembed
+          key: fastembed-${{ runner.os }}-all-MiniLM-L6-v2
 
       - name: Validate critical imports
         run: uv run python deploy_mcp.py --check
 
       - name: Pytest
-        run: uv run --python 3.12 --with pytest python -m pytest -v
+        run: uv run pytest -v --cov=src/codesteer_atlas --cov-fail-under=85

@@ -1,14 +1,14 @@
-import sys
-import os
 import argparse
 import json
+import os
 import posixpath
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import Mapping, Optional
 from urllib.parse import unquote, urlparse
 
 # 1. Duplica o file descriptor real do stdout (fd 1) para uso exclusivo do
@@ -38,6 +38,8 @@ os.environ.setdefault("LANCE_LOG", "off")
 import anyio  # noqa: E402
 from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
+
+from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
 from codesteer_atlas.config import (  # noqa: E402
     BACKGROUND_REINDEX_MIN_INTERVAL_S,
     DEFAULT_INDEX_DIR,
@@ -46,9 +48,14 @@ from codesteer_atlas.config import (  # noqa: E402
     GRAPH_PATH_MAX_HOPS,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
-from codesteer_atlas.embeddings import EmbeddingEngine, FASTEMBED_MODEL_NAME  # noqa: E402
+from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
 from codesteer_atlas.graph import bfs_path, explain, hubs, load_graph  # noqa: E402
+from codesteer_atlas.indexer import (  # noqa: E402
+    get_git_head_sha,
+    index_workspace,
+    load_atlasignore_spec,
+    should_ignore,
+)
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
 from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
@@ -56,12 +63,6 @@ from codesteer_atlas.markdown_links import (  # noqa: E402
 )
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
-from codesteer_atlas.indexer import (  # noqa: E402
-    get_git_head_sha,
-    index_workspace,
-    load_atlasignore_spec,
-    should_ignore,
-)
 
 # 4. Patch defensivo no SDK do MCP: se um tool handler síncrono demorar o
 # suficiente para o cliente desistir (timeout) e enviar `notifications/cancelled`,
@@ -86,7 +87,7 @@ async def _safe_responder_respond(self, response):
     await _original_responder_respond(self, response)
 
 
-RequestResponder.respond = _safe_responder_respond
+RequestResponder.respond = _safe_responder_respond  # type: ignore[method-assign]
 
 # Inicializa o servidor FastMCP
 app = FastMCP("CodeSteer Atlas")
@@ -158,7 +159,7 @@ def _file_uri_to_path(uri: str) -> Optional[Path]:
     return Path(path) if path else None
 
 
-def _list_roots_sync(ctx: "Context") -> list[Path]:
+def _list_roots_sync(ctx: "Optional[Context]") -> list[Path]:
     """
     Obtém os workspace roots informados pelo cliente MCP (capability `roots`) a
     partir de um tool handler síncrono. A ponte sync->async usa
@@ -193,7 +194,7 @@ def _list_roots_sync(ctx: "Context") -> list[Path]:
     return paths
 
 
-def _resolve_index_dir_via_roots(ctx: "Context") -> None:
+def _resolve_index_dir_via_roots(ctx: "Optional[Context]") -> None:
     """
     Atualiza `INDEX_DIR_PATH`/`INDEX_RESOLUTION_SOURCE` usando os workspace roots
     do cliente MCP, quando a resolução de startup caiu em fallback (nenhum índice
@@ -251,7 +252,7 @@ def _resolve_index_dir_via_roots(ctx: "Context") -> None:
 
 def resolve_index_dir(
     cli_arg: Optional[str] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
     start_dir: Optional[Path] = None,
 ) -> Path:
     """
@@ -504,6 +505,14 @@ def atlas_search(
         `query_time_ms`. Markdown results may also include `markdown_references`
         ({file_path, anchor, resolved_section}) for links to other `.md` files.
         Code results may include `rationale_refs` ({kind, key, note_path?, text?, candidates?}).
+
+        A `warnings` array appears ONLY when the hybrid search ran degraded:
+        `fts_unavailable` (BM25 arm failed — results are vector-only, so exact symbol
+        and error-string matches may be missing) or `vector_search_unavailable`
+        (semantic arm failed — results are keyword-only, so paraphrased queries may miss).
+        Treat a degraded result as incomplete: reindex with `atlas_index(full=true)`
+        before concluding that something does not exist in the codebase. When both arms
+        fail the call raises instead of returning an empty result set.
     """
     start_time = time.time()
 
@@ -537,9 +546,10 @@ def atlas_search(
     query_vector = embedding_engine.encode_single(query)
 
     # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
-    results = storage.search_hybrid(
+    outcome = storage.search_hybrid(
         query_vector=query_vector, query_text=query, filters=filters, top_k=top_k
     )
+    results = outcome.results
 
     query_time_ms = (time.time() - start_time) * 1000
     manifest = storage.get_manifest()
@@ -574,7 +584,7 @@ def atlas_search(
         # no conteúdo, resolvendo #anchor contra seções já indexadas (Seção 4.2 do plan.md)
         if r.language == "markdown":
             targets = extract_markdown_link_targets(
-                r.content, r.file_path, name_to_paths=name_to_paths
+                r.content or "", r.file_path, name_to_paths=name_to_paths
             )
             if targets:
                 markdown_references = []
@@ -590,33 +600,37 @@ def atlas_search(
                             if slugify_heading(section["scope_name"]) == target_slug:
                                 resolved_section = section["scope_name"]
                                 break
-                    ref = {
+                    markdown_ref = {
                         "file_path": target.file_path,
                         "anchor": target.anchor,
                         "resolved_section": resolved_section,
                     }
                     if target.alias is not None:
-                        ref["alias"] = target.alias
+                        markdown_ref["alias"] = target.alias
                     if target.candidates:
-                        ref["candidates"] = target.candidates
-                    markdown_references.append(ref)
+                        markdown_ref["candidates"] = target.candidates
+                    markdown_references.append(markdown_ref)
                 item["markdown_references"] = markdown_references
         elif r.references:
             rationale_refs = []
             for raw_ref in r.references:
-                ref = deserialize_rationale_ref(raw_ref)
-                if ref is None:
+                rationale_ref = deserialize_rationale_ref(raw_ref)
+                if rationale_ref is None:
                     continue
-                if ref.kind == "annotation":
+                if rationale_ref.kind == "annotation":
                     rationale_refs.append(
-                        {"kind": "annotation", "key": ref.key, "text": ref.text}
+                        {
+                            "kind": "annotation",
+                            "key": rationale_ref.key,
+                            "text": rationale_ref.text,
+                        }
                     )
                     continue
-                candidates = _resolve_note_candidates(name_to_paths, ref.key)
+                candidates = _resolve_note_candidates(name_to_paths, rationale_ref.key)
                 resolved = candidates[0] if len(candidates) == 1 else None
-                entry = {
-                    "kind": ref.kind,
-                    "key": ref.key,
+                entry: dict = {
+                    "kind": rationale_ref.kind,
+                    "key": rationale_ref.key,
                     "note_path": resolved,
                 }
                 if len(candidates) > 1:
@@ -632,6 +646,11 @@ def atlas_search(
         "total_chunks_searched": manifest.total_chunks,
         "query_time_ms": round(query_time_ms, 2),
     }
+
+    # Só presente quando algum braço da busca falhou: a ausência do campo é o
+    # sinal de que o resultado veio da busca híbrida completa
+    if outcome.warnings:
+        response["warnings"] = sorted(set(outcome.warnings))
 
     return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
@@ -862,7 +881,9 @@ def atlas_index(
         try:
             top_level_entries = sorted(workspace_path.iterdir())
         except Exception as e:
-            raise ValueError(f"Não foi possível listar o workspace '{workspace_path}': {e}")
+            raise ValueError(
+                f"Não foi possível listar o workspace '{workspace_path}': {e}"
+            ) from e
 
         for entry in top_level_entries:
             if should_ignore(entry, workspace_path, atlas_spec):
@@ -1034,8 +1055,12 @@ def _spawn_index_subprocess(
     for p in paths or []:
         cmd.extend(["--paths", p])
 
-    # No Windows, evita que o subprocesso abra/pisque uma janela de console
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    # No Windows, evita que o subprocesso abra/pisque uma janela de console.
+    # O atributo só existe no Windows, mas a expressão condicional só avalia esse
+    # ramo quando os.name == "nt" — daí o ignore.
+    creationflags = (
+        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # type: ignore[attr-defined]
+    )
 
     try:
         # `newline=""` desativa a tradução de newline do modo texto: no Windows o

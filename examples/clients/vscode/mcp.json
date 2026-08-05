@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "codesteer-atlas": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
+        "atlas-serve"
+      ]
+    }
+  }
+}

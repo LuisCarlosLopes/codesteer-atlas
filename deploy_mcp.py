@@ -12,12 +12,12 @@ Modes:
                                    0 on success, 1 on failure. Used by setup.sh/setup.ps1.
 """
 
-import os
-import sys
 import json
+import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # Configurações globais
@@ -76,12 +76,11 @@ def get_uv_paths():
                 uv_path = str(potential_uv)
                 break
 
-    if not uvx_path:
-        # Tenta achar uvx na mesma pasta que o uv
-        if uv_path:
-            potential_uvx = Path(uv_path).parent / uvx_exe
-            if potential_uvx.exists():
-                uvx_path = str(potential_uvx)
+    # Tenta achar uvx na mesma pasta que o uv
+    if not uvx_path and uv_path:
+        potential_uvx = Path(uv_path).parent / uvx_exe
+        if potential_uvx.exists():
+            uvx_path = str(potential_uvx)
 
     # Fallback para execução genérica se nada for detectado
     if not uv_path:

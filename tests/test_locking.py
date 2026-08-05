@@ -1,4 +1,5 @@
 from filelock import FileLock
+
 from codesteer_atlas.config import REINDEX_LOCK_FILENAME
 from codesteer_atlas.locking import is_reindex_locked, reindex_lock
 

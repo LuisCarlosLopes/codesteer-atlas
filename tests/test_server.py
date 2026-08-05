@@ -7,21 +7,24 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
-from codesteer_atlas.models import IndexManifest, IndexStats, SearchResult
+
+import pytest
+
+from codesteer_atlas.models import IndexManifest, IndexStats, SearchOutcome, SearchResult
 from codesteer_atlas.server import (
-    atlas_graph,
-    atlas_status,
-    atlas_search,
-    atlas_brief,
-    atlas_index,
-    main,
-    resolve_index_dir,
-    _spawn_background_reindex,
-    _spawn_index_subprocess,
-    _safe_responder_respond,
     _file_uri_to_path,
     _list_roots_sync,
     _resolve_index_dir_via_roots,
+    _safe_responder_respond,
+    _spawn_background_reindex,
+    _spawn_index_subprocess,
+    atlas_brief,
+    atlas_graph,
+    atlas_index,
+    atlas_search,
+    atlas_status,
+    main,
+    resolve_index_dir,
 )
 
 # Mock do manifesto de índice de teste
@@ -103,7 +106,8 @@ def test_atlas_search_success():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ) as mock_encode,
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ) as mock_search,
     ):
         # include_content=True explícito: o default agora é False (metadata only)
@@ -151,7 +155,8 @@ def test_atlas_search_default_omits_content():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="how to run app", top_k=2))
@@ -183,7 +188,8 @@ def test_atlas_search_include_content_false_omits_content():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result_full = atlas_search(query="how to run app", top_k=2, include_content=True)
@@ -210,7 +216,8 @@ def test_atlas_search_limit_alias_overrides_top_k():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ) as mock_search,
     ):
         atlas_search(query="how to run app", top_k=5, limit=10)
@@ -242,7 +249,8 @@ def test_atlas_search_markdown_chunk_with_link_includes_references():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -278,7 +286,8 @@ def test_atlas_search_markdown_link_with_resolved_anchor():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
         patch(
             "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
@@ -323,7 +332,8 @@ def test_atlas_search_markdown_link_with_unresolved_anchor_is_null():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
         patch(
             "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
@@ -365,7 +375,8 @@ def test_atlas_search_markdown_chunk_without_links_omits_field():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -396,7 +407,8 @@ def test_atlas_search_non_markdown_chunk_omits_field():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -433,7 +445,8 @@ def test_atlas_search_includes_rationale_refs_for_code_chunk_with_resolved_cite(
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="run", top_k=1))
@@ -471,7 +484,8 @@ def test_atlas_search_omits_rationale_refs_when_references_are_empty():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="run", top_k=1))
@@ -508,7 +522,8 @@ def test_atlas_search_resolves_note_path_by_prefix():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="run", top_k=1))
@@ -539,7 +554,8 @@ def test_atlas_search_include_content_false_still_includes_references():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1, include_content=False))
@@ -580,7 +596,8 @@ def test_atlas_search_wikilink_resolved_via_manifest_files():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -625,7 +642,8 @@ def test_atlas_search_wikilink_ambiguous_returns_candidates():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -670,7 +688,8 @@ def test_atlas_search_wikilink_with_alias_includes_alias_field():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
     ):
         result = json.loads(atlas_search(query="docs", top_k=1))
@@ -718,7 +737,8 @@ def test_atlas_search_wikilink_with_anchor_resolves_section():
             "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
         ),
         patch(
-            "codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=mock_results
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
         ),
         patch(
             "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
@@ -908,12 +928,11 @@ def test_atlas_index_paths_outside_workspace_raises_value_error(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"):
-        try:
-            atlas_index(workspace=str(workspace), paths=["../outside"], dry_run=True)
-            assert False, "Esperava ValueError"
-        except ValueError:
-            pass
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        pytest.raises(ValueError),
+    ):
+        atlas_index(workspace=str(workspace), paths=["../outside"], dry_run=True)
 
 
 def test_atlas_index_docstring_instructs_asking_user():
@@ -956,7 +975,7 @@ def test_resolve_via_roots_noop_when_ctx_none(monkeypatch):
 
     import codesteer_atlas.server as s
     assert s._ROOTS_RESOLUTION_DONE is False
-    assert s.INDEX_DIR_PATH == Path("/unchanged/.code-index")
+    assert Path("/unchanged/.code-index") == s.INDEX_DIR_PATH
 
 
 def test_resolve_via_roots_skips_high_confidence_source(monkeypatch):
@@ -972,7 +991,7 @@ def test_resolve_via_roots_skips_high_confidence_source(monkeypatch):
 
     _resolve_index_dir_via_roots(object())
 
-    assert s.INDEX_DIR_PATH == Path("/already/.code-index")
+    assert Path("/already/.code-index") == s.INDEX_DIR_PATH
     assert s.INDEX_RESOLUTION_SOURCE == "discovery"
     assert s._ROOTS_RESOLUTION_DONE is True
 
@@ -1045,7 +1064,7 @@ def test_resolve_via_roots_runs_only_once(monkeypatch):
 
     _resolve_index_dir_via_roots(object())
 
-    assert s.INDEX_DIR_PATH == Path("/keep/.code-index")
+    assert Path("/keep/.code-index") == s.INDEX_DIR_PATH
 
 
 def test_resolve_via_roots_keeps_fallback_when_no_roots(monkeypatch):
@@ -1059,7 +1078,7 @@ def test_resolve_via_roots_keeps_fallback_when_no_roots(monkeypatch):
 
     _resolve_index_dir_via_roots(object())
 
-    assert s.INDEX_DIR_PATH == Path("/fallback/.code-index")
+    assert Path("/fallback/.code-index") == s.INDEX_DIR_PATH
     assert s.INDEX_RESOLUTION_SOURCE == "cwd-fallback"
     assert s._ROOTS_RESOLUTION_DONE is True
 
@@ -1770,3 +1789,65 @@ def test_atlas_brief_level0_e_subconjunto_de_level1(tmp_path):
         layer["path"] for layer in level1["layers"]
     ]
     assert len(json.dumps(level0)) < len(json.dumps(level1))
+
+
+def _search_with_outcome(outcome):
+    """Roda `atlas_search` com um SearchOutcome fixo e devolve o payload decodificado."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=outcome,
+        ),
+    ):
+        return json.loads(atlas_search(query="how to run app", top_k=2))
+
+
+_DEGRADED_RESULT = SearchResult(
+    file_path="src/app.py",
+    start_line=10,
+    end_line=20,
+    scope_type="function",
+    scope_name="run",
+    language="python",
+    content="def run(): pass",
+    score=0.15,
+    repo="my-project",
+)
+
+
+def test_atlas_search_propagates_degradation_warnings():
+    """Um braço quebrado precisa chegar ao agente como `warnings` no payload."""
+    result = _search_with_outcome(
+        SearchOutcome(results=[_DEGRADED_RESULT], warnings=["fts_unavailable"])
+    )
+
+    assert result["warnings"] == ["fts_unavailable"]
+    # A degradação não some com os resultados que o braço saudável trouxe
+    assert len(result["results"]) == 1
+
+
+def test_atlas_search_deduplicates_and_sorts_warnings():
+    """`warnings` é normalizado (sorted+set), mesmo padrão de `atlas_brief`."""
+    result = _search_with_outcome(
+        SearchOutcome(
+            results=[],
+            warnings=["fts_unavailable", "vector_search_unavailable", "fts_unavailable"],
+        )
+    )
+
+    assert result["warnings"] == ["fts_unavailable", "vector_search_unavailable"]
+
+
+def test_atlas_search_omits_warnings_when_healthy():
+    """
+    Ausência do campo é o sinal de busca híbrida completa — não pode virar
+    `"warnings": []`, que o agente leria como ruído.
+    """
+    result = _search_with_outcome(SearchOutcome(results=[_DEGRADED_RESULT]))
+
+    assert "warnings" not in result
