@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
-from codesteer_atlas.chunker import ASTChunker, _CHUNK_MAX_CHARS
+from codesteer_atlas.chunker import _CHUNK_MAX_CHARS, ASTChunker
 
 
 def test_chunk_python_file_with_classes_and_functions(tmp_path):
@@ -510,6 +510,5 @@ def test_chunk_file_propaga_erro_de_api_incompativel(tmp_path):
     chunker = ASTChunker()
     with patch.object(
         ASTChunker, "_verify_parser_api", side_effect=IncompatibleParserError("boom")
-    ):
-        with pytest.raises(IncompatibleParserError):
-            chunker.chunk_file(source, "repo")
+    ), pytest.raises(IncompatibleParserError):
+        chunker.chunk_file(source, "repo")

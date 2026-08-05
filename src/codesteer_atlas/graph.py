@@ -586,7 +586,7 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
         return {"found": True, "path": [{"node": _node_summary(source), "edge_kind_to_next": None}], "hops": 0}
 
     adjacency = graph["_adjacency"]
-    queue = deque([(source["id"], [])])
+    queue: deque[tuple[str, list]] = deque([(source["id"], [])])
     visited = {source["id"]}
 
     while queue:
@@ -599,7 +599,7 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
             next_trail = trail + [(node_id, edge_kind, neighbor_id)]
             if neighbor_id == target["id"]:
                 sequence = []
-                for current_id, current_edge_kind, next_id in next_trail:
+                for current_id, current_edge_kind, _next_id in next_trail:
                     sequence.append(
                         {
                             "node": _node_summary(graph["_nodes_by_id"][current_id]),

@@ -2,9 +2,10 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from tree_sitter_language_pack import get_parser
+
 from codesteer_atlas.config import SUPPORTED_EXTENSIONS
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import extract_rationale_refs, serialize_rationale_refs
@@ -162,7 +163,7 @@ class ASTChunker:
         source_text: str,
         language: str,
         parent_scope: str = "",
-        chunks: List[Tuple[int, int, str, str, str]] = None,
+        chunks: Optional[List[Tuple[int, int, str, str, str]]] = None,
     ) -> List[Tuple[int, int, str, str, str]]:
         """
         Percorre recursivamente a árvore AST identificando nós de interesse
@@ -375,7 +376,7 @@ class ASTChunker:
         """Extrai o texto de um nó Tree-sitter a partir dos bytes do source original."""
         return source_bytes[node.start_byte() : node.end_byte()].decode("utf-8", errors="ignore")
 
-    def _collect_nodes_by_kind(self, node, kinds: set[str], found: List = None) -> List:
+    def _collect_nodes_by_kind(self, node, kinds: set[str], found: Optional[List] = None) -> List:
         if found is None:
             found = []
         if node.kind() in kinds:
@@ -680,7 +681,7 @@ class ASTChunker:
             # Se a seção for muito grande (mais de 1000 caracteres), quebramos por parágrafos
             if len(section_content) > 1000:
                 paragraphs = section_content.split("\n\n")
-                current_chunk_parts = []
+                current_chunk_parts: List[str] = []
                 current_len = 0
                 chunk_index = 1
                 last_sec_search_index = 0
@@ -787,7 +788,7 @@ class ASTChunker:
         paragraphs = source_content.split("\n\n")
         chunks = []
         
-        current_chunk_parts = []
+        current_chunk_parts: List[str] = []
         current_len = 0
         chunk_index = 1
         last_search_index = 0

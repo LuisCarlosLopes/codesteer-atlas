@@ -77,10 +77,12 @@ Para remover: `copilot plugin uninstall codesteer-atlas`.
 
 Copie o manifest pronto do cliente correspondente para a raiz do seu projeto (ou para a configuração global dele) e reinicie o cliente:
 
-- Cursor: [`.cursor/mcp.json`](.cursor/mcp.json)
-- Kiro: [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json)
-- OpenCode: [`.opencode/opencode.json`](.opencode/opencode.json)
-- GitHub Copilot (VS Code): [`.vscode/mcp.json`](.vscode/mcp.json)
+- Cursor: [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json) → `.cursor/mcp.json`
+- Kiro: [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) → `.kiro/settings/mcp.json`
+- OpenCode: [`examples/clients/opencode/opencode.json`](examples/clients/opencode/opencode.json) → `opencode.json`
+- GitHub Copilot (VS Code): [`examples/clients/vscode/mcp.json`](examples/clients/vscode/mcp.json) → `.vscode/mcp.json`
+
+Todos usam o modo remoto (`uvx`), sem caminhos absolutos. Veja [`examples/clients/`](examples/clients/) para os destinos e detalhes.
 
 Para configuração manual de outros clientes (OpenCode, Claude Desktop, Cline) ou para usar o modo instalado, veja [CONTRIBUTING.md](CONTRIBUTING.md#configuração-manual-em-outros-clientes).
 
@@ -345,7 +347,7 @@ Normalmente o item 3 já resolve: busca ascendente a partir do diretório de tra
 
   Uma entrada de `codesteer-atlas` em `.mcp.json` do projeto tem precedência sobre a registrada pelo plugin.
 
-- **Kiro Power / Copilot CLI plugin**: o manifest (`mcp.json`/`.mcp.json`) vem do próprio repositório do Atlas instalado pelo marketplace — não edite-o diretamente (mudanças seriam perdidas em atualizações). Em vez disso, copie o manifest pronto do cliente (ex.: [`.kiro/settings/mcp.json`](.kiro/settings/mcp.json)) para a raiz do seu projeto, adicione `env.ATLAS_INDEX_DIR` e reinicie o cliente — veja [Outros clientes](#outros-clientes-cursor-cline-copilot-kiro-opencode).
+- **Kiro Power / Copilot CLI plugin**: o manifest (`mcp.json`/`.mcp.json`) vem do próprio repositório do Atlas instalado pelo marketplace — não edite-o diretamente (mudanças seriam perdidas em atualizações). Em vez disso, copie o manifest pronto do cliente (ex.: [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json)) para a raiz do seu projeto, adicione `env.ATLAS_INDEX_DIR` e reinicie o cliente — veja [Outros clientes](#outros-clientes-cursor-cline-copilot-kiro-opencode).
 
 ## Contribuindo
 

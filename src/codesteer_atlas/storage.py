@@ -1,10 +1,12 @@
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Dict, List, Optional
 
 import lancedb
+
 from codesteer_atlas.config import (
     CANDIDATES_LIMIT,
     CURRENT_INDEX_VERSION,
@@ -13,7 +15,7 @@ from codesteer_atlas.config import (
     RRF_K,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
-from codesteer_atlas.models import CodeChunk, IndexManifest, SearchResult
+from codesteer_atlas.models import CodeChunk, IndexManifest, SearchOutcome, SearchResult
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
 
 
@@ -267,7 +269,7 @@ class StorageBackend:
 
     def search_hybrid(
         self, query_vector: List[float], query_text: str, filters: Dict[str, Any], top_k: int
-    ) -> List[SearchResult]:
+    ) -> SearchOutcome:
         """
         Executa uma busca híbrida combinando busca vetorial (cosseno) e léxica (BM25 FTS)
         mesclando os rankings com o algoritmo RRF (Reciprocal Rank Fusion) de acordo com o [ADR-002].
@@ -275,6 +277,12 @@ class StorageBackend:
         Aplica prefilter via `where()` nos dois braços para garantir que filtros
         seletivos (repo/language/path_prefix) sempre retornem `top_k` resultados
         quando existem matches suficientes (DECISAO-003).
+
+        A falha de um braço isolado degrada a busca em vez de derrubá-la, mas é
+        reportada em `SearchOutcome.warnings` — degradação silenciosa aqui significa
+        resultado pior sem nenhum sinal para o chamador. Se os DOIS braços falharem,
+        levanta `RuntimeError`: devolver lista vazia seria indistinguível de
+        "nenhum resultado encontrado".
         """
         if not self.exists():
             raise FileNotFoundError(
@@ -286,6 +294,10 @@ class StorageBackend:
 
         where_clause = self._build_where_clause(filters)
 
+        warnings: List[str] = []
+        vector_error: Optional[Exception] = None
+        fts_error: Optional[Exception] = None
+
         # 1. Executa busca vetorial (cosseno) com prefilter
         vector_results: List[Dict[str, Any]] = []
         try:
@@ -293,9 +305,14 @@ class StorageBackend:
             if where_clause:
                 query = query.where(where_clause, prefilter=True)
             vector_results = query.limit(CANDIDATES_LIMIT).to_list()
-        except Exception:
-            # Em caso de falha silenciosa na busca vetorial, continua
-            pass
+        except Exception as e:
+            vector_error = e
+            warnings.append("vector_search_unavailable")
+            print(
+                f"[atlas] Braço vetorial indisponível ({type(e).__name__}: {e}); "
+                "busca degradada para somente BM25.",
+                file=sys.stderr,
+            )
 
         # 2. Executa busca textual (BM25 FTS) explícita, com prefilter
         text_results: List[Dict[str, Any]] = []
@@ -304,9 +321,23 @@ class StorageBackend:
             if where_clause:
                 query = query.where(where_clause, prefilter=True)
             text_results = query.limit(CANDIDATES_LIMIT).to_list()
-        except Exception:
-            # Em caso de falha silenciosa na busca léxica (ex: sem índice FTS pronto), continua
-            pass
+        except Exception as e:
+            fts_error = e
+            warnings.append("fts_unavailable")
+            print(
+                f"[atlas] Braço FTS indisponível ({type(e).__name__}: {e}); "
+                "busca degradada para somente vetorial.",
+                file=sys.stderr,
+            )
+
+        if vector_error is not None and fts_error is not None:
+            raise RuntimeError(
+                "Os dois braços da busca híbrida falharam, o índice provavelmente está "
+                f"corrompido ou incompleto. Vetorial: {type(vector_error).__name__}: "
+                f"{vector_error}. FTS: {type(fts_error).__name__}: {fts_error}. "
+                "Reindexe com 'atlas-index --workspace . --full' (ou a tool atlas_index "
+                "com full=true)."
+            )
 
         # 3. Executa a fusão dos rankings usando RRF (Reciprocal Rank Fusion)
         # score = sum(1 / (rank + k))
@@ -351,7 +382,7 @@ class StorageBackend:
                 )
             )
 
-        return final_results
+        return SearchOutcome(results=final_results, warnings=warnings)
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """

@@ -38,6 +38,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
 ]
 
 [tool.ruff]
@@ -45,11 +46,18 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# Conjunto de regras declarado explicitamente. Sem isto o projeto herda o default da
-# versão de ruff instalada, e o CI roda `uv run --with ruff ruff check` (sem pin): o
-# ruff 0.16 ampliou esse default (ligando I/UP/BLE/SIM/S) e passou a quebrar o build
-# sem nenhuma mudança de código. Estes são os quatro prefixos que o projeto sempre usou.
-select = ["E4", "E7", "E9", "F"]
+# Conjunto de regras declarado explicitamente, para não herdar o default da versão de
+# ruff instalada — foi o que quebrou o build no ruff 0.16 sem nenhuma mudança de código.
+# A proteção contra isso é o pin da versão no CI (`ruff==0.16.1`), não o estreitamento
+# do ruleset. `UP` e `E5` (line-too-long) ficam de fora deliberadamente: seriam ~340
+# achados de modernização de tipagem/formatação, puro churn sobre o `git blame`.
+select = ["E4", "E7", "E9", "F", "I", "B", "SIM"]
+
+[tool.mypy]
+# O plugin do Pydantic é o que ensina o mypy a entender campos com default nos modelos;
+# sem ele, todo `CodeChunk(...)`/`IndexStats(...)` vira falso positivo de "Missing named argument".
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
