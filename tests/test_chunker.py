@@ -467,30 +467,92 @@ def test_chunk_sql_fallback_to_text_when_unparseable(tmp_path):
 
 def test_verify_parser_api_aceita_ambiente_correto():
     """No ambiente suportado a verificação passa e é feita uma única vez."""
-    from codesteer_atlas.chunker import ASTChunker
+    from codesteer_atlas.chunker import ASTChunker, _CompatParser
 
     chunker = ASTChunker()
     assert chunker._api_verified is False
-    assert chunker._get_parser("python") is not None
+    parser = chunker._get_parser("python")
+    assert isinstance(parser, _CompatParser)
     assert chunker._api_verified is True
+    assert chunker._classic_api is False
+
+
+def test_verify_parser_api_aceita_api_classica_bytes():
+    """
+    language-pack ≥1.13 devolve `tree_sitter.Parser` clássico via uvx; o chunker
+    precisa adaptar, não abortar — era o bug de instalação reportado no Windows.
+    """
+    from codesteer_atlas.chunker import ASTChunker, _CompatNode, _CompatParser
+
+    class _Point:
+        def __init__(self, row, column):
+            self.row = row
+            self.column = column
+
+    class _ClassicNode:
+        def __init__(self, node_type="module", children=None, start=(0, 0), end=(0, 1)):
+            self.type = node_type
+            self.children = children or []
+            self.child_count = len(self.children)
+            self.start_byte = 0
+            self.end_byte = 1
+            self.start_point = _Point(*start)
+            self.end_point = _Point(*end)
+
+        def child(self, index):
+            return self.children[index]
+
+    class _ClassicTree:
+        def __init__(self, root):
+            self.root_node = root
+
+    class _ClassicParser:
+        def parse(self, source):
+            if isinstance(source, str):
+                raise TypeError("source must be a bytestring or a callable, not str")
+            ident = _ClassicNode("identifier", start=(0, 4), end=(0, 7))
+            ident.start_byte = 4
+            ident.end_byte = 7
+            func = _ClassicNode(
+                "function_definition",
+                children=[ident],
+                start=(0, 0),
+                end=(1, 4),
+            )
+            func.start_byte = 0
+            func.end_byte = len(source)
+            root = _ClassicNode("module", children=[func], start=(0, 0), end=(1, 4))
+            root.end_byte = len(source)
+            return _ClassicTree(root)
+
+    chunker = ASTChunker()
+    assert chunker._verify_parser_api(_ClassicParser()) is True
+    assert chunker._classic_api is True
+
+    wrapped = _CompatParser(_ClassicParser(), classic=True)
+    tree = wrapped.parse("def foo():\n    pass\n")
+    root = tree.root_node()
+    assert isinstance(root, _CompatNode)
+    assert root.kind() == "module"
+    assert root.child_count() == 1
+    assert root.child(0).kind() == "function_definition"
+    assert root.child(0).start_position().row == 0
 
 
 def test_verify_parser_api_levanta_erro_acionavel_em_api_incompativel():
     """
-    A API clássica (`parse(bytes)`) é incompatível e precisa falhar alto, com uma
-    mensagem que diga o que fazer — nunca virar falha silenciosa por arquivo.
+    Parser que não fala nem nativo nem clássico precisa falhar alto, com uma
+    mensagem acionável — nunca virar falha silenciosa por arquivo.
     """
     from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 
-    class _ParserApiAntiga:
+    class _ParserQuebrado:
         def parse(self, source):
-            if isinstance(source, str):
-                raise TypeError("source must be a bytestring or a callable, not str")
-            return object()
+            raise TypeError("source must be a bytestring or a callable, not str")
 
     chunker = ASTChunker()
     with pytest.raises(IncompatibleParserError) as exc:
-        chunker._verify_parser_api(_ParserApiAntiga())
+        chunker._verify_parser_api(_ParserQuebrado())
 
     mensagem = str(exc.value)
     assert "tree-sitter-language-pack" in mensagem
@@ -512,3 +574,33 @@ def test_chunk_file_propaga_erro_de_api_incompativel(tmp_path):
         ASTChunker, "_verify_parser_api", side_effect=IncompatibleParserError("boom")
     ), pytest.raises(IncompatibleParserError):
         chunker.chunk_file(source, "repo")
+
+
+def test_chunk_file_com_parser_classico_real(tmp_path):
+    """
+    Integração: language-pack ≥1.13 (API clássica) deve chunkar Python de ponta a ponta.
+    Pulado quando o ambiente local ainda está no binding nativo (uv.lock = 1.8.x).
+    """
+    from importlib.metadata import version
+
+    from codesteer_atlas.chunker import ASTChunker
+    from tree_sitter_language_pack import get_parser
+
+    raw = get_parser("python")
+    try:
+        raw.parse("x = 1\n")
+        pytest.skip("ambiente com API nativa; regressão clássica coberta pelo mock")
+    except TypeError:
+        pass
+
+    source = tmp_path / "app.py"
+    source.write_text(
+        "class A:\n    def m(self):\n        pass\n\ndef f():\n    return 1\n",
+        encoding="utf-8",
+    )
+    chunks = ASTChunker().chunk_file(source, "repo")
+    names = {c.scope_name for c in chunks}
+    assert "A" in names
+    assert "A.m" in names
+    assert "f" in names
+    assert version("tree-sitter-language-pack")  # só para deixar a dep explícita no teste

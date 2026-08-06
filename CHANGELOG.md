@@ -9,6 +9,18 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Removed**).
 
+### Fixed
+
+- **`uvx --from git+... atlas-index` quebrava no primeiro arquivo** com
+  `IncompatibleParserError: source must be a bytestring or a callable, not str`.
+  Causa: `uvx` ignora o `uv.lock` e resolve `tree-sitter-language-pack` ao último 1.x
+  (hoje 1.14.x); a partir de **1.13** o pack voltou a devolver o `tree_sitter.Parser`
+  clássico (`parse(bytes)`, `root_node`/`type` como properties), enquanto o chunker
+  só aceitava a API nativa de 1.8–1.12 (`parse(str)`, `root_node()`, `kind()`). O pin
+  `<2` do PR anterior não cobria essa regressão **dentro** da major 1.x.
+  Correção: `_CompatParser` / `_CompatTree` / `_CompatNode` normalizam as duas APIs;
+  a verificação de ambiente passa a detectar o sabor em vez de abortar na clássica.
+
 ### Added
 
 - **Nova ferramenta MCP `atlas_brief`**: briefing pré-computado do projeto, com **custo de tokens
