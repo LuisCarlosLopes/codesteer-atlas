@@ -583,8 +583,9 @@ def test_chunk_file_com_parser_classico_real(tmp_path):
     """
     from importlib.metadata import version
 
-    from codesteer_atlas.chunker import ASTChunker
     from tree_sitter_language_pack import get_parser
+
+    from codesteer_atlas.chunker import ASTChunker
 
     raw = get_parser("python")
     try:
