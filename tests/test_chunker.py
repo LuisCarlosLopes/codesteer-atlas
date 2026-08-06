@@ -591,6 +591,7 @@ def test_chunk_file_com_parser_classico_real(tmp_path):
         raw.parse("x = 1\n")
         pytest.skip("ambiente com API nativa; regressão clássica coberta pelo mock")
     except TypeError:
+        # Esperado na API clássica: parse(str) levanta TypeError; seguimos com o teste.
         pass
 
     source = tmp_path / "app.py"
