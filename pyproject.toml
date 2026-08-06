@@ -11,9 +11,9 @@ dependencies = [
     "lancedb>=0.17.0,<0.34.0",
     "fastembed>=0.4",
     "tree-sitter>=0.22.0",
-    # A API do chunker (parse(str), root_node(), node.kind()) vem do language-pack.
-    # O teto evita que um ambiente resolvido fora do uv.lock (ex.: uvx --from git+...)
-    # caia numa major com a API clássica baseada em bytes. Ver ASTChunker._verify_parser_api
+    # 1.8–1.12: API nativa (parse(str)); ≥1.13: volta ao tree_sitter.Parser clássico
+    # (parse(bytes)). O chunker normaliza as duas via _CompatParser — crítico para
+    # `uvx --from git+...`, que ignora o uv.lock e resolve o último 1.x.
     "tree-sitter-language-pack>=1.8.0,<2",
     "mcp>=1.24.0,<2",
     "fastmcp>=2.14.1,<4",

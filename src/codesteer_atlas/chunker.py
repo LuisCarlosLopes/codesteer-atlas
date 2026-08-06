@@ -39,18 +39,128 @@ _SQL_STATEMENT_SCOPE_TYPES = {
 
 class IncompatibleParserError(RuntimeError):
     """
-    Ambiente com uma API de parser incompatível com a que este chunker usa.
+    Ambiente cujo parser não expõe nem a API nativa do language-pack
+    (`parse(str)` / `root_node()` / `kind()`) nem a clássica do `tree-sitter`
+    (`parse(bytes)` / `root_node` / `type`).
 
-    Existem duas APIs mutuamente exclusivas em circulação: a do
-    `tree-sitter-language-pack` recente (`parse(str)`, `root_node()`, `node.kind()`),
-    usada aqui, e a clássica do pacote `tree-sitter` (`parse(bytes)`, `root_node` e
-    `node.type` como properties). Elas não têm interseção — suportar as duas exigiria
-    duplicar todo o caminho de navegação da AST.
-
-    Levantada UMA vez, na criação do primeiro parser, em vez de virar uma falha
-    silenciosa por arquivo: sem isso um ambiente errado produz um índice vazio e
-    ainda assim reporta sucesso [D].
+    Levantada UMA vez na criação do primeiro parser: sem isso um ambiente
+    quebrado produz índice vazio e ainda assim reporta sucesso [D].
     """
+
+
+class _CompatParser:
+    """Normaliza parser nativo (str) e clássico (bytes) numa API única."""
+
+    def __init__(self, parser, *, classic: bool):
+        self._parser = parser
+        self.classic = classic
+
+    def parse(self, source_text: str):
+        tree = (
+            self._parser.parse(source_text.encode("utf-8"))
+            if self.classic
+            else self._parser.parse(source_text)
+        )
+        if tree is None:
+            return None
+        return _CompatTree(tree, classic=self.classic)
+
+
+class _CompatTree:
+    def __init__(self, tree, *, classic: bool):
+        self._tree = tree
+        self.classic = classic
+
+    def root_node(self):
+        raw = self._tree.root_node if self.classic else self._tree.root_node()
+        return _CompatNode(raw, classic=self.classic)
+
+
+class _CompatNode:
+    def __init__(self, node, *, classic: bool):
+        self._node = node
+        self.classic = classic
+
+    def kind(self) -> str:
+        return self._node.type if self.classic else self._node.kind()
+
+    def child_count(self) -> int:
+        return self._node.child_count if self.classic else self._node.child_count()
+
+    def child(self, index: int):
+        raw = self._node.child(index)
+        if raw is None:
+            return None
+        return _CompatNode(raw, classic=self.classic)
+
+    def start_byte(self) -> int:
+        return self._node.start_byte if self.classic else self._node.start_byte()
+
+    def end_byte(self) -> int:
+        return self._node.end_byte if self.classic else self._node.end_byte()
+
+    def start_position(self):
+        return self._node.start_point if self.classic else self._node.start_position()
+
+    def end_position(self):
+        return self._node.end_point if self.classic else self._node.end_position()
+
+
+def _installed_language_pack_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("tree-sitter-language-pack")
+    except Exception:
+        return "desconhecida"
+
+
+def _probe_parser_classic(parser) -> bool:
+    """
+    Detecta qual API o `get_parser()` devolveu.
+
+    - language-pack 1.8–1.12: binding nativo (`parse(str)`, métodos).
+    - language-pack ≥1.13: volta a devolver `tree_sitter.Parser` clássico
+      (`parse(bytes)`, properties) — e `uvx --from git+...` resolve isso porque
+      ignora o `uv.lock`.
+    """
+    try:
+        tree = parser.parse("x = 1\n")
+    except TypeError as exc:
+        message = str(exc).lower()
+        if "byte" not in message and "str" not in message:
+            raise IncompatibleParserError(
+                "API do Tree-sitter incompatível com este chunker "
+                f"(tree-sitter-language-pack instalada: {_installed_language_pack_version()}). "
+                f"Erro ao verificar: {exc}."
+            ) from exc
+        try:
+            tree = parser.parse(b"x = 1\n")
+            root = tree.root_node
+            if getattr(root, "type", None) is None:
+                raise TypeError("root_node.type ausente na API clássica")
+        except Exception as classic_exc:
+            raise IncompatibleParserError(
+                "API do Tree-sitter incompatível com este chunker "
+                f"(tree-sitter-language-pack instalada: {_installed_language_pack_version()}). "
+                "Nem parse(str)/kind() (nativa) nem parse(bytes)/type (clássica) funcionaram. "
+                f"Erro ao verificar: {classic_exc}. "
+                "Se o servidor MCP foi registrado com 'uvx --from git+...', limpe o cache "
+                "do uv (uv cache clean) e reinstale."
+            ) from classic_exc
+        return True
+
+    try:
+        root = tree.root_node()
+        root.kind()
+    except Exception as exc:
+        raise IncompatibleParserError(
+            "API do Tree-sitter incompatível com este chunker "
+            f"(tree-sitter-language-pack instalada: {_installed_language_pack_version()}). "
+            "parse(str) respondeu, mas root_node()/kind() falharam. "
+            f"Erro ao verificar: {exc}."
+        ) from exc
+    return False
 
 
 class ASTChunker:
@@ -63,55 +173,37 @@ class ASTChunker:
         # Dicionário para armazenar parsers cacheificados por linguagem
         self.parsers = {}
         self._api_verified = False
+        self._classic_api: Optional[bool] = None
 
-    def _verify_parser_api(self, parser) -> None:
+    def _verify_parser_api(self, parser) -> bool:
         """
-        Confere, uma única vez, que o parser obtido expõe a API esperada.
+        Detecta, uma única vez, se o parser é nativo ou clássico.
 
-        O ambiente do servidor MCP não é o mesmo da `.venv` local: quando registrado
-        via `uvx --from git+...`, ele resolve dependências pelos ranges do
-        `pyproject.toml` e ignora o `uv.lock`, podendo cair numa versão com a API
-        antiga sem nenhum aviso.
+        Retorna True quando a API clássica (`parse(bytes)`) está em uso.
         """
         if self._api_verified:
-            return
+            return bool(self._classic_api)
 
-        try:
-            tree = parser.parse("x = 1\n")
-            root = tree.root_node()
-            root.kind()
-        except Exception as e:
-            try:
-                from importlib.metadata import version
-
-                installed = version("tree-sitter-language-pack")
-            except Exception:
-                installed = "desconhecida"
-            raise IncompatibleParserError(
-                "API do Tree-sitter incompatível com este chunker "
-                f"(tree-sitter-language-pack instalada: {installed}). "
-                "Esperado: parse(str), tree.root_node() e node.kind() como métodos. "
-                f"Erro ao verificar: {e}. "
-                "Atualize o ambiente que executa o servidor MCP — se ele foi registrado "
-                "com 'uvx --from git+...', limpe o cache do uv (uv cache clean) para "
-                "forçar uma nova resolução das dependências."
-            ) from e
-
+        classic = _probe_parser_classic(parser)
+        self._classic_api = classic
         self._api_verified = True
+        return classic
 
     def _get_parser(self, language_name: str):
         """Retorna o parser correspondente para a linguagem ou cria um novo."""
         if language_name not in self.parsers:
             try:
-                self.parsers[language_name] = get_parser(language_name)
+                raw = get_parser(language_name)
             except Exception:
-                # Se falhar em carregar a gramática, retorna None
-                self.parsers[language_name] = None
+                raw = None
 
-        parser = self.parsers[language_name]
-        if parser is not None:
-            self._verify_parser_api(parser)
-        return parser
+            if raw is None:
+                self.parsers[language_name] = None
+            else:
+                classic = self._verify_parser_api(raw)
+                self.parsers[language_name] = _CompatParser(raw, classic=classic)
+
+        return self.parsers[language_name]
 
     def _generate_chunk_id(
         self, content: str, file_path: str, start_line: int, end_line: int
@@ -299,9 +391,7 @@ class ASTChunker:
         except Exception:
             return []
 
-        # API do tree-sitter-language-pack: parse() recebe str (a API clássica do
-        # pacote `tree-sitter` exige bytes e é incompatível) — garantida por
-        # `_verify_parser_api`
+        # `_CompatParser` aceita str e adapta nativa/clássica por baixo
         tree = parser.parse(source_text)
         if not tree:
             return []
