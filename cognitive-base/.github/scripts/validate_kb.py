@@ -219,9 +219,12 @@ def check_adr_sem_howto(notas: list[dict[str, Any]], achados: dict[str, list[str
         for wl in n["wikilinks"]
     }
     for n in notas:
-        if n["quadrante"] == "decisions" and n["type"] in ("adr", "dev-pattern"):
-            if n["nome"] not in ids_guides_mencionados:
-                achados["adr_sem_howto"].append(n["path"])
+        if (
+            n["quadrante"] == "decisions"
+            and n["type"] in ("adr", "dev-pattern")
+            and n["nome"] not in ids_guides_mencionados
+        ):
+            achados["adr_sem_howto"].append(n["path"])
 
 
 def check_ai_correction_incompleta(
