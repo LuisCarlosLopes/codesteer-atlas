@@ -61,7 +61,7 @@ jobs:
       # validar a dimensão dos vetores. Sem cache, cada job da matriz baixa o modelo
       # do HuggingFace de novo — 3x o tráfego e 3x a superfície de flakiness.
       - name: Cache fastembed model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/fastembed
