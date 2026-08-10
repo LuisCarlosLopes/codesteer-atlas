@@ -2,7 +2,7 @@
 id: gd-030
 type: how-to
 title: "Primeiros passos — setup, indexação e uso do MCP"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

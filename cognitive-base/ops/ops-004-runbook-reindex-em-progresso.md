@@ -2,7 +2,7 @@
 id: ops-004
 type: runbook
 title: "Runbook — reindex em progresso (lock concorrente)"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

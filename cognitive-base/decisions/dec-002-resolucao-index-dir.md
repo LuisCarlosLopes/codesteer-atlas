@@ -2,7 +2,7 @@
 id: dec-002
 type: adr
 title: "Resolução do diretório .code-index em múltiplos contextos"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

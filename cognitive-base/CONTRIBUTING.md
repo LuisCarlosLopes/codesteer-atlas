@@ -26,16 +26,18 @@ Correções de código gerado por IA vão em `decisions/ai-corrections/` (type
 
 ### Manual
 
-1. Copie [[meta/templates/note]] como ponto de partida (ou use a skill `kb-note`)
+1. Copie [[meta/templates/note]] como ponto de partida (ou use a skill `cb-note`)
 2. Preencha front matter obrigatório: `id`, `type`, `title`, `status`, `created`,
    `author`
 3. Escreva o corpo com as seções do type
 4. Adicione wikilinks narrativos em **Notas Relacionadas**
-5. Abra PR — `doc-quality.yml` valida automaticamente
+5. Abra PR — o workflow `doc-quality` na raiz valida automaticamente
 
-### Automático (doc-agent)
+### Sugestão automática (doc-agent, opcional)
 
-O workflow `doc-agent.yml` analisa PRs e sugere rascunhos de nota com base em:
+O mapeamento PR → nota abaixo é o contrato do skill `cb-init` / `doc-agent`.
+O workflow de geração automática **não está ativo** neste repositório no
+momento (apenas a validação `doc-quality` roda no CI).
 
 | Padrão no PR | Quadrante | Type |
 | ------------ | --------- | ---- |
@@ -58,11 +60,26 @@ Revise o rascunho gerado antes de promover a `approved`.
 
 ## Validação em PR
 
-O workflow `doc-quality.yml` verifica:
+O workflow executável está em `.github/workflows/doc-quality.yml` (raiz do
+repo). Ele chama `cognitive-base/.github/scripts/validate_kb.py`.
 
-- Front matter com campos obrigatórios
+**Bloqueia o CI (crítico):**
+
+- Front matter com campos obrigatórios (`id`, `type`, `title`, `status`,
+  `created`, `author`)
 - IDs duplicados
-- Wikilinks quebrados (arquivo referenciado não existe)
+- Wikilinks quebrados (alvo inexistente na base)
+
+**Aviso (não falha o CI):** prefixo de ID vs. quadrante, `status` inválido,
+notas órfãs, ADR/`dev-pattern` sem how-to em `guides/`, ai-corrections
+incompletas, drafts > 30 dias, approved sem revisão > 90 dias, subpastas
+nomeadas por tipo de documento.
+
+Rodar localmente a partir da raiz do repositório:
+
+```bash
+python cognitive-base/.github/scripts/validate_kb.py
+```
 
 ## Convenções de subpastas
 

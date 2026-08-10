@@ -2,7 +2,7 @@
 id: ops-001
 type: runbook
 title: "Runbook — reindexar o workspace"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

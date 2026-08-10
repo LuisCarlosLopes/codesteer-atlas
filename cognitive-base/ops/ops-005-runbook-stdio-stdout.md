@@ -2,7 +2,7 @@
 id: ops-005
 type: runbook
 title: "Runbook — canal MCP stdio poluído por stdout"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

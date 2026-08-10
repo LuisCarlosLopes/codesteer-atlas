@@ -54,9 +54,24 @@ quadrantes cognitivos. Navegação primária no **Obsidian** (Graph View + wikil
 
 ## Manutenção
 
-- `kb-note` — criar ou atualizar notas
-- `kb-index` — regenerar [[index]] (grafo de links e estatísticas)
-- `kb-audit` — auditar saúde da base (front matter, links, órfãs)
+- `cb-note` — criar ou atualizar notas
+- `cb-index` — regenerar [[index]] (grafo de links e estatísticas)
+- `cb-audit` — auditar saúde da base (front matter, links, órfãs)
+
+## CI — Doc Quality
+
+O workflow [`.github/workflows/doc-quality.yml`](../.github/workflows/doc-quality.yml)
+roda em push/PR que alteram `cognitive-base/**` e executa:
+
+```bash
+python cognitive-base/.github/scripts/validate_kb.py --base cognitive-base
+```
+
+**Falha o CI** se houver problemas críticos (front matter incompleto, IDs
+duplicados, wikilinks quebrados). Demais checks do `cb-audit` (órfãs, ADR sem
+how-to, notas estagnadas, etc.) saem como aviso sem quebrar o build.
+
+Detalhes e checklist de contribuição: [[CONTRIBUTING]].
 
 ## Estrutura
 

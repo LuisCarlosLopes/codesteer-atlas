@@ -2,7 +2,7 @@
 id: sys-003
 type: service
 title: "EmbeddingEngine — wrapper singleton fastembed"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

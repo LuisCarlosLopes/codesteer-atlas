@@ -2,7 +2,7 @@
 id: gd-040
 type: how-to
 title: "Indexação, grafo e workspace multi-repo — guia didático"
-status: draft
+status: approved
 created: "2026-07-07"
 updated: "2026-07-07"
 author: "@luiscarloslopes"

@@ -2,7 +2,7 @@
 id: dec-006
 type: adr
 title: "Lock de arquivo para reindexações concorrentes"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

@@ -2,7 +2,7 @@
 id: {prefixo}-{NNN}
 type: {type}
 title: ""
-status: draft
+status: approved
 created: ""
 updated: ""
 author: "@luiscarloslopes"

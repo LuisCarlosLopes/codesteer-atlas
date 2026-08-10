@@ -1,0 +1,13 @@
+# Template portátil — workflow ativo na raiz do monorepo
+#
+# O workflow executável está em `.github/workflows/doc-quality.yml` na raiz do
+# repositório (GitHub Actions só descobre workflows em `/.github/workflows/`).
+#
+# Valida em push/PR que tocam `cognitive-base/**`:
+# - Front matter obrigatório (id, type, title, status, created, author)
+# - IDs duplicados
+# - Wikilinks quebrados
+# - (aviso) prefixo/status, órfãs, ADR sem how-to, ai-corrections, estagnação
+#
+# Script: `cognitive-base/.github/scripts/validate_kb.py`
+# Local:  `python cognitive-base/.github/scripts/validate_kb.py`

@@ -2,7 +2,7 @@
 id: sys-004
 type: service
 title: "index_workspace — núcleo de indexação do workspace"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

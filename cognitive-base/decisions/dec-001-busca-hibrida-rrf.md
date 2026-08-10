@@ -2,7 +2,7 @@
 id: dec-001
 type: adr
 title: "Busca híbrida com fusão RRF (vetorial + BM25)"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

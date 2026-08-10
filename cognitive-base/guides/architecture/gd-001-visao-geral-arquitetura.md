@@ -2,7 +2,7 @@
 id: gd-001
 type: architecture-overview
 title: "Visão geral da arquitetura do CodeSteer Atlas"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

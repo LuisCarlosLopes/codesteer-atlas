@@ -2,7 +2,7 @@
 id: dec-004
 type: adr
 title: "Índice e embeddings 100% locais — sem envio de código externo"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

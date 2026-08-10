@@ -2,7 +2,7 @@
 id: sys-002
 type: service
 title: "StorageBackend — LanceDB, FTS e busca híbrida"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

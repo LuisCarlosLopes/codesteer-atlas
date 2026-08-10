@@ -1,0 +1,36 @@
+name: Doc Quality
+
+# Valida a Base Cognitiva (cognitive-base/) com o script do plugin/cb-audit.
+# Falha o CI apenas em problemas críticos: front matter, IDs duplicados,
+# wikilinks quebrados. Atenção/sugestão são reportados sem quebrar o build.
+#
+# Script: cognitive-base/.github/scripts/validate_kb.py
+# Local:  python cognitive-base/.github/scripts/validate_kb.py
+
+on:
+  pull_request:
+    paths:
+      - "cognitive-base/**"
+      - ".github/workflows/doc-quality.yml"
+  push:
+    branches: [main]
+    paths:
+      - "cognitive-base/**"
+      - ".github/workflows/doc-quality.yml"
+
+concurrency:
+  group: doc-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate cognitive-base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar Base Cognitiva
+        run: python3 cognitive-base/.github/scripts/validate_kb.py --base cognitive-base

@@ -2,7 +2,7 @@
 id: ops-003
 type: runbook
 title: "Runbook — manifest com versão incompatível"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

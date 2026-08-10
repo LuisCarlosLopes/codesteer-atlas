@@ -2,7 +2,7 @@
 id: dec-003
 type: adr
 title: "Indexação incremental por hash sha256 de arquivos"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

@@ -16,3 +16,4 @@
 - [ ] Imports críticos validados (`uv run python deploy_mcp.py --check`)
 - [ ] Nenhum segredo, token ou `.env` incluído no diff
 - [ ] Comportamento offline/local preservado (sem envio de código a serviços externos)
+- [ ] Se tocou `cognitive-base/**`: `doc-quality` passa (`python cognitive-base/.github/scripts/validate_kb.py`)

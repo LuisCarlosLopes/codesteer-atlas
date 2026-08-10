@@ -2,7 +2,7 @@
 id: dec-005
 type: adr
 title: "Backend de embeddings fastembed (ONNX) em vez de PyTorch"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"

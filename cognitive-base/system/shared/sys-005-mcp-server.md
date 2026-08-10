@@ -2,7 +2,7 @@
 id: sys-005
 type: service
 title: "Servidor MCP FastMCP — ferramentas atlas_*"
-status: draft
+status: approved
 created: "2026-06-17"
 updated: "2026-06-17"
 author: "@luiscarloslopes"
