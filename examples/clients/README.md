@@ -1,8 +1,12 @@
 # Manifests de cliente MCP
 
-Manifests prontos para registrar o CodeSteer Atlas em cada cliente MCP. Todos usam o modo remoto
-(`uvx` a partir do repositório git), sem caminhos absolutos — copie o arquivo para o destino
-indicado abaixo e reinicie o cliente.
+Manifests prontos para registrar o CodeSteer Atlas **na raiz do seu projeto**.
+Todos usam modo remoto (`uvx` a partir do GitHub), sem caminhos absolutos.
+
+> **Não copie para a configuração global do editor.** Plugins/MCP globais
+> costumam iniciar o servidor fora da raiz do projeto, e o Atlas não consegue
+> inferir de forma confiável a pasta `.code-index`. Prefira sempre o destino
+> por projeto na tabela abaixo (ou plugin com escopo *project*/*local*).
 
 | Cliente | Arquivo | Destino no seu projeto |
 | --- | --- | --- |
@@ -11,17 +15,16 @@ indicado abaixo e reinicie o cliente.
 | Kiro | [`kiro/settings/mcp.json`](kiro/settings/mcp.json) | `.kiro/settings/mcp.json` |
 | OpenCode | [`opencode/opencode.json`](opencode/opencode.json) | `opencode.json` |
 
-Não é necessário configurar `--index-dir` nem `ATLAS_INDEX_DIR`: o servidor descobre a pasta
-`.code-index` na raiz do projeto por busca ascendente a partir do CWD e, quando o cliente suporta
-a capability `roots`, também a partir do workspace informado. Consulte `atlas_status` →
-`index_resolution` para ver qual origem foi usada.
-
-Depois de registrar o servidor, indexe o workspace uma vez:
+Depois de registrar, indexe o workspace uma vez na raiz do projeto:
 
 ```bash
 uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
 ```
 
-Para Claude Code, Claude Desktop e Cline, veja as seções correspondentes no
-[README](../../README.md#instalação) e em
-[CONTRIBUTING.md](../../CONTRIBUTING.md#configuração-manual-em-outros-clientes).
+Se o índice não for encontrado (ex.: Cursor com CWD = `$HOME`), defina
+`ATLAS_INDEX_DIR` no manifest do projeto — o exemplo do Cursor já inclui
+`${workspaceFolder}/.code-index`. Consulte `atlas_status` → `index_resolution`.
+
+Para Claude Code (plugin com `--scope project|local` ou `.mcp.json` na raiz),
+veja o [README](../../README.md#1-conectar-o-mcp-no-seu-projeto). Detalhes
+avançados: [CONTRIBUTING.md](../../CONTRIBUTING.md#configuração-manual-em-outros-clientes).

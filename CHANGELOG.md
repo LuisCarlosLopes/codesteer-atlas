@@ -9,6 +9,14 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Removed**).
 
+### Changed
+
+- **README simplificado para setup:** fluxo em 3 passos; aviso explícito contra
+  plugin/MCP em escopo **global** (não dá para inferir `.code-index` do projeto
+  com confiança); instrução para instalar o plugin no **projeto atual**
+  (`--scope project|local`) ou configurar via `mcp.json` na raiz. Exemplo do
+  Cursor passa a incluir `ATLAS_INDEX_DIR=${workspaceFolder}/.code-index`.
+
 ### Fixed
 
 - **`uvx --from git+... atlas-index` quebrava no primeiro arquivo** com

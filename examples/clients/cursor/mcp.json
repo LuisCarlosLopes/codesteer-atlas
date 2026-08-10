@@ -6,7 +6,10 @@
         "--from",
         "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
         "atlas-serve"
-      ]
+      ],
+      "env": {
+        "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index"
+      }
     }
   }
 }

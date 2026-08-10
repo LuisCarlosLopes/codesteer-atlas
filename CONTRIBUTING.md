@@ -142,17 +142,19 @@ claude mcp add codesteer-atlas -- uvx --from git+https://github.com/LuisCarlosLo
 claude mcp add codesteer-atlas -- atlas-serve --index-dir /caminho/para/.code-index
 ```
 
-Ou adicione manualmente em `.mcp.json` (na raiz do projeto) ou na config global do Claude Code, usando um dos blocos JSON acima dentro de `mcpServers.codesteer-atlas`.
+Ou adicione manualmente em `.mcp.json` **na raiz do projeto** (prefira isso à config global do Claude Code), usando um dos blocos JSON acima dentro de `mcpServers.codesteer-atlas`. Instalação via plugin: use `--scope project` ou `--scope local` — não `user`.
 
 ### Cursor
 
-Este repositório já inclui um [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos). Copie esse arquivo para `.cursor/mcp.json` na raiz do seu projeto (ou para `~/.cursor/mcp.json` para configuração global) e reinicie o Cursor.
+Este repositório já inclui um [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json) pronto, em modo remoto (`uvx`), com `ATLAS_INDEX_DIR=${workspaceFolder}/.code-index`. Copie esse arquivo para `.cursor/mcp.json` **na raiz do seu projeto** e reinicie o Cursor.
 
-Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
+> **Não use `~/.cursor/mcp.json` (global).** O Cursor costuma iniciar MCPs com CWD = `$HOME`; sem `${workspaceFolder}` o Atlas não amarra o índice ao projeto aberto. Veja o aviso no [README](README.md#1-conectar-o-mcp-no-seu-projeto).
+
+Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima (mantendo o `env.ATLAS_INDEX_DIR`).
 
 ### OpenCode
 
-Crie/edite `opencode.json` na raiz do projeto (ou `~/.config/opencode/opencode.json` para configuração global):
+Crie/edite `opencode.json` **na raiz do projeto** (não na config global):
 
 ```json
 {
@@ -177,7 +179,7 @@ Crie/edite `opencode.json` na raiz do projeto (ou `~/.config/opencode/opencode.j
 
 ### Kiro
 
-Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` na raiz do seu projeto (ou para a configuração global do Kiro) e reinicie.
+Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` **na raiz do seu projeto** (não na config global do Kiro) e reinicie.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
 
