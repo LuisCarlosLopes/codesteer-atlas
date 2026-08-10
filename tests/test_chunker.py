@@ -485,9 +485,14 @@ def test_verify_parser_api_aceita_api_classica_bytes():
     from codesteer_atlas.chunker import ASTChunker, _CompatNode, _CompatParser
 
     class _Point:
+        """Simula tree_sitter.Point clássico (indexável; .row também existe)."""
+
         def __init__(self, row, column):
             self.row = row
             self.column = column
+
+        def __getitem__(self, index):
+            return (self.row, self.column)[index]
 
     class _ClassicNode:
         def __init__(self, node_type="module", children=None, start=(0, 0), end=(0, 1)):

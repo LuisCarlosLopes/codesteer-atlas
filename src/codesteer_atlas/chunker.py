@@ -48,6 +48,33 @@ class IncompatibleParserError(RuntimeError):
     """
 
 
+class _Point:
+    """Posição (row, column) desacoplada do `tree_sitter.Point` nativo."""
+
+    __slots__ = ("row", "column")
+
+    def __init__(self, row: int, column: int):
+        self.row = row
+        self.column = column
+
+
+def _normalize_point(point) -> _Point:
+    """
+    Extrai row/column sem usar `Point.row` da API clássica do tree-sitter.
+
+    Com tree-sitter ≥0.26 + language-pack ≥1.13 (Parser clássico que o
+    `uvx --from git+...` resolve ao ignorar o uv.lock), acessar `Point.row`
+    no meio do walk da AST pode corromper o estado nativo no Windows e
+    abortar o processo com access violation no próximo `child()`. A
+    indexação `point[0]`/`point[1]` é segura nesse binding; a API nativa
+    do language-pack 1.8–1.12 expõe `.row` sem `__getitem__`.
+    """
+    try:
+        return _Point(point[0], point[1])
+    except TypeError:
+        return _Point(point.row, point.column)
+
+
 class _CompatParser:
     """Normaliza parser nativo (str) e clássico (bytes) numa API única."""
 
@@ -56,20 +83,26 @@ class _CompatParser:
         self.classic = classic
 
     def parse(self, source_text: str):
-        tree = (
-            self._parser.parse(source_text.encode("utf-8"))
-            if self.classic
-            else self._parser.parse(source_text)
-        )
+        if self.classic:
+            # Mantém os bytes vivos pelo lifetime da Tree (input emprestado).
+            source_bytes = source_text.encode("utf-8")
+            tree = self._parser.parse(source_bytes)
+            if tree is None:
+                return None
+            return _CompatTree(tree, classic=True, source_bytes=source_bytes)
+
+        tree = self._parser.parse(source_text)
         if tree is None:
             return None
-        return _CompatTree(tree, classic=self.classic)
+        return _CompatTree(tree, classic=False)
 
 
 class _CompatTree:
-    def __init__(self, tree, *, classic: bool):
+    def __init__(self, tree, *, classic: bool, source_bytes: Optional[bytes] = None):
         self._tree = tree
         self.classic = classic
+        # Referência explícita evita UAF se o binding clássico só emprestar o buffer.
+        self._source_bytes = source_bytes
 
     def root_node(self):
         raw = self._tree.root_node if self.classic else self._tree.root_node()
@@ -100,10 +133,14 @@ class _CompatNode:
         return self._node.end_byte if self.classic else self._node.end_byte()
 
     def start_position(self):
-        return self._node.start_point if self.classic else self._node.start_position()
+        if self.classic:
+            return _normalize_point(self._node.start_point)
+        return self._node.start_position()
 
     def end_position(self):
-        return self._node.end_point if self.classic else self._node.end_position()
+        if self.classic:
+            return _normalize_point(self._node.end_point)
+        return self._node.end_position()
 
 
 def _installed_language_pack_version() -> str:
