@@ -4,11 +4,13 @@ type: adr
 title: "Busca híbrida com fusão RRF (vetorial + BM25)"
 status: approved
 created: "2026-06-17"
-updated: "2026-06-17"
+updated: "2026-08-19"
 author: "@luiscarloslopes"
 links:
   - id: sys-002
     rel: related-to
+  - id: dec-007
+    rel: extended-by
 tags: [busca, rrf, arquitetura]
 source: greenfield
 migration_status: ""
@@ -48,9 +50,11 @@ com constante `RRF_K` definida em `config.py`.
 
 - [[sys-002-storage-backend]] — implementação da busca híbrida
 - [[gd-001-visao-geral-arquitetura]] — posição no pipeline
+- [[dec-007-rerank-pos-rrf]] — adiciona a reordenação pós-RRF e a poda de stopwords no braço BM25
 
 ## Histórico
 
 | Versão | Data       | Autor            | Descrição |
 | ------ | ---------- | ---------------- | --------- |
 | 1.0.0  | 2026-06-17 | @luiscarloslopes | Criação   |
+| 1.1.0  | 2026-08-19 | @luiscarloslopes | Link para dec-007, que estende a fusão para três braços |

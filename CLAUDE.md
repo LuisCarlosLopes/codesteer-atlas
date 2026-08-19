@@ -125,6 +125,39 @@ The `.code-index` directory location is resolved at startup, in order, by `resol
 
 When the server is registered **globally as a plugin** (Copilot, Cursor, Kiro), it is often launched with CWD = HOME and without those editor env vars, so the startup chain lands on a fallback. To recover without any per-project config, each tool then performs a one-time, per-process **MCP roots** upgrade via `_resolve_index_dir_via_roots(ctx)`: it requests the client's workspace roots (`roots/list`) and re-resolves `.code-index` from there (`roots` when an existing index is found by ascending discovery, `roots-fallback` when none exists yet — pointing the index at `<root>/.code-index` so `atlas_index` creates it inside the project, not HOME). The roots step only runs when startup resolution landed on a fallback (never overriding `cli-arg`/`env`/`discovery`/`editor-project-dir`), is best-effort (clients without `roots` support fall back gracefully, with a `ROOTS_LIST_TIMEOUT_S` guard), and the chosen source is reported in `atlas_status` → `index_resolution`. The sync→async bridge uses `anyio.from_thread.run`, valid because FastMCP runs sync tools in a worker thread via `anyio.to_thread.run_sync`.
 
+### Search ranking: post-RRF rerank + lexical stopword pruning (DECISAO-007)
+
+`search_hybrid` fuses two arms via RRF — **vector** (cosine over MiniLM embeddings) and **fts**
+(BM25 over `content`) — then reorders the result before cutting to `top_k`:
+
+- **`ranking.rerank` reorders a pool** of `min(top_k * RERANK_POOL_MULTIPLIER, CANDIDATES_LIMIT)`
+  by title/proximity/phrase boost, RRF score as tiebreak, then cuts to `top_k`. Letting the boost
+  dominate (rather than merely weighting the RRF score) is deliberate: both alternatives measured
+  worse across all four query classes. `ATLAS_RERANK=0` disables it.
+- **`SearchResult.match_arms`** reports which arms retrieved each chunk, so a caller can tell
+  consensus from a single-arm hit.
+
+Measured on one index (1482 chunks, 28 queries): total MRR 0.306 → 0.457, recall@5 0.464 → 0.607,
+no class regressing — **all of it from the rerank**. Pruning stopwords from the BM25 query text was
+tried and dropped: its effect is ±0.002, indistinguishable from zero against a bootstrap CI of
+±0.07. `QUERY_STOPWORDS` survives because `ranking.query_terms` needs it to keep generic words from
+earning a title boost.
+
+**Any change to ranking must be measured**, not argued: run `scripts/eval_search.py` against
+`tests/eval/golden_queries.yaml` and compare per class to `tests/eval/baseline.json`. A global mean
+hides a change that helps literal matching while hurting natural language — which is exactly what
+happened twice while building this. `tests/eval/` is excluded via `.atlasignore` so the answer key
+never enters the corpus being searched.
+
+Two traps this eval already fell into, both worth re-reading before trusting a number:
+
+1. **`query_type="fts"` without `fts_columns` searches every FTS-indexed column.** A discarded
+   prototype left a second FTS index on the table, and every "before" measurement taken against
+   that index was silently inflated. Re-capture `baseline.json` on an index free of the
+   experiment's artifacts, not merely with the code reverted.
+2. **The golden set targets this repo**, so the corpus moves whenever the source does. Compare only
+   old-vs-new on one index, and prefer a frozen external corpus for serious ranking work.
+
 ### Incremental indexing (DECISAO-005 / [J])
 
 `index_workspace()` compares per-file sha256 hashes against `manifest.files` to skip unchanged files. Changed/deleted files have their old chunks removed from LanceDB (`delete_by_file_paths`) before new chunks are appended (`append_chunks`). A full reindex (no existing manifest, or `--full` without `paths`) instead overwrites the table entirely via `store_chunks`.

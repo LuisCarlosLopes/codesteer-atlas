@@ -19,6 +19,49 @@ RRF_K = 60
 # Aplicado COM prefilter (where) para garantir top_k completos mesmo com filtros seletivos [E]
 CANDIDATES_LIMIT = 50
 
+# Quantos candidatos além de `top_k` entram na reordenação pós-RRF. Reordenar
+# exatamente `top_k` só embaralharia o que já estava correto; o ganho vem de
+# promover um acerto da posição ~12 para dentro do top 5. Limitado por
+# CANDIDATES_LIMIT, que é o teto do que cada braço trouxe.
+RERANK_POOL_MULTIPLIER = 4
+
+# Variável de ambiente que desliga a reordenação pós-RRF (valor "0"), voltando ao
+# RRF puro. Existe para A/B no harness de avaliação e para rollback sem redeploy.
+RERANK_ENV_FLAG = "ATLAS_RERANK"
+
+# Termos ignorados pela reordenação pós-RRF ao calcular boost de título e proximidade:
+# aparecem em quase todo chunk e dariam boost a candidato irrelevante. Cobre pt-BR,
+# inglês e genéricos de código. Comparação sobre o token normalizado (minúsculo, sem
+# acento) por `ranking.fold`.
+#
+# Deliberadamente NÃO são podados da query enviada ao BM25: medido, isso não melhora
+# nada (−0.002 de MRR total) e piora a classe de linguagem natural.
+QUERY_STOPWORDS = frozenset(
+    {
+        # pt-BR — artigos, preposições, conectivos, interrogativos
+        "a", "as", "o", "os", "um", "uma", "uns", "umas",
+        "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas",
+        "por", "para", "pra", "com", "sem", "sob", "sobre", "entre", "ate",
+        "ao", "aos", "e", "ou", "que", "se", "ser", "sao", "eh", "esta", "estao",
+        "como", "qual", "quais", "quando", "onde", "quem", "porque", "qro",
+        "isso", "isto", "esse", "essa", "este", "aquilo", "seu", "sua",
+        "mais", "menos", "muito", "pouco", "todo", "toda", "todos", "todas",
+        "ja", "nao", "sim", "tambem", "so", "apenas", "cada", "outro", "outra",
+        # inglês — "a"/"as"/"do" já entraram na seção pt-BR acima
+        "the", "an", "and", "or", "of", "in", "on", "at", "to", "for",
+        "from", "with", "without", "by", "is", "are", "was", "were",
+        "be", "been", "it", "its", "this", "that", "these", "those", "there",
+        "how", "what", "which", "when", "where", "who", "why", "does",
+        "did", "can", "should", "would", "into", "over", "than", "then",
+        # genéricos de código — presentes em quase todo chunk, sem poder discriminante
+        "def", "class", "function", "funcao", "method", "metodo", "return",
+        "retorna", "self", "value", "valor", "data", "dado", "dados",
+        "code", "codigo", "file", "arquivo", "arquivos", "test", "teste",
+        "update", "atualiza", "fix", "corrige", "add", "adiciona",
+        "get", "set", "new", "novo", "nova", "usar", "usa", "using",
+    }
+)
+
 # Versão mínima de manifest aceita pelo server; manifests anteriores usam backend
 # de embeddings incompatível (sentence-transformers/torch) e exigem reindexação
 MIN_INDEX_VERSION = "2.0.0"

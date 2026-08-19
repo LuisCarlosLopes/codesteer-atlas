@@ -1851,3 +1851,37 @@ def test_atlas_search_omits_warnings_when_healthy():
     result = _search_with_outcome(SearchOutcome(results=[_DEGRADED_RESULT]))
 
     assert "warnings" not in result
+
+
+def test_atlas_search_expoe_match_arms():
+    """`match_arms` diz ao chamador se o acerto teve consenso entre braços ou veio de um só."""
+    mock_results = [
+        SearchResult(
+            file_path="src/storage.py",
+            start_line=1,
+            end_line=20,
+            scope_type="method",
+            scope_name="StorageBackend.search_hybrid",
+            language="python",
+            content="def search_hybrid(self): pass",
+            score=0.2,
+            repo="my-project",
+            match_arms=["vector", "fts"],
+        )
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+    ):
+        result = json.loads(atlas_search(query="search_hyb", top_k=1))
+
+    assert result["results"][0]["match_arms"] == ["vector", "fts"]
+
