@@ -501,14 +501,21 @@ def atlas_search(
 
     Returns:
         JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
-        and `content` only when include_content=true), `total_chunks_searched`, and
-        `query_time_ms`. Markdown results may also include `markdown_references`
+        `match_arms`, and `content` only when include_content=true),
+        `total_chunks_searched`, and `query_time_ms`.
+
+        `match_arms` names which arms of the hybrid search retrieved the chunk:
+        `vector` (semantic) and/or `fts` (BM25). A hit found by both arms had consensus
+        between them; a hit from a single arm is weaker evidence and worth confirming
+        before acting on it.
+
+        Markdown results may also include `markdown_references`
         ({file_path, anchor, resolved_section}) for links to other `.md` files.
         Code results may include `rationale_refs` ({kind, key, note_path?, text?, candidates?}).
 
         A `warnings` array appears ONLY when the hybrid search ran degraded:
         `fts_unavailable` (BM25 arm failed — results are vector-only, so exact symbol
-        and error-string matches may be missing) or `vector_search_unavailable`
+        and error-string matches may be missing), `vector_search_unavailable`
         (semantic arm failed — results are keyword-only, so paraphrased queries may miss).
         Treat a degraded result as incomplete: reindex with `atlas_index(full=true)`
         before concluding that something does not exist in the codebase. When both arms
@@ -576,6 +583,7 @@ def atlas_search(
             "language": r.language,
             "score": r.score,
             "repo": r.repo,
+            "match_arms": r.match_arms,
         }
         if include_content:
             item["content"] = r.content

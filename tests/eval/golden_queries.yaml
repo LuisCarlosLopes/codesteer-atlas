@@ -1,0 +1,162 @@
+# Golden set de avaliação do ranking de `atlas_search`.
+#
+# Cada entrada declara uma query e os alvos aceitáveis (file_path + scope_name).
+# A expectativa NUNCA é ancorada em número de linha: o alvo é o próprio repo do
+# Atlas e ele evolui. `scripts/eval_search.py` valida que todo alvo declarado
+# ainda existe no índice e falha alto quando um alvo apodrece.
+#
+# As quatro classes existem para separar ganho de perda: uma métrica agregada
+# esconderia um rerank que melhora casamento literal enquanto piora linguagem
+# natural. O critério de aceite é por classe, não no total.
+
+queries:
+  # ── linguagem natural: intenção descrita, sem citar o símbolo ──
+  - query: "como o diretório do índice é resolvido no startup do servidor"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/server.py", scope_name: "resolve_index_dir"}
+
+  - query: "fusão dos rankings vetorial e textual em uma lista só"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend.search_hybrid"}
+
+  - query: "carregar o modelo de embedding só na primeira chamada"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/embeddings.py", scope_name: "EmbeddingEngine._load_model"}
+      - {file_path: "src/codesteer_atlas/embeddings.py", scope_name: "EmbeddingEngine"}
+
+  - query: "decidir se um arquivo deve ser pulado durante a varredura"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "should_ignore"}
+
+  - query: "impedir que duas reindexações rodem ao mesmo tempo"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/locking.py", scope_name: "reindex_lock"}
+      - {file_path: "src/codesteer_atlas/locking.py", scope_name: "is_reindex_locked"}
+
+  - query: "menor caminho entre dois nós do grafo"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "bfs_path"}
+
+  - query: "gravar o manifesto sem risco de leitura parcial"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "_write_manifest_atomic"}
+
+  - query: "transformar o título de uma seção em âncora de link"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/markdown_links.py", scope_name: "slugify_heading"}
+
+  # ── símbolo exato: o nome completo, como o usuário digitaria ──
+  - query: "search_hybrid"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend.search_hybrid"}
+
+  - query: "EmbeddingEngine"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/embeddings.py", scope_name: "EmbeddingEngine"}
+
+  - query: "build_and_write_incremental"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "build_and_write_incremental"}
+
+  - query: "load_atlasignore_spec"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "load_atlasignore_spec"}
+
+  - query: "IndexProgressReporter"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "IndexProgressReporter"}
+
+  - query: "resolve_module_path"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "resolve_module_path"}
+
+  - query: "_build_where_clause"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend._build_where_clause"}
+
+  # ── identificador parcial: a lacuna que justifica o braço ngram ──
+  - query: "search_hyb"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend.search_hybrid"}
+
+  - query: "atlasignore_spec"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "load_atlasignore_spec"}
+
+  - query: "slugify"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/markdown_links.py", scope_name: "slugify_heading"}
+
+  - query: "EmbeddingEng"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/embeddings.py", scope_name: "EmbeddingEngine"}
+
+  - query: "build_and_write_incr"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "build_and_write_incremental"}
+
+  - query: "where_clause"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend._build_where_clause"}
+
+  - query: "ProgressReporter"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "IndexProgressReporter"}
+
+  - query: "chunk_to_row"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend._chunk_to_row"}
+
+  # ── conceito cross-file: o alvo pode morar em mais de um lugar ──
+  - query: "reciprocal rank fusion"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend.search_hybrid"}
+
+  - query: "parsing de AST com tree-sitter"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/chunker.py", scope_name: "ASTChunker"}
+      - {file_path: "src/codesteer_atlas/chunker.py", scope_name: "ASTChunker._get_parser"}
+
+  - query: "indexação incremental comparando hash sha256 dos arquivos"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "_hash_file_content"}
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "index_workspace"}
+      - {file_path: "src/codesteer_atlas/indexer.py", scope_name: "_index_workspace_locked"}
+
+  - query: "briefing ranqueado do projeto para orientação inicial"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/brief.py", scope_name: "build_brief"}
+      - {file_path: "src/codesteer_atlas/brief.py", scope_name: "build_and_write_brief"}
+
+  - query: "arquivos mais conectados do grafo de imports"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "hubs"}
+      - {file_path: "src/codesteer_atlas/brief.py", scope_name: "_compute_hubs"}

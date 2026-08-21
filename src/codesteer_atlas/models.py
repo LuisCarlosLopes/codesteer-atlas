@@ -86,6 +86,12 @@ class SearchResult(BaseModel):
     score: float
     repo: str
     references: List[str] = Field(default_factory=list)
+    match_arms: List[str] = Field(
+        default_factory=list,
+        description="Braços da busca híbrida que recuperaram este chunk:"
+        " 'vector' (semântico) e/ou 'fts' (BM25). Um resultado presente nos dois"
+        " braços teve consenso entre eles",
+    )
 
 
 class SearchOutcome(BaseModel):

@@ -953,3 +953,73 @@ def test_search_hybrid_healthy_index_has_no_warnings(temp_storage):
 
     assert outcome.warnings == []
     assert len(outcome.results) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proveniência de match e reordenação pós-RRF
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_identifier_chunks(storage):
+    """Chunks cujo nome de símbolo é longo o bastante para exercitar trigramas."""
+    chunks = [
+        CodeChunk(
+            id="n1",
+            file_path="src/storage.py",
+            repo="test-project",
+            start_line=1,
+            end_line=20,
+            scope_type="method",
+            scope_name="StorageBackend.search_hybrid",
+            language="python",
+            content="def search_hybrid(self): ...",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=VEC_B,
+        ),
+        CodeChunk(
+            id="n2",
+            file_path="src/other.py",
+            repo="test-project",
+            start_line=1,
+            end_line=5,
+            scope_type="function",
+            scope_name="totalmente_diferente",
+            language="python",
+            content="def totalmente_diferente(): ...",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=VEC_A,
+        ),
+    ]
+    storage.store_chunks(chunks)
+
+
+
+
+def test_match_arms_registra_origem_do_resultado(temp_storage):
+    _seed_two_chunks(temp_storage)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+
+    assert outcome.results
+    for resultado in outcome.results:
+        assert resultado.match_arms
+        assert set(resultado.match_arms) <= {"vector", "fts"}
+
+
+
+
+def test_rerank_desligado_por_env_preserva_ordem_do_rrf(temp_storage, monkeypatch):
+    _seed_identifier_chunks(temp_storage)
+
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    sem_rerank = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+
+    # Com o rerank desligado a ordem é estritamente decrescente em score RRF
+    scores = [r.score for r in sem_rerank.results]
+    assert scores == sorted(scores, reverse=True)
+
+

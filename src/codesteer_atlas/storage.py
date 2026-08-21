@@ -12,11 +12,19 @@ from codesteer_atlas.config import (
     CURRENT_INDEX_VERSION,
     DEFAULT_INDEX_DIR,
     MIN_INDEX_VERSION,
+    RERANK_ENV_FLAG,
+    RERANK_POOL_MULTIPLIER,
     RRF_K,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
 from codesteer_atlas.models import CodeChunk, IndexManifest, SearchOutcome, SearchResult
+from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
+
+
+def _rerank_enabled() -> bool:
+    """Lê o interruptor de reordenação a cada busca, para que o A/B não exija reinício."""
+    return os.environ.get(RERANK_ENV_FLAG, "1") != "0"
 
 
 def _write_manifest_atomic(manifest_path: Path, manifest: IndexManifest) -> None:
@@ -68,6 +76,7 @@ class StorageBackend:
         row["references_json"] = encode_references_json(chunk.references)
         row.pop("references", None)
         return row
+
 
     def exists(self) -> bool:
         """Verifica se o índice e o banco de dados LanceDB existem."""
@@ -278,6 +287,9 @@ class StorageBackend:
         seletivos (repo/language/path_prefix) sempre retornem `top_k` resultados
         quando existem matches suficientes (DECISAO-003).
 
+        A reordenação pós-RRF roda sobre um pool maior que `top_k`, e a regra veio de
+        medição no golden set, não de intuição. Veja CLAUDE.md (DECISAO-007).
+
         A falha de um braço isolado degrada a busca em vez de derrubá-la, mas é
         reportada em `SearchOutcome.warnings` — degradação silenciosa aqui significa
         resultado pior sem nenhum sinal para o chamador. Se os DOIS braços falharem,
@@ -330,6 +342,7 @@ class StorageBackend:
                 file=sys.stderr,
             )
 
+
         if vector_error is not None and fts_error is not None:
             raise RuntimeError(
                 "Os dois braços da busca híbrida falharam, o índice provavelmente está "
@@ -343,31 +356,37 @@ class StorageBackend:
         # score = sum(1 / (rank + k))
         rrf_scores: Dict[str, float] = {}
         items_by_id: Dict[str, Dict[str, Any]] = {}
+        # Qual braço recuperou cada chunk. Vira `SearchResult.match_arms` para que o
+        # chamador saiba se o acerto teve consenso entre braços ou veio de um só.
+        arms_by_id: Dict[str, List[str]] = {}
 
-        # Processa ranking vetorial
-        for rank, item in enumerate(vector_results):
-            chunk_id = item["id"]
-            items_by_id[chunk_id] = item
+        def _fuse(results: List[Dict[str, Any]], arm: str) -> None:
+            for rank, item in enumerate(results):
+                chunk_id = item["id"]
+                if chunk_id not in items_by_id:
+                    items_by_id[chunk_id] = item
+                arms_by_id.setdefault(chunk_id, []).append(arm)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (rank + RRF_K))
 
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (rank + RRF_K))
-
-        # Processa ranking léxico (FTS)
-        for rank, item in enumerate(text_results):
-            chunk_id = item["id"]
-            if chunk_id not in items_by_id:
-                items_by_id[chunk_id] = item
-
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (rank + RRF_K))
+        _fuse(vector_results, "vector")
+        _fuse(text_results, "fts")
 
         # Ordena os ids de chunks baseados no score RRF decrescente
         sorted_chunk_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
 
-        # Monta a lista final dos top_k SearchResults
-        final_results = []
-        for chunk_id in sorted_chunk_ids[:top_k]:
+        # Reordena um pool maior que `top_k` antes do corte: o ganho da reordenação
+        # vem justamente de promover um acerto que o RRF deixou logo abaixo da linha.
+        pool_size = (
+            min(top_k * RERANK_POOL_MULTIPLIER, CANDIDATES_LIMIT)
+            if _rerank_enabled()
+            else top_k
+        )
+
+        pool = []
+        for chunk_id in sorted_chunk_ids[:pool_size]:
             item = items_by_id[chunk_id]
 
-            final_results.append(
+            pool.append(
                 SearchResult(
                     file_path=item["file_path"],
                     start_line=item["start_line"],
@@ -379,10 +398,14 @@ class StorageBackend:
                     score=float(rrf_scores[chunk_id]),
                     repo=item["repo"],
                     references=decode_references_json(item.get("references_json")),
+                    match_arms=arms_by_id.get(chunk_id, []),
                 )
             )
 
-        return SearchOutcome(results=final_results, warnings=warnings)
+        if _rerank_enabled():
+            pool = rerank(pool, query_text)
+
+        return SearchOutcome(results=pool[:top_k], warnings=warnings)
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """

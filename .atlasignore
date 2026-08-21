@@ -1,1 +1,4 @@
 _codesteer/**
+# O golden set contém as queries e os nomes dos símbolos esperados — indexá-lo
+# colocaria o gabarito dentro do corpus avaliado.
+tests/eval/

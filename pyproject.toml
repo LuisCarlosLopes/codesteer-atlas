@@ -39,6 +39,10 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
+    # Usado só pelo harness de avaliação (scripts/eval_search.py) para ler o
+    # golden set. Declarado explicitamente para não depender de resolução
+    # transitiva via fastembed/huggingface-hub.
+    "pyyaml>=6.0",
 ]
 
 [tool.ruff]
