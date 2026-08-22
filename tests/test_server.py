@@ -1885,3 +1885,190 @@ def test_atlas_search_expoe_match_arms():
 
     assert result["results"][0]["match_arms"] == ["vector", "fts"]
 
+
+
+def test_ca31_docstring_de_atlas_graph_declara_o_truncamento():
+    """
+    CA31 — uma lista capada lida como exaustiva é pior que uma lista grande. A
+    documentação exposta da tool precisa dizer que `explain` trunca e que
+    `omitted` reporta o corte.
+    """
+    doc = atlas_graph.__doc__ or ""
+
+    assert "omitted" in doc
+    assert "truncated" in doc
+
+
+def test_atlas_graph_hubs_ordena_todos_os_nos_e_ignora_top_hubs(tmp_path):
+    """
+    A tool aceita `top_n` até 50 enquanto `metrics.top_hubs` é capado em 25.
+    O fixture abaixo tem `top_hubs` com um único item, deliberadamente
+    inconsistente com os nós: se a tool voltar a lê-lo, devolve 1 e falha.
+    """
+    graph = {
+        "nodes": [
+            {
+                "id": f"file:pkg/mod_{i:02d}.py",
+                "kind": "file",
+                "label": f"mod_{i:02d}.py",
+                "file_path": f"pkg/mod_{i:02d}.py",
+                "degree": 60 - i,
+            }
+            for i in range(60)
+        ],
+        "edges": [],
+        "metrics": {"top_hubs": [{"id": "file:pkg/mod_00.py", "degree": 60}]},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="hubs", top_n=50))
+
+    assert len(result["items"]) == 50
+    assert result["items"][0]["id"] == "file:pkg/mod_00.py"
+
+
+def test_atlas_graph_explain_via_tool_reporta_omitted(tmp_path):
+    """O teto e o `omitted` têm de sobreviver à serialização da tool."""
+    nodes = [
+        {
+            "id": "file:pkg/big.py",
+            "kind": "file",
+            "label": "big.py",
+            "file_path": "pkg/big.py",
+            "degree": 40,
+        }
+    ]
+    edges = []
+    for i in range(40):
+        nodes.append(
+            {
+                "id": f"sym:pkg/big.py#fn_{i:03d}",
+                "kind": "symbol",
+                "label": f"fn_{i:03d}",
+                "file_path": "pkg/big.py",
+                "lines": [i + 1, i + 2],
+                "degree": 1,
+            }
+        )
+        edges.append(
+            {"source": "file:pkg/big.py", "target": f"sym:pkg/big.py#fn_{i:03d}", "kind": "contains"}
+        )
+    graph = {"nodes": nodes, "edges": edges, "metrics": {"top_hubs": []}}
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="explain", target="file:pkg/big.py"))
+
+    assert len(result["neighbors"]["symbol"]) == 25
+    assert result["omitted"]["symbol"] == 15
+
+
+# ---------------------------------------------------------------------------
+# CA15 — leitura MCP não pode recusar índice com chunker_version velho (RF06)
+# ---------------------------------------------------------------------------
+
+
+def _index_com_chunker_version_velho(tmp_path):
+    """Índice real, com o manifest editado para uma versão anterior do produtor."""
+    from codesteer_atlas.models import CodeChunk
+    from codesteer_atlas.storage import StorageBackend
+
+    index_dir = tmp_path / ".code-index"
+    storage = StorageBackend(index_dir=index_dir)
+    storage.store_chunks(
+        [
+            CodeChunk(
+                id="c1",
+                file_path="pkg/a.py",
+                repo="demo",
+                start_line=1,
+                end_line=3,
+                scope_type="function",
+                scope_name="run",
+                language="python",
+                content="def run():\n    pass",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=[0.0] * 384,
+            )
+        ]
+    )
+    manifest_path = index_dir / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data["chunker_version"] = "0.0.1"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    return index_dir
+
+
+def test_ca15_tools_respondem_com_chunker_version_stale(tmp_path):
+    """
+    CA15 — `chunker_version` só é consultado na INDEXAÇÃO. A leitura não pode
+    recusar, degradar nem indexar sozinha por causa dele: o pior caso é um índice
+    desatualizado que se conserta na próxima indexação. [RF06 / NF07]
+    """
+    index_dir = _index_com_chunker_version_velho(tmp_path)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha"),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single",
+            return_value=[0.0] * 384,
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=[]),
+        ),
+    ):
+        status = json.loads(atlas_status())
+        search = json.loads(atlas_search(query="run", top_k=1))
+        brief = json.loads(atlas_brief(level=0))
+        graph_erro = None
+        try:
+            atlas_graph(mode="hubs", top_n=5)
+        except Exception as exc:  # graph.json pode não existir; o recusado não pode ser a versão
+            graph_erro = str(exc)
+
+    assert status["index_exists"] is True
+    assert status["total_chunks"] == 1
+    assert "chunker_version" not in json.dumps(status)
+    assert "results" in search
+    assert "identity" in brief
+    if graph_erro is not None:
+        assert "chunker" not in graph_erro.lower()
+
+
+def test_get_manifest_nao_rejeita_chunker_version_divergente(tmp_path):
+    """RE01/RF06 — só `index_version < MIN_INDEX_VERSION` derruba a leitura."""
+    from codesteer_atlas.storage import StorageBackend
+
+    index_dir = _index_com_chunker_version_velho(tmp_path)
+    manifest = StorageBackend(index_dir=index_dir).get_manifest()
+
+    assert manifest.chunker_version == "0.0.1"
+
+
+def test_atlas_index_json_sync_expoe_full_reason(tmp_path):
+    """O motivo do rebuild tem de chegar a quem chamou a tool, não só ao stderr."""
+    from codesteer_atlas.models import IndexStats
+
+    stats = IndexStats(
+        files_processed=2,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=4,
+        duration_s=1.0,
+        git_head_sha="sha",
+        full_reason="chunker_version",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.server.index_workspace", return_value=stats),
+    ):
+        payload = json.loads(atlas_index(paths=["src"], full=False))
+
+    assert payload["full_reason"] == "chunker_version"

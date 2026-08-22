@@ -67,6 +67,15 @@ QUERY_STOPWORDS = frozenset(
 MIN_INDEX_VERSION = "2.0.0"
 CURRENT_INDEX_VERSION = "2.1.0"
 
+# Versão do PRODUTOR de chunks (ASTChunker), separada de CURRENT_INDEX_VERSION de
+# propósito: o formato do índice pode ficar parado enquanto a extração melhora. É
+# comparada na INDEXAÇÃO (nunca na leitura — ver RF06) e uma divergência força
+# re-chunk completo, porque o loop incremental só olha hash de conteúdo e por isso
+# nunca alcançaria arquivos inalterados cuja extração mudou. [ADR-001]
+# Bump obrigatório sempre que a saída do chunker mudar — inclusive ao mexer em
+# CALL_NOISE_NAMES ou em MAX_CALLS_PER_CHUNK.
+CHUNKER_VERSION = "1.0.0"
+
 # Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
 ATLASIGNORE_FILENAME = ".atlasignore"
 
@@ -75,10 +84,78 @@ REINDEX_LOCK_FILENAME = ".reindex.lock"
 
 GRAPH_FILENAME = "graph.json"
 GRAPH_HTML_FILENAME = "graph.html"
+# Teto do `metrics.top_hubs` pré-computado em graph.json. NÃO limita mais a resposta
+# de `hubs()`, que ordena todos os nós no query-time (ADR-005); segue alimentando
+# viewer.py, que destaca os hubs no grafo visual.
 GRAPH_TOP_HUBS_LIMIT = 25
 GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
+
+# Tetos de `explain`. Sem eles a resposta cresce com o nó: o pior caso medido neste
+# repositório tem 398 vizinhos (~81 KB de JSON numa única resposta MCP). O corte é
+# aplicado DEPOIS da ordenação determinística, para a resposta ser estável entre
+# chamadas, e o que sobrou de fora é reportado em `omitted`. [ADR-005]
+GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND = 25
+GRAPH_EXPLAIN_MAX_NOTES = 15
+
+# Máximo de nomes de chamada guardados por chunk. Existe para o caso patológico —
+# um único símbolo de .js minificado chega a >900 nomes distintos — e por isso o
+# filtro de ruído roda ANTES do corte: builtins expulsariam chamadas de domínio.
+MAX_CALLS_PER_CHUNK = 32
+
+# Nomes descartados na extração de chamadas, antes da escada de resolução. Critério
+# de admissão (as duas condições juntas): o nome é builtin, método de protocolo, de
+# coleção/string ou idioma canônico de stdlib de alguma das seis linguagens AST — e,
+# por isso, um símbolo homônimo no índice quase nunca é o alvo real da chamada.
+#
+# Sem o filtro, o degrau "único no grafo" quase sempre acha alguém: 847 de 885 nomes
+# curtos distintos deste repositório (95,7%) são únicos. Casos reais que viram aresta
+# errada: `encode` (portador único `EmbeddingEngine.encode`, alvo real `str.encode`),
+# `exists` (`StorageBackend.exists` × `Path.exists`) e `split`/`update`/`set`/`delete`,
+# cujos portadores únicos são símbolos minificados de vendor/.
+#
+# Custo aceito e declarado: como o filtro precede a escada, uma chamada verdadeira
+# para símbolo de domínio homônimo some em TODOS os degraus. O extrator não distingue
+# os dois usos (`storage.exists()` e `Path(...).exists()` deduplicam para uma entrada
+# só), então deixá-los passar não recupera a aresta certa — produz uma aresta `exact`
+# verdadeira por coincidência. [R-CALL-04]
+#
+# Comparação por casefold: `ToString`/`toString`/`tostring` são uma entrada só.
+# Alterar esta lista exige bump de CHUNKER_VERSION.
+CALL_NOISE_NAMES = frozenset(
+    {
+        # builtins e protocolo Python
+        "print", "len", "str", "int", "float", "bool", "list", "dict", "set",
+        "tuple", "type", "repr", "range", "enumerate", "zip", "sorted", "sum",
+        "min", "max", "abs", "round", "isinstance", "issubclass", "getattr",
+        "setattr", "hasattr", "super", "open", "next", "iter", "format",
+        "dumps", "loads", "dump", "load",
+        # coleções e strings (multi-linguagem)
+        "append", "extend", "insert", "pop", "remove", "clear", "copy", "keys",
+        "values", "items", "entries", "get", "add", "put", "push", "shift",
+        "unshift", "sort", "reverse", "index", "indexof", "count", "size",
+        "length", "contains", "has", "join", "split", "slice", "splice",
+        "concat", "replace", "strip", "trim", "startswith", "endswith",
+        "lower", "upper", "tolower", "toupper", "tolowercase", "touppercase",
+        "isempty", "update", "delete",
+        # E/S e serialização
+        "read", "write", "close", "exists", "encode", "decode", "stringify",
+        "tostring", "log",
+        # JS/TS
+        "map", "filter", "reduce", "foreach", "find", "includes", "then",
+        "catch", "bind", "call", "apply", "require",
+        # Go
+        "make", "new", "cap", "panic", "recover", "printf", "println",
+        "sprintf", "errorf", "error",
+        # C#/LINQ
+        "writeline", "any", "all", "select", "where", "orderby", "tolist",
+        "toarray", "firstordefault", "dispose", "gethashcode",
+        # Java
+        "equals", "hashcode", "valueof", "getmessage", "printstacktrace",
+        "getclass", "stream", "collect", "of",
+    }
+)
 
 # Briefing pré-computado do projeto (atlas_brief). Todos os limites abaixo existem para
 # garantir custo de token com teto fixo, independente do tamanho do repositório:

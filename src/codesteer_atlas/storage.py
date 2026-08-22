@@ -9,6 +9,7 @@ import lancedb
 
 from codesteer_atlas.config import (
     CANDIDATES_LIMIT,
+    CHUNKER_VERSION,
     CURRENT_INDEX_VERSION,
     DEFAULT_INDEX_DIR,
     MIN_INDEX_VERSION,
@@ -25,6 +26,43 @@ from codesteer_atlas.rationale import decode_references_json, encode_references_
 def _rerank_enabled() -> bool:
     """Lê o interruptor de reordenação a cada busca, para que o A/B não exija reinício."""
     return os.environ.get(RERANK_ENV_FLAG, "1") != "0"
+
+
+def _new_manifest(
+    *,
+    total_chunks: int,
+    repos_indexed: List[str],
+    languages_indexed: List[str],
+    git_head_sha: Optional[str],
+    files: Dict[str, str],
+    files_meta: Optional[Dict[str, list]] = None,
+    files_imports: Optional[Dict[str, list]] = None,
+) -> IndexManifest:
+    """
+    Único ponto de construção do manifest.
+
+    Existe para que os campos de versão — `index_version`, `chunker_version`,
+    `embedding_model` — não possam divergir entre o caminho de sobrescrita
+    (`store_chunks`) e o incremental (`update_manifest_after_incremental`): um
+    manifest gravado com `chunker_version` de um dos dois e não do outro faria a
+    invalidação disparar em toda execução, ou nunca. [ADR-001]
+    """
+    return IndexManifest(
+        total_chunks=total_chunks,
+        repos_indexed=repos_indexed,
+        embedding_model=FASTEMBED_MODEL_NAME,
+        embedding_dim=384,
+        embedding_backend="fastembed",
+        storage_backend="lancedb",
+        last_indexed_at=datetime.now(timezone.utc).isoformat(),
+        git_head_sha=git_head_sha,
+        languages_indexed=languages_indexed,
+        index_version=CURRENT_INDEX_VERSION,
+        chunker_version=CHUNKER_VERSION,
+        files=files,
+        files_meta=files_meta or {},
+        files_imports=files_imports or {},
+    )
 
 
 def _write_manifest_atomic(manifest_path: Path, manifest: IndexManifest) -> None:
@@ -75,6 +113,11 @@ class StorageBackend:
         row = chunk.model_dump()
         row["references_json"] = encode_references_json(chunk.references)
         row.pop("references", None)
+        # Coluna string JSON, e nao lista: espelha `references_json` e mantem o
+        # schema inferido pelo LanceDB estavel. Fica fora do FTS (indexado so em
+        # `content`) e do embedding, portanto nao toca o ranking de busca. [ADR-002]
+        row["calls_json"] = encode_references_json(chunk.calls)
+        row.pop("calls", None)
         return row
 
 
@@ -112,8 +155,6 @@ class StorageBackend:
         total_chunks = len(chunks)
         repos = list(set(chunk.repo for chunk in chunks))
         languages = list(set(chunk.language for chunk in chunks))
-        timestamp = datetime.now(timezone.utc).isoformat()
-
         # Mapa de arquivos -> hash sha256 para indexação incremental [J]
         files: Dict[str, str] = {}
         for chunk in chunks:
@@ -121,19 +162,13 @@ class StorageBackend:
             if file_hash:
                 files[chunk.file_path] = file_hash
 
-        manifest = IndexManifest(
+        manifest = _new_manifest(
             total_chunks=total_chunks,
             repos_indexed=repos,
-            embedding_model=FASTEMBED_MODEL_NAME,
-            embedding_dim=384,
-            embedding_backend="fastembed",
-            storage_backend="lancedb",
-            last_indexed_at=timestamp,
-            git_head_sha=git_head_sha,
             languages_indexed=languages,
-            index_version=CURRENT_INDEX_VERSION,
+            git_head_sha=git_head_sha,
             files=files,
-            files_meta=files_meta or {},
+            files_meta=files_meta,
         )
 
         # Salva o arquivo de metadados manifest.json (escrita atômica)
@@ -189,22 +224,14 @@ class StorageBackend:
         repos = sorted({row["repo"] for row in rows})
         languages = sorted({row["language"] for row in rows})
 
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        manifest = IndexManifest(
+        manifest = _new_manifest(
             total_chunks=total_chunks,
             repos_indexed=repos,
-            embedding_model=FASTEMBED_MODEL_NAME,
-            embedding_dim=384,
-            embedding_backend="fastembed",
-            storage_backend="lancedb",
-            last_indexed_at=timestamp,
-            git_head_sha=git_head_sha,
             languages_indexed=languages,
-            index_version=CURRENT_INDEX_VERSION,
+            git_head_sha=git_head_sha,
             files=files,
-            files_meta=files_meta or {},
-            files_imports=files_imports or {},
+            files_meta=files_meta,
+            files_imports=files_imports,
         )
 
         _write_manifest_atomic(self.manifest_path, manifest)
@@ -473,6 +500,7 @@ class StorageBackend:
             "language",
             "start_line",
             "end_line",
+            "calls_json",
             "references_json",
         ]
 
@@ -493,32 +521,37 @@ class StorageBackend:
             markdown_arrow = (
                 table.search()
                 .where("language = 'markdown'", prefilter=True)
-                .select([*base_columns[:-1], "content", base_columns[-1]])
+                .select([*base_columns[:-2], "content", *base_columns[-2:]])
                 .to_arrow()
             )
             markdown_rows = markdown_arrow.to_pylist()
             return code_rows + markdown_rows
         except Exception:
+            # Índice anterior a esta feature não tem `calls_json` (nem, em índices
+            # mais antigos, `references_json`): a projeção degrada para zero chamadas
+            # em vez de derrubar a reconstrução do grafo inteira. [RE07]
             code_arrow = (
                 table.search()
                 .where("language != 'markdown'", prefilter=True)
-                .select(base_columns[:-1])
+                .select(base_columns[:-2])
                 .to_arrow()
             )
             code_rows = code_arrow.to_pylist()
             for row in code_rows:
                 row["content"] = None
                 row["references_json"] = "[]"
+                row["calls_json"] = "[]"
 
             markdown_arrow = (
                 table.search()
                 .where("language = 'markdown'", prefilter=True)
-                .select([*base_columns[:-1], "content"])
+                .select([*base_columns[:-2], "content"])
                 .to_arrow()
             )
             markdown_rows = markdown_arrow.to_pylist()
             for row in markdown_rows:
                 row["references_json"] = "[]"
+                row["calls_json"] = "[]"
             return code_rows + markdown_rows
 
     def get_graph_projection_for_file_paths(self, file_paths: List[str]) -> List[Dict[str, Any]]:
@@ -543,17 +576,18 @@ class StorageBackend:
             "language",
             "start_line",
             "end_line",
+            "calls_json",
             "references_json",
         ]
 
         try:
             arrow_table = table.search().where(where_clause, prefilter=True).select(
-                [*base_columns[:-1], "content", base_columns[-1]]
+                [*base_columns[:-2], "content", *base_columns[-2:]]
             ).to_arrow()
             rows = arrow_table.to_pylist()
         except Exception:
             arrow_table = (
-                table.search().where(where_clause, prefilter=True).select([*base_columns[:-1], "content"]).to_arrow()
+                table.search().where(where_clause, prefilter=True).select([*base_columns[:-2], "content"]).to_arrow()
             )
             rows = arrow_table.to_pylist()
             for row in rows:

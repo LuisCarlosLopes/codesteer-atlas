@@ -26,6 +26,12 @@ class CodeChunk(BaseModel):
     references: List[str] = Field(
         default_factory=list, description="Refs de rationale persistidas no chunk"
     )
+    calls: List[str] = Field(
+        default_factory=list,
+        description="Nomes curtos das funções/métodos chamados dentro deste símbolo,"
+        " extraídos da AST. Insumo da resolução de arestas `calls` do grafo;"
+        " fora de FTS, do embedding e do ranking de busca",
+    )
 
     # Hash sha256 do arquivo de origem, anexado pelo indexer e consumido por
     # `StorageBackend.store_chunks` para montar o mapa `files` do manifest.
@@ -68,6 +74,13 @@ class IndexManifest(BaseModel):
     files_imports: dict[str, list] = Field(
         default_factory=dict,
         description="Mapa de path POSIX -> imports crus extraídos para o grafo",
+    )
+    # Default "0.0.0" e não CHUNKER_VERSION: manifests anteriores à feature não têm o
+    # campo, e é exatamente essa ausência que precisa divergir e disparar o re-chunk.
+    chunker_version: str = Field(
+        "0.0.0",
+        description="Versão do produtor de chunks (ASTChunker) usada para gerar o índice."
+        " Divergir da versão vigente força reindexação completa; nunca é consultado na leitura",
     )
 
 
@@ -166,4 +179,10 @@ class IndexStats(BaseModel):
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",
+    )
+    full_reason: Optional[str] = Field(
+        None,
+        description="Motivo de a execução ter sido forçada a full por divergência de versão:"
+        " 'embedding_model' | 'chunker_version'. `None` quando não houve divergência —"
+        " inclusive num --full pedido explicitamente pelo usuário",
     )

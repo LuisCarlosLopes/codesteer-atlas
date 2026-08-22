@@ -313,7 +313,12 @@ def _compute_hubs(graph: Optional[dict]) -> List[dict]:
     candidates = [
         node
         for node in graph.get("nodes", [])
-        if node.get("kind") in {"file", "doc", "symbol"} and (node.get("degree") or 0) >= 1
+        # Sem `symbol`: depois das arestas `calls`, `degree` de símbolo mede "o mais
+        # chamado/instanciado" e traz classes de dado ao topo, deslocando a camada de
+        # arquivo por completo — medido, os 8 primeiros graus viram todos símbolos. O
+        # briefing orienta por arquivo/módulo; hub de símbolo é pergunta para
+        # `atlas_graph(mode="hubs")`. [ADR-006 / RF19]
+        if node.get("kind") in {"file", "doc"} and (node.get("degree") or 0) >= 1
     ]
     candidates.sort(key=lambda node: (-(node.get("degree") or 0), node["id"]))
     return [

@@ -5,7 +5,7 @@ import pytest
 from click.testing import CliRunner
 from filelock import FileLock
 
-from codesteer_atlas.config import REINDEX_LOCK_FILENAME
+from codesteer_atlas.config import CHUNKER_VERSION, REINDEX_LOCK_FILENAME
 from codesteer_atlas.indexer import (
     cli,
     get_git_head_sha,
@@ -865,3 +865,207 @@ def test_falha_de_arquivo_e_contada_e_nao_aborta(tmp_path):
     assert stats.files_failed == 1
     assert stats.files_processed == 1
     assert stats.chunks_persisted > 0
+
+
+# ---------------------------------------------------------------------------
+# Invalidação por versão do produtor de chunks (ADR-001 / RF01-RF07)
+# ---------------------------------------------------------------------------
+
+
+def _index(workspace_dir, index_dir, **kwargs):
+    """Indexa com embeddings e git sha determinísticos."""
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        return index_workspace(workspace_dir, index_dir, **kwargs)
+
+
+def _rewrite_manifest(index_dir, **fields):
+    """Edita campos do manifest.json no disco, simulando um índice de versão anterior."""
+    manifest_path = index_dir / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data.update(fields)
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _workspace_with_two_trees(tmp_path):
+    """Workspace com src/ e outra subárvore, para exercitar `paths` restritos."""
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "src").mkdir(parents=True)
+    (workspace_dir / "lib").mkdir(parents=True)
+    (workspace_dir / "src" / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    (workspace_dir / "lib" / "helper.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    return workspace_dir
+
+
+def test_ca01_segunda_execucao_sem_divergencia_pula_tudo(tmp_path):
+    """CA01 — sem divergência de versão, o incremental continua pulando arquivos."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    stats = _index(workspace_dir, index_dir)
+
+    assert stats.files_skipped_unchanged == 1
+    assert stats.files_processed == 0
+    assert stats.full_reason is None
+
+
+def test_ca02_chunker_version_divergente_forca_full(tmp_path):
+    """CA02 — chunker_version diferente re-chunka tudo e reporta o motivo."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    (workspace_dir / "utils.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    _rewrite_manifest(index_dir, chunker_version="0.9.0")
+
+    stats = _index(workspace_dir, index_dir)
+
+    assert stats.full_reason == "chunker_version"
+    assert stats.files_processed == 2
+    assert stats.files_skipped_unchanged == 0
+
+
+def test_ca16_manifest_sem_chunker_version_e_tratado_como_divergente(tmp_path):
+    """
+    CA16 — manifest anterior à feature não tem o campo; o default "0.0.0" tem de
+    divergir de CHUNKER_VERSION, senão índices antigos nunca se reconstroem.
+    """
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    data = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+    del data["chunker_version"]
+    (index_dir / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+
+    stats = _index(workspace_dir, index_dir)
+
+    assert stats.full_reason == "chunker_version"
+    assert stats.files_processed == 1
+    assert CHUNKER_VERSION != "0.0.0"
+
+
+def test_ca03_embedding_model_divergente_forca_full(tmp_path):
+    """CA03 — modelo de embedding diferente também invalida o índice."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    _rewrite_manifest(index_dir, embedding_model="modelo-antigo/qualquer")
+
+    stats = _index(workspace_dir, index_dir)
+
+    assert stats.full_reason == "embedding_model"
+    assert stats.files_processed == 1
+
+
+def test_ca04_ambos_divergentes_reportam_embedding_model(tmp_path):
+    """CA04 — precedência: com os dois divergindo, o motivo é embedding_model."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    _rewrite_manifest(index_dir, embedding_model="modelo-antigo", chunker_version="0.9.0")
+
+    stats = _index(workspace_dir, index_dir)
+
+    assert stats.full_reason == "embedding_model"
+
+
+def test_ca05_invalidacao_com_paths_restritos_nao_regride_o_indice(tmp_path):
+    """
+    CA05 — este é o teste que pega A1. Com `paths=["src"]` e chunker_version
+    divergente, a invalidação zera os paths: se as raízes de varredura fossem
+    resolvidas antes disso, o índice seria sobrescrito só com src/ e lib/
+    desapareceria do manifest.
+    """
+    workspace_dir = _workspace_with_two_trees(tmp_path)
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    manifest_before = StorageBackend(index_dir=index_dir).get_manifest()
+    assert set(manifest_before.files) == {"src/app.py", "lib/helper.py"}
+
+    _rewrite_manifest(index_dir, chunker_version="0.9.0")
+    stats = _index(workspace_dir, index_dir, paths=["src"])
+
+    assert stats.full_reason == "chunker_version"
+    manifest_after = StorageBackend(index_dir=index_dir).get_manifest()
+    assert set(manifest_after.files) == {"src/app.py", "lib/helper.py"}
+    assert stats.files_processed == 2
+
+
+def test_ca06_divergencia_emite_uma_linha_em_stderr(tmp_path, capsys):
+    """CA06 — o motivo do re-chunk é observável em stderr, com valor antigo e novo."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    _rewrite_manifest(index_dir, chunker_version="0.9.0")
+    capsys.readouterr()
+
+    _index(workspace_dir, index_dir, report_progress=False)
+
+    err = capsys.readouterr().err
+    linhas = [ln for ln in err.splitlines() if "Reindexacao completa forcada" in ln or "Reindexa" in ln]
+    assert len(linhas) == 1
+    assert "chunker_version" in linhas[0]
+    assert "0.9.0" in linhas[0] and CHUNKER_VERSION in linhas[0]
+
+
+def test_full_explicito_sem_divergencia_mantem_full_reason_nulo(tmp_path):
+    """R-INV-04 — `--full` pedido pelo usuário não é divergência de versão."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    stats = _index(workspace_dir, index_dir, full=True)
+
+    assert stats.full_reason is None
+    assert stats.files_processed == 1
+
+
+def test_indice_novo_nao_reporta_full_reason(tmp_path):
+    """Sem manifest anterior não há divergência a reportar — é só a primeira indexação."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+
+    stats = _index(workspace_dir, tmp_path / "index_output")
+
+    assert stats.full_reason is None
+
+
+def test_manifest_gravado_carrega_a_versao_vigente_do_chunker(tmp_path):
+    """
+    Os dois sítios de construção passam por `_new_manifest`, então o campo tem de
+    sobreviver tanto à sobrescrita quanto ao caminho incremental.
+    """
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text("def run_app():\n    pass\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    _index(workspace_dir, index_dir)
+    assert StorageBackend(index_dir=index_dir).get_manifest().chunker_version == CHUNKER_VERSION
+
+    (workspace_dir / "app.py").write_text("def run_app():\n    return 1\n", encoding="utf-8")
+    _index(workspace_dir, index_dir)
+    assert StorageBackend(index_dir=index_dir).get_manifest().chunker_version == CHUNKER_VERSION

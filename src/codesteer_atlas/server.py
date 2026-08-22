@@ -687,6 +687,11 @@ def atlas_graph(
 
     Returns:
         JSON string for the selected mode.
+
+        In `explain` mode the neighbour lists are truncated by a per-kind cap, and
+        the `omitted` field reports how many entries were dropped from each list
+        (`{}` when nothing was truncated). A truncated list is an ordered sample,
+        never proof that no further relation exists.
     """
     _resolve_index_dir_via_roots(ctx)
 
@@ -851,8 +856,10 @@ def atlas_index(
         `pid`/`reason`/`error`, and `message`.
         sync ('paths' set, full=false): JSON with `workspace`, `indexed_paths`,
         `files_processed`, `files_skipped_unchanged`, `files_removed`,
-        `chunks_persisted`, `duration_s`, `git_head_sha`, and optional
+        `chunks_persisted`, `duration_s`, `git_head_sha`, `full_reason`, and optional
         `skipped_reason`/`message` if another process holds the reindex lock.
+        `full_reason` is `"embedding_model"` or `"chunker_version"` when a version
+        mismatch forced a complete rebuild, and `null` otherwise.
     """
     # Resolve o índice via MCP roots quando a resolução de startup caiu em fallback,
     # antes de derivar o workspace do pai do índice [R].
@@ -996,6 +1003,7 @@ def atlas_index(
         "brief_bytes": stats.brief_bytes,
         "brief_layers": stats.brief_layers,
         "brief_entrypoints": stats.brief_entrypoints,
+        "full_reason": stats.full_reason,
     }
     if stats.files_failed:
         response["warning"] = (

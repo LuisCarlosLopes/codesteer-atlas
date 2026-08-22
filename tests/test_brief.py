@@ -464,3 +464,56 @@ def test_level0_e_subconjunto_de_level1():
     assert [layer["path"] for layer in level0["layers"]] == [
         layer["path"] for layer in level1["layers"]
     ]
+
+
+def test_ca33_hubs_do_briefing_ignoram_simbolos(tmp_path):
+    """
+    CA33 — depois das arestas `calls`, `degree` de símbolo domina o ranking e
+    deslocaria a camada de arquivo por completo. O briefing orienta por arquivo;
+    hub de símbolo é pergunta para `atlas_graph(mode="hubs")`. [ADR-006 / RF19]
+
+    Falha se `_compute_hubs` voltar a admitir `symbol`.
+    """
+    nodes = [
+        {
+            "id": "sym:core.py#atlas_search",
+            "kind": "symbol",
+            "label": "atlas_search",
+            "file_path": "core.py",
+            "degree": 31,
+        },
+        {
+            "id": "sym:core.py#CodeChunk",
+            "kind": "symbol",
+            "label": "CodeChunk",
+            "file_path": "core.py",
+            "degree": 30,
+        },
+        _file_node("core.py", degree=14),
+        _file_node("util.py", degree=9),
+        _file_node("doc.md", degree=11),
+    ]
+
+    hubs = build_brief(_make_manifest(["core.py", "util.py", "doc.md"]), _graph(nodes), Path("."))[
+        "hubs"
+    ]
+
+    assert [hub["kind"] for hub in hubs] == ["file", "doc", "file"]
+    assert [hub["label"] for hub in hubs] == ["core.py", "doc.md", "util.py"]
+    assert all(hub["kind"] != "symbol" for hub in hubs)
+
+
+def test_hubs_do_briefing_sao_vazios_quando_so_ha_simbolos():
+    """Sem nó de arquivo conectado, a resposta honesta é vazia — não um símbolo."""
+    nodes = [
+        {
+            "id": "sym:core.py#run",
+            "kind": "symbol",
+            "label": "run",
+            "file_path": "core.py",
+            "degree": 42,
+        }
+    ]
+    brief = build_brief(_make_manifest(["core.py"]), _graph(nodes), Path("."))
+
+    assert brief["hubs"] == []

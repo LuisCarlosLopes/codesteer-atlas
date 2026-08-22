@@ -12,13 +12,14 @@ from codesteer_atlas.brief import build_and_write_brief
 from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.config import (
     ATLASIGNORE_FILENAME,
+    CHUNKER_VERSION,
     DEFAULT_INDEX_DIR,
     GRAPH_FILENAME,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.embeddings import EmbeddingEngine
+from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine
 from codesteer_atlas.graph import build_and_write, build_and_write_incremental, load_graph
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
@@ -335,14 +336,16 @@ def _index_workspace_locked(
     phase_durations_s: dict[str, float] = {}
     progress = IndexProgressReporter(enabled=report_progress)
 
-    scan_roots = _resolve_scan_roots(workspace_path, paths)
-    atlas_spec = load_atlasignore_spec(workspace_path)
-
     repo_name = workspace_path.name
     chunker = ASTChunker()
     storage = StorageBackend(index_dir=index_path)
 
-    # Carrega manifest existente (se houver) para indexação incremental
+    # Carrega manifest existente (se houver) para indexação incremental.
+    # Precisa vir ANTES de `_resolve_scan_roots`: a invalidação logo abaixo pode zerar
+    # `paths`, e resolver as raízes antes disso faria a varredura cobrir só a subárvore
+    # pedida enquanto a persistência sobrescreve o índice inteiro — pior que o problema
+    # que a invalidação quer resolver. A varredura roda uma vez só, já com a decisão
+    # tomada. [A1]
     existing_files: dict[str, str] = {}
     existing_files_meta: dict[str, list] = {}
     existing_files_imports: dict[str, list] = {}
@@ -359,6 +362,35 @@ def _index_workspace_locked(
             existing_files_meta = {}
             existing_files_imports = {}
             existing_manifest = None
+
+    # Invalidação por divergência de versão do produtor (ADR-001). O loop incremental
+    # compara apenas hash de conteúdo, então um chunker novo — ou um modelo de embedding
+    # novo — jamais alcançaria arquivos inalterados. `embedding_model` tem precedência
+    # sobre `chunker_version` quando ambos divergem: é a causa mais profunda, e os
+    # vetores antigos são inutilizáveis de qualquer forma. Continua `None` num `--full`
+    # pedido pelo usuário sem divergência nenhuma.
+    full_reason: Optional[str] = None
+    if existing_manifest is not None:
+        if existing_manifest.embedding_model != FASTEMBED_MODEL_NAME:
+            full_reason = "embedding_model"
+            previous, current = existing_manifest.embedding_model, FASTEMBED_MODEL_NAME
+        elif existing_manifest.chunker_version != CHUNKER_VERSION:
+            full_reason = "chunker_version"
+            previous, current = existing_manifest.chunker_version, CHUNKER_VERSION
+
+        if full_reason is not None:
+            print(
+                f"[atlas] Reindexação completa forçada: {full_reason} mudou "
+                f"({previous} -> {current}); o índice inteiro será reconstruído.",
+                file=sys.stderr,
+            )
+            # Zerar `paths` é o que leva a persistência ao ramo de sobrescrita total e
+            # a remoção de deletados a cobrir o manifest inteiro.
+            full = True
+            paths = None
+
+    scan_roots = _resolve_scan_roots(workspace_path, paths)
+    atlas_spec = load_atlasignore_spec(workspace_path)
 
     # Varre as subárvores selecionadas
     progress.tick("scan", 0, 1)
@@ -490,6 +522,11 @@ def _index_workspace_locked(
     progress.phase_done("chunk")
     phase_durations_s["chunk"] = round(time.perf_counter() - phase_started_at, 4)
 
+    # Libera os parsers ainda nesta thread: o Parser nativo é unsendable e, se o GC
+    # o alcançar durante a escrita no LanceDB (que usa threads), o drop estoura no
+    # meio de uma chamada alheia.
+    chunker.release_parsers()
+
     # Gera embeddings em lote apenas para os chunks novos/alterados [GA-06]
     phase_started_at = time.perf_counter()
     if all_new_chunks:
@@ -595,6 +632,7 @@ def _index_workspace_locked(
                 manifest=manifest,
                 updated_chunks=all_new_chunks,
                 updated_file_paths=changed_file_paths,
+                storage=storage,
             )
             graph_strategy = "incremental-code"
         else:
@@ -656,6 +694,7 @@ def _index_workspace_locked(
         brief_bytes=brief_metrics["brief_bytes"],
         brief_layers=brief_metrics["brief_layers"],
         brief_entrypoints=brief_metrics["brief_entrypoints"],
+        full_reason=full_reason,
     )
 
 

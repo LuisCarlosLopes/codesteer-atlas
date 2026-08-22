@@ -8,7 +8,13 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from codesteer_atlas.config import GRAPH_FILENAME, GRAPH_PATH_MAX_HOPS, GRAPH_TOP_HUBS_LIMIT
+from codesteer_atlas.config import (
+    GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND,
+    GRAPH_EXPLAIN_MAX_NOTES,
+    GRAPH_FILENAME,
+    GRAPH_PATH_MAX_HOPS,
+    GRAPH_TOP_HUBS_LIMIT,
+)
 from codesteer_atlas.markdown_links import extract_markdown_link_targets
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
@@ -237,6 +243,147 @@ def _build_empty_graph(manifest) -> dict:
     }
 
 
+def _append_edge(
+    edges: List[dict],
+    edge_keys: set,
+    source: str,
+    target: str,
+    kind: str,
+    **attrs,
+) -> None:
+    """
+    Acrescenta uma aresta respeitando dedup por `(source, target, kind)` e
+    descartando auto-aresta. `attrs` carrega campos extras do kind — hoje só
+    `resolution`, exclusivo de `calls`. [RE05 / R-CALL-10]
+    """
+    key = (source, target, kind)
+    if source == target or key in edge_keys:
+        return
+    edge_keys.add(key)
+    edge = {"source": source, "target": target, "kind": kind}
+    edge.update(attrs)
+    edges.append(edge)
+
+
+def _short_symbol_name(scope_name: str) -> str:
+    """
+    Último segmento do `scope_name`: `StorageBackend.store_chunks` casa
+    `store_chunks`. Comparação por igualdade exata e sensível a caixa —
+    deliberadamente NÃO reusa `_resolve_note_matches`, que casa por prefixo e
+    faria `get` casar `get_manifest`. [R-CALL-06 / A3]
+    """
+    return scope_name.rsplit(".", 1)[-1]
+
+
+def _resolve_file_imports(
+    file_path: str,
+    raw_imports: Iterable[str],
+    manifest_files: set[str],
+    package_roots: Optional[List[str]],
+) -> List[str]:
+    """Paths do manifest alcançados pelos imports deste arquivo (degrau 2)."""
+    targets: List[str] = []
+    for raw_import in raw_imports:
+        if file_path.endswith(".py"):
+            target_path = _resolve_python_import(
+                file_path, raw_import, manifest_files, package_roots
+            )
+        elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
+            # go/csharp/java não têm resolvedor de import no repositório: para eles
+            # valem só os degraus 1 e 3. [R-CALL-09]
+            target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
+        else:
+            target_path = None
+        if target_path is not None:
+            targets.append(target_path)
+    return targets
+
+
+def _resolve_call_edges(
+    nodes: Dict[str, dict],
+    edges: List[dict],
+    edge_keys: set,
+    calls_by_symbol: Dict[str, List[str]],
+    manifest,
+    manifest_files: set[str],
+    package_roots: Optional[List[str]],
+) -> None:
+    """
+    Segunda passada: transforma nomes chamados em arestas `symbol -> symbol`.
+
+    Roda depois de todos os arquivos terem contribuído com seus nós — resolver na
+    primeira passada perderia toda chamada para arquivo ainda não processado
+    (R-CALL-05) — e SEMPRE contra o conjunto de nós do grafo que está sendo
+    escrito, nos dois caminhos de escrita. É isso que faz o incremental produzir
+    o mesmo resultado que o rebuild completo. [R-CALL-12]
+
+    Escada, avaliada em ordem para cada par (símbolo chamador, nome chamado):
+
+      1. mesmo arquivo   -> `resolution: "exact"`
+      2. via import      -> `resolution: "exact"`
+      3. único no grafo  -> `resolution: "inferred"`
+      4. descarte
+
+    Zero candidatos cai para o degrau seguinte; exatamente um resolve e encerra;
+    mais de um também cai — e como o universo do degrau 3 contém os anteriores,
+    ambiguidade termina invariavelmente em descarte. Nunca se desempata por
+    heurística: é a mesma política já adotada por `_resolve_note_matches`.
+    """
+    symbols_by_file: Dict[str, List[tuple[str, str]]] = {}
+    by_short_name: Dict[str, List[str]] = {}
+    for node_id, node in nodes.items():
+        if node.get("kind") != "symbol":
+            continue
+        short = _short_symbol_name(node.get("label") or "")
+        symbols_by_file.setdefault(node.get("file_path") or "", []).append((node_id, short))
+        by_short_name.setdefault(short, []).append(node_id)
+
+    imports_cache: Dict[str, List[str]] = {}
+
+    for source_id in sorted(calls_by_symbol):
+        names = calls_by_symbol[source_id]
+        if not names or source_id not in nodes:
+            continue
+        caller_file = nodes[source_id].get("file_path") or ""
+
+        if caller_file not in imports_cache:
+            imports_cache[caller_file] = _resolve_file_imports(
+                caller_file,
+                manifest.files_imports.get(caller_file, []),
+                manifest_files,
+                package_roots,
+            )
+        imported_files = imports_cache[caller_file]
+
+        for name in names:
+            same_file = [nid for nid, short in symbols_by_file.get(caller_file, []) if short == name]
+            if len(same_file) == 1:
+                _append_edge(
+                    edges, edge_keys, source_id, same_file[0], "calls", resolution="exact"
+                )
+                continue
+
+            via_import = [
+                nid
+                for target_file in imported_files
+                for nid, short in symbols_by_file.get(target_file, [])
+                if short == name
+            ]
+            if len(via_import) == 1:
+                _append_edge(
+                    edges, edge_keys, source_id, via_import[0], "calls", resolution="exact"
+                )
+                continue
+
+            unique_in_graph = by_short_name.get(name, [])
+            if len(unique_in_graph) == 1:
+                # `inferred` é pista, não fato: o nome era único no grafo, o que é
+                # evidência fraca e some assim que um homônimo aparece. [R-CALL-08]
+                _append_edge(
+                    edges, edge_keys, source_id, unique_in_graph[0], "calls", resolution="inferred"
+                )
+
+
 def _add_contribution_from_rows(
     file_path: str,
     rows: Iterable[dict],
@@ -247,6 +394,7 @@ def _add_contribution_from_rows(
     edges: List[dict],
     edge_keys: set[tuple[str, str, str]],
     package_roots: Optional[List[str]] = None,
+    calls_by_symbol: Optional[Dict[str, List[str]]] = None,
 ) -> None:
     file_kind = "doc" if file_path.lower().endswith(".md") else "file"
     file_node_id = f"file:{file_path}"
@@ -260,11 +408,7 @@ def _add_contribution_from_rows(
         }
 
     def _add_edge(source: str, target: str, kind: str) -> None:
-        key = (source, target, kind)
-        if source == target or key in edge_keys:
-            return
-        edge_keys.add(key)
-        edges.append({"source": source, "target": target, "kind": kind})
+        _append_edge(edges, edge_keys, source, target, kind)
 
     for row in rows:
         references = decode_references_json(row.get("references_json"))
@@ -284,6 +428,11 @@ def _add_contribution_from_rows(
             "lines": lines,
         }
         _add_edge(file_node_id, node_id, "contains")
+
+        if calls_by_symbol is not None and not is_markdown:
+            chunk_calls = decode_references_json(row.get("calls_json"))
+            if chunk_calls:
+                calls_by_symbol[node_id] = chunk_calls
 
         if is_markdown:
             for target in extract_markdown_link_targets(
@@ -379,6 +528,10 @@ def _graph_rows_from_chunks(chunks: List[CodeChunk]) -> Dict[str, List[dict]]:
                 "end_line": chunk.end_line,
                 "content": chunk.content if chunk.language == "markdown" else None,
                 "references_json": json.dumps(chunk.references or [], ensure_ascii=False),
+                # Paridade com `get_graph_projection`: e este o caminho vivo do
+                # update incremental, e sem a chave aqui o incremental produziria
+                # zero arestas `calls` enquanto o rebuild completo as produz. [A2]
+                "calls_json": json.dumps(chunk.calls or [], ensure_ascii=False),
             }
         )
     return rows_by_file
@@ -408,6 +561,7 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
     }
     edges: List[dict] = []
     edge_keys: set[tuple[str, str, str]] = set()
+    calls_by_symbol: Dict[str, List[str]] = {}
     for file_path in sorted(manifest_files):
         _add_contribution_from_rows(
             file_path=file_path,
@@ -419,7 +573,12 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
             edges=edges,
             edge_keys=edge_keys,
             package_roots=package_roots,
+            calls_by_symbol=calls_by_symbol,
         )
+
+    _resolve_call_edges(
+        nodes, edges, edge_keys, calls_by_symbol, manifest, manifest_files, package_roots
+    )
 
     graph = _finalize_graph(_build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges})
     graph_path, metadata = _persist_graph(graph, index_path)
@@ -433,10 +592,19 @@ def build_and_write_incremental(
     manifest,
     updated_chunks: List[CodeChunk],
     updated_file_paths: set[str],
+    storage=None,
 ) -> tuple[Path, dict]:
     """
     Atualiza `graph.json` a partir do grafo anterior quando apenas arquivos de
     código já existentes mudaram, evitando rebuild completo do índice.
+
+    Exceção deliberada: as arestas `calls`. Elas são descartadas por completo e
+    re-resolvidas contra o índice inteiro a cada escrita, mesmo as de chamadores
+    em arquivos não tocados. O motivo é que a escada depende do conjunto global —
+    editar um arquivo e criar um homônimo de um nome antes único invalida uma
+    aresta `inferred` cujo chamador ninguém encostou. Sem isso o incremental
+    divergiria do rebuild em silêncio. O custo é uma leitura da projeção por
+    execução, o mesmo preço já aceito por `brief.json`. [R-CALL-12 / RF17 / ADR-004]
     """
     graph = load_graph(index_path)
     nodes = {node["id"]: dict(node) for node in graph.get("nodes", [])}
@@ -450,6 +618,9 @@ def build_and_write_incremental(
 
     kept_edges: List[dict] = []
     for edge in graph.get("edges", []):
+        # Nenhuma aresta `calls` do grafo anterior é transportada. [RF17]
+        if edge["kind"] == "calls":
+            continue
         if edge["source"] in removed_node_ids or edge["target"] in removed_node_ids:
             continue
         if edge["kind"] in {"contains", "imports"} and edge["source"].startswith("file:"):
@@ -475,6 +646,25 @@ def build_and_write_incremental(
             edges=kept_edges,
             edge_keys=edge_keys,
             package_roots=package_roots,
+        )
+
+    # Fonte da re-resolução é o ÍNDICE pós-persist, não `updated_chunks`: só ele
+    # tem os chamadores dos arquivos não alterados, que também precisam ser
+    # reavaliados. `get_graph_projection_for_file_paths` não serve aqui pela mesma
+    # razão. Sem `storage` o grafo fica sem `calls` em vez de ficar com um
+    # subconjunto silenciosamente errado. [A2 / R-CALL-12]
+    if storage is not None:
+        calls_by_symbol: Dict[str, List[str]] = {}
+        for row in storage.get_graph_projection():
+            if row.get("language") == "markdown":
+                continue
+            chunk_calls = decode_references_json(row.get("calls_json"))
+            if chunk_calls:
+                node_id = f"sym:{row['file_path']}#{row['scope_name']}"
+                if node_id in nodes:
+                    calls_by_symbol[node_id] = chunk_calls
+        _resolve_call_edges(
+            nodes, kept_edges, edge_keys, calls_by_symbol, manifest, manifest_files, package_roots
         )
 
     updated_graph = _build_empty_graph(manifest) | {
@@ -615,21 +805,28 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
 
 
 def hubs(graph: dict, top_n: int) -> List[dict]:
-    result = []
-    for item in graph.get("metrics", {}).get("top_hubs", [])[:top_n]:
-        node = graph["_nodes_by_id"].get(item["id"])
-        if node is None:
-            continue
-        result.append(
-            {
-                "id": node["id"],
-                "label": node.get("label"),
-                "kind": node.get("kind"),
-                "degree": item["degree"],
-                "file_path": node.get("file_path"),
-            }
-        )
-    return result
+    """
+    Ordena TODOS os nós do grafo por `(-degree, id)` e devolve até `top_n`.
+
+    Não fatia `metrics.top_hubs`: aquele campo é pré-computado com teto
+    `GRAPH_TOP_HUBS_LIMIT` (25), enquanto a tool aceita `top_n` até 50 — fatiar
+    devolvia 25 e chamava de 50. Para `top_n <= 25` o resultado é idêntico ao
+    anterior, porque a ordenação é a mesma. [ADR-005]
+    """
+    ranked = sorted(
+        graph.get("nodes", []),
+        key=lambda node: (-(node.get("degree") or 0), node["id"]),
+    )
+    return [
+        {
+            "id": node["id"],
+            "label": node.get("label"),
+            "kind": node.get("kind"),
+            "degree": node.get("degree") or 0,
+            "file_path": node.get("file_path"),
+        }
+        for node in ranked[:top_n]
+    ]
 
 
 def explain(graph: dict, ref: str) -> dict:
@@ -656,13 +853,31 @@ def explain(graph: dict, ref: str) -> dict:
                 }
             )
 
+    # O corte vem DEPOIS da ordenação determinística, para a resposta ser estável
+    # entre chamadas sobre o mesmo grafo. `omitted` registra o que ficou de fora —
+    # sem ele, uma lista capada é lida como exaustiva. [ADR-005 / R-CAP-01..04]
+    omitted: Dict[str, int] = {}
+
     for kind in neighbors:
-        neighbors[kind] = sorted(neighbors[kind], key=lambda item: (item["label"] or "", item["id"]))
+        ordered = sorted(neighbors[kind], key=lambda item: (item["label"] or "", item["id"]))
+        if len(ordered) > GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND:
+            omitted[kind] = len(ordered) - GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND
+            ordered = ordered[:GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND]
+        neighbors[kind] = ordered
+
     notes = sorted(notes, key=lambda item: item["file_path"] or "")
+    if len(notes) > GRAPH_EXPLAIN_MAX_NOTES:
+        omitted["notes"] = len(notes) - GRAPH_EXPLAIN_MAX_NOTES
+        notes = notes[:GRAPH_EXPLAIN_MAX_NOTES]
+
+    # `rationale` é uma projeção de `neighbors["rationale"]`; corta no mesmo ponto
+    # para as duas listas não se contradizerem na mesma resposta (R-CAP-03).
+    rationale_nodes = neighbors.get("rationale", rationale_nodes)
 
     return {
         "node": _node_summary(node),
         "neighbors": neighbors,
         "rationale": rationale_nodes,
         "notes": notes,
+        "omitted": omitted,
     }

@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 from tree_sitter_language_pack import get_parser
 
-from codesteer_atlas.config import SUPPORTED_EXTENSIONS
+from codesteer_atlas.config import CALL_NOISE_NAMES, MAX_CALLS_PER_CHUNK, SUPPORTED_EXTENSIONS
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import extract_rationale_refs, serialize_rationale_refs
 
@@ -132,6 +132,18 @@ class _CompatNode:
     def end_byte(self) -> int:
         return self._node.end_byte if self.classic else self._node.end_byte()
 
+    def child_by_field_name(self, name: str):
+        # A API clássica expõe atributo; a nativa, método. Sem isto não há como
+        # pegar o campo `name`/`function` de um nó de chamada. [A4]
+        raw = (
+            self._node.child_by_field_name(name)
+            if self.classic
+            else self._node.child_by_field_name(name)
+        )
+        if raw is None:
+            return None
+        return _CompatNode(raw, classic=self.classic)
+
     def start_position(self):
         if self.classic:
             return _normalize_point(self._node.start_point)
@@ -141,6 +153,42 @@ class _CompatNode:
         if self.classic:
             return _normalize_point(self._node.end_point)
         return self._node.end_position()
+
+
+# Nó de chamada por linguagem. Só as seis com ramo de símbolo em `_walk_tree`
+# aparecem aqui: sem símbolo não há chamador a que atribuir a chamada. [RF11/RF18]
+_CALL_NODE_KINDS = {
+    "python": {"call"},
+    "javascript": {"call_expression"},
+    "typescript": {"call_expression"},
+    "go": {"call_expression"},
+    "csharp": {"invocation_expression"},
+    "java": {"method_invocation"},
+}
+
+# Fronteiras de símbolo usadas para PODAR a extração de chamadas: uma chamada
+# pertence ao símbolo mais interno que a contém, então uma classe não herda as
+# chamadas dos próprios métodos. [RF12]
+#
+# Espelha os `node_type` testados em `_walk_tree`; mexer lá exige mexer aqui — a
+# garantia de que os dois não divergiram é o teste de que classe não herda calls.
+_SYMBOL_NODE_KINDS = {
+    "python": {"class_definition", "function_definition"},
+    "javascript": {"class_declaration", "function_declaration", "method_definition"},
+    "typescript": {"class_declaration", "function_declaration", "method_definition"},
+    "go": {"type_declaration", "function_declaration", "method_declaration"},
+    "csharp": {
+        "class_declaration", "interface_declaration", "struct_declaration",
+        "record_declaration", "method_declaration", "constructor_declaration",
+        "destructor_declaration",
+    },
+    "java": {
+        "class_declaration", "interface_declaration", "enum_declaration",
+        "record_declaration", "method_declaration", "constructor_declaration",
+    },
+}
+
+_CALLEE_IDENT_KINDS = ("identifier", "property_identifier", "field_identifier")
 
 
 def _installed_language_pack_version() -> str:
@@ -242,6 +290,19 @@ class ASTChunker:
 
         return self.parsers[language_name]
 
+    def release_parsers(self) -> None:
+        """
+        Descarta os parsers em cache no thread que os criou.
+
+        O `Parser` nativo do tree-sitter é *unsendable* (pyo3): se o coletor de lixo
+        o alcançar enquanto outra thread está no comando — o LanceDB usa threads na
+        escrita — o drop levanta `RuntimeError` no meio de uma chamada alheia. Só
+        vira problema depois que a extração de chamadas passou a dobrar o número de
+        nós alocados por arquivo, o que antecipa a coleta; liberar aqui torna o
+        momento do drop determinístico em vez de depender do GC.
+        """
+        self.parsers.clear()
+
     def _generate_chunk_id(
         self, content: str, file_path: str, start_line: int, end_line: int
     ) -> str:
@@ -286,18 +347,96 @@ class ASTChunker:
                 return source_bytes[child.start_byte():child.end_byte()].decode("utf-8", errors="ignore")
         return "anonymous"
 
+    def _callee_name(self, call_node, source_bytes: bytes) -> Optional[str]:
+        """
+        Nome curto do alvo da chamada: o ULTIMO identificador do callee.
+
+        `self.storage.get_manifest()` devolve `get_manifest`; o receptor e
+        descartado de proposito - o indice guarda `StorageBackend.get_manifest`,
+        nao a expressao que chegou ate ele. [R-CALL-01]
+        """
+        callee = call_node.child_by_field_name("function")
+        if callee is None:
+            callee = call_node.child_by_field_name("name")
+        if callee is None:
+            callee = call_node.child(0) if call_node.child_count() else None
+        if callee is None:
+            return None
+
+        last: Optional[Tuple[int, str]] = None
+        stack = [callee]
+        while stack:
+            current = stack.pop()
+            if current.kind() in _CALLEE_IDENT_KINDS and (
+                last is None or current.start_byte() > last[0]
+            ):
+                text = source_bytes[current.start_byte():current.end_byte()].decode(
+                    "utf-8", errors="ignore"
+                )
+                last = (current.start_byte(), text)
+            for i in range(current.child_count()):
+                child = current.child(i)
+                if child is not None:
+                    stack.append(child)
+        return last[1] if last else None
+
+    def _extract_calls(self, node, source_bytes: bytes, language: str) -> List[str]:
+        """
+        Nomes chamados dentro deste simbolo, lidos da AST.
+
+        Nunca do `content`: ele ja passou por `_truncate_content`, entao extrair
+        dali perderia em silencio as chamadas do miolo de qualquer simbolo
+        grande. [RE08]
+
+        A varredura para nas fronteiras de simbolo aninhado (RF12), o ruido e
+        cortado ANTES do teto - senao builtins expulsariam chamadas de dominio -
+        e a ordem e a de primeira ocorrencia no arquivo.
+        """
+        call_kinds = _CALL_NODE_KINDS.get(language)
+        if not call_kinds:
+            return []
+        symbol_kinds: set[str] = _SYMBOL_NODE_KINDS.get(language, set())
+
+        found: List[Tuple[int, str]] = []
+
+        def _descend(current, is_root: bool) -> None:
+            if not is_root and current.kind() in symbol_kinds:
+                return
+            if current.kind() in call_kinds:
+                name = self._callee_name(current, source_bytes)
+                if name:
+                    found.append((current.start_byte(), name))
+            for i in range(current.child_count()):
+                child = current.child(i)
+                if child is not None:
+                    _descend(child, False)
+
+        _descend(node, True)
+        found.sort(key=lambda item: item[0])
+
+        calls: List[str] = []
+        for _offset, name in found:
+            if name.casefold() in CALL_NOISE_NAMES:
+                continue
+            if name in calls:
+                continue
+            calls.append(name)
+            if len(calls) >= MAX_CALLS_PER_CHUNK:
+                break
+        return calls
+
     def _walk_tree(
         self,
         node,
         source_text: str,
         language: str,
         parent_scope: str = "",
-        chunks: Optional[List[Tuple[int, int, str, str, str]]] = None,
-    ) -> List[Tuple[int, int, str, str, str]]:
+        chunks: Optional[List[Tuple[int, int, str, str, str, List[str]]]] = None,
+    ) -> List[Tuple[int, int, str, str, str, List[str]]]:
         """
         Percorre recursivamente a árvore AST identificando nós de interesse
         e acumulando os escopos para nomenclatura hierárquica.
-        Retorna uma lista de tuplas: (start_line, end_line, scope_type, scope_name, content)
+        Retorna tuplas: (start_line, end_line, scope_type, scope_name, content, calls)
         """
         if chunks is None:
             chunks = []
@@ -388,7 +527,8 @@ class ASTChunker:
             start_line = node.start_position().row + 1
             end_line = node.end_position().row + 1
 
-            chunks.append((start_line, end_line, scope_type, current_scope, content))
+            calls = self._extract_calls(node, source_bytes, language)
+            chunks.append((start_line, end_line, scope_type, current_scope, content, calls))
 
         # Continua a busca nos filhos
         for i in range(node.child_count()):
@@ -447,7 +587,7 @@ class ASTChunker:
         # (será limpo para ser relativo ao diretório indexado no indexer)
         # [L] file_path sempre persistido em formato POSIX, independente do OS de origem
 
-        for start_line, end_line, scope_type, scope_name, content in symbols:
+        for start_line, end_line, scope_type, scope_name, content, calls in symbols:
             references = serialize_rationale_refs(extract_rationale_refs(content))
             truncated_content = self._truncate_content(content)
             chunk_id = self._generate_chunk_id(
@@ -467,6 +607,7 @@ class ASTChunker:
                     content=truncated_content,
                     indexed_at=timestamp,
                     references=references,
+                    calls=calls,
                 )
             )
 
@@ -481,6 +622,12 @@ class ASTChunker:
             truncated_content = self._truncate_content(source_text)
             chunk_id = self._generate_chunk_id(truncated_content, relative_path, 1, total_lines)
 
+            # O chunk `module` e o unico no que representa o arquivo; sem ele um
+            # script sequencial ficaria invisivel no grafo de chamadas. [H4]
+            module_calls = self._extract_calls(
+                tree.root_node(), source_text.encode("utf-8"), language
+            )
+
             chunks.append(
                 CodeChunk(
                     id=chunk_id,
@@ -494,6 +641,7 @@ class ASTChunker:
                     content=truncated_content,
                     indexed_at=timestamp,
                     references=references,
+                    calls=module_calls,
                 )
             )
 

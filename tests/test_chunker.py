@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 
 from codesteer_atlas.chunker import _CHUNK_MAX_CHARS, ASTChunker
+from codesteer_atlas.config import MAX_CALLS_PER_CHUNK
 
 
 def test_chunk_python_file_with_classes_and_functions(tmp_path):
@@ -611,3 +612,186 @@ def test_chunk_file_com_parser_classico_real(tmp_path):
     assert "A.m" in names
     assert "f" in names
     assert version("tree-sitter-language-pack")  # só para deixar a dep explícita no teste
+
+
+# ---------------------------------------------------------------------------
+# Extração de chamadas da AST (RF11-RF12 / R-CALL-01..04)
+# ---------------------------------------------------------------------------
+
+
+def _calls_by_scope(tmp_path, filename, source):
+    chunker = ASTChunker()
+    path = tmp_path / filename
+    path.write_text(source, encoding="utf-8")
+    return {chunk.scope_name: chunk.calls for chunk in chunker.chunk_file(path, "repo")}
+
+
+def test_ca18_classe_nao_herda_as_chamadas_dos_proprios_metodos(tmp_path):
+    """
+    CA18 — RF12: a chamada pertence ao símbolo mais interno que a contém. Se a
+    poda nas fronteiras de símbolo aninhado sumir, a classe passa a acumular as
+    chamadas de todos os métodos e vira um hub artificial.
+    """
+    source = (
+        "class Engine:\n"
+        "    LIMITE = compute_limit()\n"
+        "\n"
+        "    def start(self):\n"
+        "        return spin_up()\n"
+        "\n"
+        "    def stop(self):\n"
+        "        return wind_down()\n"
+    )
+    calls = _calls_by_scope(tmp_path, "engine.py", source)
+
+    assert calls["Engine.start"] == ["spin_up"]
+    assert calls["Engine.stop"] == ["wind_down"]
+    # a classe fica só com o que está no corpo dela, fora dos métodos
+    assert calls["Engine"] == ["compute_limit"]
+
+
+def test_ca19_ruido_e_descartado_na_extracao(tmp_path):
+    """CA19 — builtins e métodos de coleção não chegam ao índice. [R-CALL-04]"""
+    source = (
+        "def run(items):\n"
+        "    print(len(items))\n"
+        "    items.append(1)\n"
+        "    items.sort()\n"
+        "    return processar(items)\n"
+    )
+    calls = _calls_by_scope(tmp_path, "run.py", source)
+
+    assert calls["run"] == ["processar"]
+
+
+def test_ca19_ruido_compara_por_casefold(tmp_path):
+    """`ToString` e `tostring` são a mesma entrada da lista."""
+    source = "class A {\n    void go() { var x = ToString(); helper(); }\n}\n"
+    calls = _calls_by_scope(tmp_path, "A.java", source)
+
+    assert "ToString" not in calls["A.go"]
+    assert "helper" in calls["A.go"]
+
+
+def test_ca20_teto_de_chamadas_por_chunk(tmp_path):
+    """CA20 — L01 limita a lista; sem teto, um .js minificado sozinho estoura o grafo."""
+    chamadas = "\n".join(f"    dominio_{i:03d}()" for i in range(80))
+    calls = _calls_by_scope(tmp_path, "wide.py", f"def run():\n{chamadas}\n")
+
+    assert len(calls["run"]) == MAX_CALLS_PER_CHUNK
+    # corta o excedente, mantendo as primeiras ocorrências
+    assert calls["run"][0] == "dominio_000"
+    assert calls["run"][-1] == f"dominio_{MAX_CALLS_PER_CHUNK - 1:03d}"
+
+
+def test_ca21_ordem_e_de_primeira_ocorrencia(tmp_path):
+    """CA21 — ordem estável e legível: a do arquivo, não a da varredura da AST."""
+    source = (
+        "def run():\n"
+        "    zebra()\n"
+        "    alfa()\n"
+        "    meio()\n"
+    )
+    calls = _calls_by_scope(tmp_path, "ordem.py", source)
+
+    assert calls["run"] == ["zebra", "alfa", "meio"]
+
+
+def test_ca21_extracao_e_deterministica(tmp_path):
+    """Duas extrações do mesmo arquivo devem ser idênticas."""
+    source = "def run():\n    a_fn()\n    b_fn()\n    a_fn()\n"
+    primeira = _calls_by_scope(tmp_path, "det.py", source)
+    segunda = _calls_by_scope(tmp_path, "det.py", source)
+
+    assert primeira == segunda
+
+
+def test_ca22_chamada_repetida_aparece_uma_vez(tmp_path):
+    """CA22 — dedup dentro do chunk; a aresta é a mesma qualquer que seja a contagem."""
+    source = "def run():\n    processar()\n    processar()\n    processar()\n"
+    calls = _calls_by_scope(tmp_path, "dedup.py", source)
+
+    assert calls["run"] == ["processar"]
+
+
+def test_receptor_e_descartado_fica_so_o_ultimo_identificador(tmp_path):
+    """R-CALL-01 — `self.storage.get_manifest()` vira `get_manifest`."""
+    source = "def run(self):\n    return self.storage.get_manifest()\n"
+    calls = _calls_by_scope(tmp_path, "receptor.py", source)
+
+    assert calls["run"] == ["get_manifest"]
+
+
+def test_extracao_nao_le_o_content_truncado(tmp_path):
+    """
+    RE08 — o `content` persistido passa por `_truncate_content`. Uma chamada no
+    miolo de um símbolo grande tem de sobreviver assim mesmo.
+    """
+    # A chamada fica no MIOLO: `_truncate_content` preserva as 7 primeiras linhas
+    # e as 3 últimas, então só o miolo prova que a leitura vem da AST.
+    antes = "\n".join(f"    x_{i} = {i}" for i in range(200))
+    depois = "\n".join(f"    y_{i} = {i}" for i in range(200))
+    source = f"def enorme():\n{antes}\n    alvo_no_miolo()\n{depois}\n    return 0\n"
+    chunker = ASTChunker()
+    path = tmp_path / "enorme.py"
+    path.write_text(source, encoding="utf-8")
+
+    chunk = next(c for c in chunker.chunk_file(path, "repo") if c.scope_name == "enorme")
+
+    assert len(chunk.content) <= _CHUNK_MAX_CHARS
+    assert "alvo_no_miolo" not in chunk.content
+    assert "alvo_no_miolo" in chunk.calls
+
+
+def test_rf18_linguagem_sem_ramo_ast_nao_produz_calls(tmp_path):
+    """RF18 — sem símbolo AST não há chamador; a lista tem de sair vazia."""
+    chunker = ASTChunker()
+    path = tmp_path / "notas.md"
+    path.write_text("# Titulo\n\nchamar_alguem() no texto\n", encoding="utf-8")
+
+    assert all(chunk.calls == [] for chunk in chunker.chunk_file(path, "repo"))
+
+
+def test_h4_chunk_module_de_script_participa_como_chamador(tmp_path):
+    """H4 — script sequencial não tem símbolo; o chunk `module` carrega as chamadas."""
+    chunker = ASTChunker()
+    path = tmp_path / "script.py"
+    path.write_text("configurar()\nexecutar()\n", encoding="utf-8")
+
+    chunks = chunker.chunk_file(path, "repo")
+
+    assert len(chunks) == 1
+    assert chunks[0].scope_type == "module"
+    assert chunks[0].calls == ["configurar", "executar"]
+
+
+def test_ca13_extracao_cobre_as_seis_linguagens_com_simbolo_ast(tmp_path):
+    """
+    CA13 — cada linguagem tem seu próprio nó de chamada na AST (`call`,
+    `call_expression`, `invocation_expression`, `method_invocation`). Um `kind`
+    errado em `_CALL_NODE_KINDS` produz silenciosamente zero chamadas para
+    aquela linguagem inteira.
+    """
+    casos = {
+        "a.py": ("def run():\n    return alvo_py()\n", "run", "alvo_py"),
+        "a.js": ("function run() {\n  return alvoJs();\n}\n", "run", "alvoJs"),
+        "a.ts": ("function run(): number {\n  return alvoTs();\n}\n", "run", "alvoTs"),
+        "a.go": ("package main\n\nfunc Run() int {\n\treturn alvoGo()\n}\n", "Run", "alvoGo"),
+        "A.cs": (
+            "class A {\n    void Run() { var x = AlvoCs(); }\n}\n",
+            "A.Run",
+            "AlvoCs",
+        ),
+        "A.java": (
+            "class A {\n    void run() { int x = alvoJava(); }\n}\n",
+            "A.run",
+            "alvoJava",
+        ),
+    }
+    chunker = ASTChunker()
+
+    for filename, (source, scope, esperado) in casos.items():
+        path = tmp_path / filename
+        path.write_text(source, encoding="utf-8")
+        calls = {chunk.scope_name: chunk.calls for chunk in chunker.chunk_file(path, "repo")}
+        assert esperado in calls.get(scope, []), f"{filename}: {calls}"

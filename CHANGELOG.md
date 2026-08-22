@@ -9,6 +9,46 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Removed**).
 
+### Added
+
+- **Arestas símbolo→símbolo (`calls`) no `graph.json`:** o chunker extrai alvos de
+  chamada da AST (nunca do `content` truncado), persiste `calls_json` no LanceDB e o
+  grafo resolve em segunda passada — mesmo arquivo → via import → único no grafo →
+  descarta — marcando `resolution` `exact`|`inferred` (`inferred` é pista, não fato).
+  Rebuild incremental descarta todas as arestas `calls` e re-resolve no grafo inteiro,
+  para não divergir do rebuild completo. Medido neste repositório: **0 → 1356 arestas
+  `calls` (98,4% exact / 1,6% inferred)**; símbolos com grau > 0 de 3,4% para 80,4%.
+  `atlas_graph(mode=path)` entre dois símbolos que se chamam passa a achar caminho.
+
+- **Invalidação automática por versão do produtor:** `CHUNKER_VERSION` (separado de
+  `CURRENT_INDEX_VERSION`) fica no `manifest.json`. Se o chunker ou o modelo de
+  embedding divergirem do índice, a próxima `atlas-index` força reindexação completa
+  (scan do workspace inteiro, mesmo com `paths`), imprime o motivo em stderr e
+  reporta `full_reason` (`chunker_version` | `embedding_model`). Manifests antigos
+  sem o campo valem `0.0.0` e re-chunkam — é o que preenche `calls_json` em índices
+  já existentes.
+
+### Changed
+
+- **`atlas_graph(mode=hubs)` honra `top_n`:** ordena todos os nós por `(-degree, id)`
+  em vez de fatiar `metrics.top_hubs` (teto interno 25). `hubs(top_n=50)` devolve 50.
+
+- **`atlas_graph(mode=explain)` com teto e `omitted`:** no máximo 25 vizinhos por
+  kind e 15 notas; a resposta inclui `omitted` com as contagens truncadas. Pior caso
+  neste repositório: **~81 KB → ~5 KB**.
+
+- **`atlas_brief` lista só hubs `file`/`doc`:** arestas `calls` entram no `degree` do
+  grafo (e em `atlas_graph` / viewer), mas o briefing deixa de promover símbolos a
+  "arquivos mais conectados". Sem o filtro, os 8 primeiros hubs do briefing neste
+  repo passariam a ser todos `symbol`.
+
+### Fixed
+
+- **Crash intermitente na persistência após extrair calls:** o parser nativo do
+  Tree-sitter é unsendable (pyo3); o GC durante as threads do LanceDB levantava
+  `RuntimeError`. `ASTChunker.release_parsers()` libera os parsers na thread que os
+  criou, antes da escrita.
+
 ### Changed
 
 - **README simplificado para setup:** fluxo em 3 passos; aviso explícito contra
@@ -54,8 +94,8 @@ Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Remo
   `brief_layers` e `brief_entrypoints`, além da nova fase `brief` em `phase_durations_s`.
 - **Grafo de conhecimento derivado** (`graph.json`): novo módulo `graph.py` reconstrói um grafo
   de nós (`file`/`doc`/`symbol`/`section`/`rationale`) e arestas (`contains`/`imports`/`cites`/
-  `mentions`) a partir do índice. Suporta rebuild completo e **rebuild incremental** para arquivos
-  de código já indexados que só tiveram o conteúdo alterado.
+  `mentions`/`calls`) a partir do índice. Suporta rebuild completo e **rebuild incremental** para
+  arquivos de código já indexados que só tiveram o conteúdo alterado.
 - **Nova ferramenta MCP `atlas_graph`** (`mode=hubs|path|explain`): consulta hubs de centralidade,
   caminhos entre dois nós (BFS) e a vizinhança/explicação de um nó, lendo `graph.json` sem
   reconstruí-lo.
