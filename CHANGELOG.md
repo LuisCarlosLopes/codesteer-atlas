@@ -7,7 +7,7 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Removed**).
+Versão alvo: `2.2.0`.
 
 ### Changed
 
@@ -149,6 +149,17 @@ Versão alvo: `2.0.0` (MAJOR — remove uma ferramenta MCP pública, veja **Remo
   reindexação para usar `atlas_graph`.
 - `docs/index.html`/`docs/styles.css` expandidos com a documentação visual do grafo.
 
+## [2.1.1] - 2026-08-26
+
+### Fixed
+
+- **`uvx --from git+... atlas-serve` morria no import** com
+  `ImportError: cannot import name 'McpError' from 'mcp.shared.exceptions'`.
+  Causa: `uvx` ignora o `uv.lock` e, com `mcp>=1.24.0,<3` no pyproject, resolve
+  `mcp` 2.x (SDK 2, `McpError` → `MCPError`) e recua `fastmcp==2.14.1` (ainda
+  importa `McpError`). Correção: restaurar o teto `mcp>=1.24.0,<2`. Smoke
+  `tests/test_mcp_pin.py` impede o teto `<3` de voltar sem teste falhar.
+
 ## [1.4.2] - 2026-07-03
 
 ### Added
@@ -246,7 +257,8 @@ Release inicial do CodeSteer Atlas.
 - Script de deploy (`deploy_mcp.py`) para registrar o servidor em Cursor, Claude Desktop,
   Cline e Claude Code CLI.
 
-[Unreleased]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1...HEAD
 [1.4.2]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...34ef305
 [1.4.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...dbd5c9a
 [1.4.0]: https://github.com/LuisCarlosLopes/codesteer-atlas/releases/tag/v1.4.0

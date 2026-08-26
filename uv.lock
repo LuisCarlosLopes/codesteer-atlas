@@ -254,7 +254,7 @@ wheels = [
 
 [[package]]
 name = "codesteer-atlas"
-version = "2.0.0"
+version = "2.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -284,7 +284,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.4" },
     { name = "fastmcp", specifier = ">=2.14.1,<4" },
     { name = "filelock", specifier = ">=3.12.0" },
-    { name = "lancedb", specifier = ">=0.17.0,<0.34.0" },
+    { name = "lancedb", specifier = ">=0.17.0,<0.38.0" },
     { name = "mcp", specifier = ">=1.24.0,<2" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pathspec", specifier = ">=0.12.0" },
