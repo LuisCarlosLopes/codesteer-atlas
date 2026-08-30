@@ -179,7 +179,7 @@ Crie/edite `opencode.json` **na raiz do projeto** (não na config global):
 
 ### Kiro
 
-Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` **na raiz do seu projeto** (não na config global do Kiro) e reinicie.
+Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_context`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` **na raiz do seu projeto** (não na config global do Kiro) e reinicie.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
 

@@ -137,7 +137,8 @@ Ou peça ao agente para usar a tool `atlas_index`.
 |---|---|
 | `atlas_search` | Busca híbrida. Por padrão retorna só metadados; use `include_content=true` ou `Read` nas linhas. Filtros: `repo`, `language`, `path_prefix`. |
 | `atlas_brief` | Briefing do projeto (identidade, camadas, entrypoints, hubs). Chame primeiro em projeto desconhecido. `level=0` ou `1`. |
-| `atlas_graph` | Grafo: `hubs`, `path`, `explain`. |
+| `atlas_context` | Pacote da tarefa (`target` + `intent`: `edit`/`debug`/`review`/`understand`) numa chamada, com teto de tokens. |
+| `atlas_graph` | Grafo: `hubs`, `path`, `explain`, `affected`. |
 | `atlas_index` | Indexa/reindexa; regenera `graph.json` / `graph.html`. Suporta `dry_run`. |
 | `atlas_status` | Diagnóstico do índice (`is_stale`, `graph_available`, `index_resolution`, …). |
 
@@ -153,6 +154,8 @@ Em resultados de código, `atlas_search` pode incluir `rationale_refs` (`DECISAO
 atlas_graph(mode="hubs", top_n=10)
 atlas_graph(mode="path", source="src/app.py", target="dec-002")
 atlas_graph(mode="explain", target="AuthService.login")
+atlas_graph(mode="affected", target="AuthService.login")
+atlas_context(target="AuthService.login", intent="edit")
 ```
 
 > **Upgrade:** `atlas_graph` / `graph.html` exigem reindex em índices antigos (&lt; `2.1.0`).
@@ -176,8 +179,9 @@ Este repositório é indexado pelo MCP `codesteer-atlas`. Para entender, planeja
 ## Use assim
 
 - `atlas_brief`: orientar-se num projeto desconhecido — chame primeiro, uma vez
+- `atlas_context`: quando o símbolo/arquivo da tarefa já é conhecido (`intent` = edit/debug/review/understand)
 - `atlas_search`: localizar função, classe, método, símbolo ou conceito
-- `atlas_graph`: hubs, paths e conexões (código, markdown, rationale)
+- `atlas_graph`: hubs, paths, conexões e `mode="affected"` (raio de impacto)
 - `atlas_status`: só se houver suspeita de índice ausente ou desatualizado
 - `atlas_index`: reindexar após mudanças grandes ou índice stale
 

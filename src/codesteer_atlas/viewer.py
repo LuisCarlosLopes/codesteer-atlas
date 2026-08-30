@@ -330,6 +330,7 @@ _HTML_TEMPLATE = """<!doctype html>
     const activeEdgeKinds = new Set(edgeKinds);
     const summaryFocusIds = new Set(viewer.focus_node_ids || []);
     const highlightHubIds = new Set(viewer.highlight_hub_ids || []);
+    const noiseHubIds = new Set(viewer.noise_hub_ids || []);
     const nodeIdsByKind = new Map(nodeKinds.map(kind => [kind, []]));
     const adjacency = new Map(rawNodes.map(node => [node.id, []]));
     for (const node of rawNodes) {
@@ -453,10 +454,11 @@ _HTML_TEMPLATE = """<!doctype html>
     function colorForNode(node) {
       const base = colorByKind[node.kind] || "#94a3b8";
       let alpha = 0.9;
+      if (noiseHubIds.has(node.id)) alpha = 0.22;
       if (state.focusIds.size && !state.focusIds.has(node.id)) {
         alpha = 0.1;
       } else if (!state.focusIds.size && viewer.hubs_only && !state.showAll && !highlightHubIds.has(node.id)) {
-        alpha = 0.45;
+        alpha = Math.min(alpha, 0.45);
       }
       if (state.matchedIds.has(node.id)) alpha = 1;
       if (node.id === state.selectedId || node.id === state.hoveredId) alpha = 1;
@@ -797,12 +799,19 @@ def write_graph_html(graph: dict, index_dir: Path) -> Path:
 
     existing_viewer = dict(graph_for_view.get("viewer") or {})
     existing_render_profile = dict(existing_viewer.get("render_profile") or {})
+    # Import tardio evita ciclo com graph.py
+    from codesteer_atlas.graph import is_noise_hub
+
+    noise_hub_ids = [
+        node["id"] for node in graph_for_view.get("nodes", []) if is_noise_hub(node)
+    ]
     graph_for_view["viewer"] = {
         **existing_viewer,
         "node_count": metrics.get("node_count", node_count),
         "edge_count": metrics.get("edge_count", edge_count),
         "layout_mode": "light-relaxed" if node_count <= 250 else "radial-seeded",
         "highlight_hub_ids": top_hub_ids,
+        "noise_hub_ids": noise_hub_ids,
         "render_profile": {
             **existing_render_profile,
             "label_mode": "focus-only",

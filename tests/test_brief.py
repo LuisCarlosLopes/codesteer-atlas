@@ -300,6 +300,26 @@ def test_hubs_ignora_secoes_e_rationale():
     assert hubs[0]["label"] == "core.py"
 
 
+def test_compute_hubs_uses_shared_is_noise_hub():
+    """Label json/Path não ranqueia; um file real de grau menor permanece."""
+    nodes = [
+        _symbol_node("lib/codec.py", "json", degree=50),
+        _symbol_node("lib/paths.py", "Path", degree=40),
+        _file_node("core.py", degree=5),
+        {"id": "sec:doc.md#T", "kind": "section", "label": "T", "file_path": "doc.md", "degree": 99},
+    ]
+    hubs = build_brief(
+        _make_manifest(["lib/codec.py", "lib/paths.py", "core.py", "doc.md"]),
+        _graph(nodes),
+        Path("."),
+    )["hubs"]
+
+    labels = {hub["label"] for hub in hubs}
+    assert "json" not in labels
+    assert "Path" not in labels
+    assert "core.py" in labels
+
+
 def test_hubs_vazio_quando_sem_arestas_cruzadas():
     """Sem conectividade real, a resposta é lista vazia — não uma ordem alfabética."""
     nodes = [_file_node("a.py", degree=0), _file_node("b.py", degree=0)]

@@ -7,10 +7,13 @@ Use as tools do MCP **antes** de `grep`/`rg`/`find`/glob ou leitura em massa.
 | Objetivo | Tool |
 | --- | --- |
 | Se orientar num projeto desconhecido (chame primeiro) | `atlas_brief` |
+| Pacote da tarefa quando o símbolo/arquivo já é conhecido | `atlas_context` |
 | Onde algo está implementado | `atlas_search` |
-| Conectividade, hubs e rationale | `atlas_graph` |
+| Conectividade, hubs, rationale e impacto (`affected`) | `atlas_graph` |
 | Diagnóstico do índice | `atlas_status` |
 | (Re)indexar | `atlas_index` |
+
+**Quando a tarefa já tem um símbolo ou arquivo**, chame `atlas_context(target, intent)` primeiro (`edit` / `debug` / `review` / `understand`) em vez de encadear `atlas_graph` + `atlas_brief`. Use `atlas_graph(mode="affected")` para o raio de impacto.
 
 **`atlas_search` (2 passos):** retorna só metadados por padrão — localize com
 `path_prefix`/`language`/`top_k` baixo; depois `Read` nas linhas ou

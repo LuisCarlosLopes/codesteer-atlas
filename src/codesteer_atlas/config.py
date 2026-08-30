@@ -78,6 +78,41 @@ GRAPH_HTML_FILENAME = "graph.html"
 GRAPH_TOP_HUBS_LIMIT = 25
 GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
+GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND = 12
+GRAPH_AFFECTED_MAX_RESULTS = 40
+GRAPH_RESPONSE_MAX_CHARS = 6000
+CONTEXT_RESPONSE_MAX_CHARS = 12000
+# Cotas por seção do atlas_context (DECISÃO-002). Cada intent soma abaixo do teto
+# para o leftover pool ter folga; o serializador aplica CONTEXT_RESPONSE_MAX_CHARS.
+CONTEXT_BUDGET_BY_SECTION = {
+    "symbol": 1800,
+    "callers": 1600,
+    "callees": 1600,
+    "tests": 1200,
+    "rationale": 1000,
+    "call_chain_to_entrypoints": 1600,
+    "error_handling": 600,
+    "recent_history": 600,
+    "diff": 800,
+    "impact": 1600,
+    "adrs": 1000,
+    "layer": 800,
+    "neighbors": 1600,
+    "brief_layer": 1000,
+}
+GRAPH_NOISE_HUB_LABELS = frozenset(
+    {
+        "path",
+        "optional",
+        "logger",
+        "utils",
+        "json",
+        "dict",
+        "list",
+        "str",
+        "any",
+    }
+)
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
 
 # Briefing pré-computado do projeto (atlas_brief). Todos os limites abaixo existem para

@@ -13,8 +13,9 @@ or explore code.
 | Purpose | Tool |
 | --- | --- |
 | Get oriented in an unfamiliar project (call this first, once) | `atlas_brief` |
+| Task pack when the symbol/file is already known | `atlas_context` |
 | Find where a function, class, method, or concept is implemented | `atlas_search` |
-| Inspect hubs, paths, and rationale connectivity | `atlas_graph` |
+| Inspect hubs, paths, rationale, and impact (`affected`) | `atlas_graph` |
 | Check if the index exists and is up-to-date | `atlas_status` |
 | Reindex after major changes or outdated index | `atlas_index` |
 
@@ -63,8 +64,9 @@ Everything runs 100% locally and offline — no source code is ever sent to exte
 | Goal                                                            | Tool           |
 | --------------------------------------------------------------- | -------------- |
 | Get oriented in an unfamiliar project (call first, once)        | `atlas_brief`  |
+| Task pack when the symbol/file is already known                 | `atlas_context` |
 | Find where a function, class, method, or concept is implemented | `atlas_search` |
-| Inspect hubs, paths, and rationale connectivity                | `atlas_graph`  |
+| Inspect hubs, paths, rationale, and impact (`affected`)         | `atlas_graph`  |
 | Check whether the index exists and is up to date                | `atlas_status` |
 | Reindex after large changes or when status reports stale        | `atlas_index`  |
 
@@ -113,10 +115,11 @@ Source lives under `src/codesteer_atlas/`:
 - **`embeddings.py` (`EmbeddingEngine`)** — singleton, lazy-loaded `fastembed.TextEmbedding` wrapper (`FASTEMBED_MODEL_NAME = sentence-transformers/all-MiniLM-L6-v2`). Loads the model only on first `encode`/`encode_single` call to keep server startup instant.
 - **`storage.py` (`StorageBackend`)** — all LanceDB interaction and `manifest.json` read/write. Owns hybrid search (`search_hybrid`): runs vector + FTS queries with prefilters, fuses results with RRF, and returns `SearchResult`s. Also handles incremental add/delete of chunks and manifest updates (`update_manifest_after_incremental`). Enforces `MIN_INDEX_VERSION` — manifests from older (sentence-transformers/torch) backends raise an actionable `RuntimeError` requiring reindex.
 - **`indexer.py`** — `index_workspace()` is the reusable indexing core (used by both the CLI and the MCP `atlas_index` tool): scans the workspace (or selected `paths` subtrees, with anti-traversal validation), hashes file contents (sha256) for incremental indexing, chunks/embeds only new-or-changed files, and decides between full overwrite vs. incremental delete+append persistence. Also exposes `get_git_head_sha()` and `should_ignore()`.
-- **`graph.py`** — rebuild completo do `graph.json`, resolução de imports/cites, métricas de hubs e consultas (`path`/`explain`) sobre o grafo derivado.
-- **`viewer.py`** — gera `graph.html` autocontido em `.code-index/`, com dados embutidos para abrir via `file://`.
-- **`brief.py`** — gera `brief.json` (briefing ranqueado do projeto: identidade, camadas, entrypoints, hubs) consumido por `atlas_brief`. Deriva tudo de `manifest` + `graph.json`, **sem tocar o `StorageBackend`**, o que mantém a recomputação sob demanda barata. Todas as listas são capadas pelas constantes `BRIEF_*`, e `render_brief` impõe o teto de caracteres como pós-condição.
-- **`server.py`** — FastMCP server (`app = FastMCP("CodeSteer Atlas")`). Critically, `sys.stdout` is redirected to `stderr` at import time (before heavy deps like `lancedb`/`fastembed` load) and only restored to the real stdout in `main()` right before `app.run()`, to keep the stdio JSON-RPC channel clean. Exposes MCP tools `atlas_search`, `atlas_brief`, `atlas_graph`, `atlas_index` (with `dry_run` mode), `atlas_status`, and resource `atlas://status`.
+- **`graph.py`** — rebuild completo do `graph.json`, resolução de imports/cites, métricas de hubs, `explain` capado, `affected` (BFS reversa) e predicado `is_noise_hub`.
+- **`context.py`** — monta o pacote `atlas_context(target, intent)` sob cotas por seção e teto `CONTEXT_RESPONSE_MAX_CHARS`, sem embeddings.
+- **`viewer.py`** — gera `graph.html` autocontido em `.code-index/`, com dados embutidos para abrir via `file://`; esmaece `noise_hub_ids`.
+- **`brief.py`** — gera `brief.json` (briefing ranqueado do projeto: identidade, camadas, entrypoints, hubs) consumido por `atlas_brief`. Deriva tudo de `manifest` + `graph.json`, **sem tocar o `StorageBackend`**, o que mantém a recomputação sob demanda barata. Todas as listas são capadas pelas constantes `BRIEF_*`, e `render_brief` impõe o teto de caracteres como pós-condição. Hubs usam o mesmo `is_noise_hub` do grafo.
+- **`server.py`** — FastMCP server (`app = FastMCP("CodeSteer Atlas")`). Critically, `sys.stdout` is redirected to `stderr` at import time (before heavy deps like `lancedb`/`fastembed` load) and only restored to the real stdout in `main()` right before `app.run()`, to keep the stdio JSON-RPC channel clean. Exposes MCP tools `atlas_search`, `atlas_brief`, `atlas_context`, `atlas_graph`, `atlas_index` (with `dry_run` mode), `atlas_status`, and resource `atlas://status`.
 - **`models.py`** — Pydantic models: `CodeChunk`, `IndexManifest`, `SearchResult`, `IndexStats`.
 
 ### Index directory resolution (DECISAO-002)

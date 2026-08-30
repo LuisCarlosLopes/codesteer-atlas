@@ -19,6 +19,7 @@ from codesteer_atlas.server import (
     _spawn_background_reindex,
     _spawn_index_subprocess,
     atlas_brief,
+    atlas_context,
     atlas_graph,
     atlas_index,
     atlas_search,
@@ -1615,6 +1616,91 @@ def test_atlas_graph_invalid_mode_raises_value_error():
         assert "mode" in str(e)
     else:
         raise AssertionError("Esperava ValueError")
+
+
+def test_atlas_graph_mode_rejects_unknown():
+    try:
+        atlas_graph(mode="shortest")
+    except ValueError as e:
+        assert "affected" in str(e)
+        assert "explain" in str(e)
+    else:
+        raise AssertionError("Esperava ValueError")
+
+
+def test_atlas_graph_affected_requires_target(tmp_path):
+    graph = {
+        "nodes": [{"id": "file:pkg/a.py", "kind": "file", "label": "a.py", "file_path": "pkg/a.py", "degree": 0}],
+        "edges": [],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        try:
+            atlas_graph(mode="affected")
+        except ValueError as e:
+            assert "target" in str(e)
+        else:
+            raise AssertionError("Esperava ValueError")
+
+
+def test_atlas_graph_explain_payload_includes_truncated_when_capped(tmp_path):
+    hub = {
+        "id": "file:pkg/hub.py",
+        "kind": "file",
+        "label": "hub.py",
+        "file_path": "pkg/hub.py",
+        "degree": 20,
+    }
+    neighbors = [
+        {
+            "id": f"sym:pkg/hub.py#fn{i}",
+            "kind": "symbol",
+            "label": f"fn{i}",
+            "file_path": "pkg/hub.py",
+            "lines": [i, i],
+            "degree": 20 - i,
+        }
+        for i in range(15)
+    ]
+    graph = {
+        "nodes": [hub, *neighbors],
+        "edges": [{"source": hub["id"], "target": n["id"], "kind": "contains"} for n in neighbors],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="explain", target="hub.py"))
+    assert result["truncated"]["symbol"] == 3
+
+
+def test_atlas_context_roundtrip_json(tmp_path):
+    graph = {
+        "nodes": [
+            {
+                "id": "file:pkg/a.py",
+                "kind": "file",
+                "label": "a.py",
+                "file_path": "pkg/a.py",
+                "degree": 0,
+            }
+        ],
+        "edges": [],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    manifest = MOCK_MANIFEST.model_copy(update={"files": {"pkg/a.py": "hash"}})
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+    ):
+        raw = atlas_context(target="a.py", intent="understand")
+    payload = json.loads(raw)
+    assert payload["intent"] == "understand"
+    assert payload["target"]["id"] == "file:pkg/a.py"
+    assert set(payload["sections"]) == {"symbol", "layer", "neighbors", "brief_layer"}
+    assert "budget" in payload
 
 
 def test_atlas_status_includes_graph_availability_and_viewer_path(tmp_path):

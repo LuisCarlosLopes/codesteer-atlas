@@ -37,7 +37,7 @@ from codesteer_atlas.config import (
     GRAPH_FILENAME,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.graph import load_graph, resolve_module_path
+from codesteer_atlas.graph import is_noise_hub, load_graph, resolve_module_path
 
 BRIEF_SCHEMA_VERSION = "1.0"
 
@@ -313,7 +313,9 @@ def _compute_hubs(graph: Optional[dict]) -> List[dict]:
     candidates = [
         node
         for node in graph.get("nodes", [])
-        if node.get("kind") in {"file", "doc", "symbol"} and (node.get("degree") or 0) >= 1
+        if node.get("kind") in {"file", "doc", "symbol"}
+        and (node.get("degree") or 0) >= 1
+        and not is_noise_hub(node)
     ]
     candidates.sort(key=lambda node: (-(node.get("degree") or 0), node["id"]))
     return [

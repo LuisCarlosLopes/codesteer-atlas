@@ -137,6 +137,48 @@ def test_large_graph_marks_hubs_only_flag_in_embed(tmp_path):
     assert embedded["viewer"]["notice"] == "Grafo grande: exibindo hubs e vizinhanca 1-hop por padrao."
 
 
+def test_write_graph_html_embeds_noise_hub_ids(tmp_path):
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [
+            {"id": "sym:lib/json.py#json", "kind": "symbol", "label": "json", "degree": 40},
+            {"id": "file:src/app.py", "kind": "file", "label": "app.py", "degree": 3},
+        ],
+        "edges": [],
+        "metrics": {
+            "node_count": 2,
+            "edge_count": 0,
+            "top_hubs": [{"id": "file:src/app.py", "degree": 3}],
+        },
+    }
+
+    embedded = _extract_json_payload(
+        write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+    )
+
+    assert "sym:lib/json.py#json" in embedded["viewer"]["noise_hub_ids"]
+    assert "file:src/app.py" not in embedded["viewer"]["noise_hub_ids"]
+
+
+def test_noise_nodes_do_not_break_offline_file_url_invariant(tmp_path):
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [
+            {"id": "sym:lib/json.py#json", "kind": "symbol", "label": "json", "degree": 40},
+        ],
+        "edges": [],
+        "metrics": {"node_count": 1, "edge_count": 0, "top_hubs": []},
+    }
+
+    html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+
+    assert "<script src=" not in html
+    assert "//cdn" not in html
+    assert "noiseHubIds" in html
+
+
 def test_viewer_template_embeds_force_graph_with_dark_theme_and_on_demand_labels(tmp_path):
     graph = {
         "workspace_repo": "repo",

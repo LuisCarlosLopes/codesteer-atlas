@@ -11,6 +11,7 @@
         "atlas_brief",
         "atlas_search",
         "atlas_graph",
+        "atlas_context",
         "atlas_status"
       ]
     }

@@ -46,10 +46,19 @@ from codesteer_atlas.config import (  # noqa: E402
     GRAPH_FILENAME,
     GRAPH_HTML_FILENAME,
     GRAPH_PATH_MAX_HOPS,
+    GRAPH_RESPONSE_MAX_CHARS,
     SUPPORTED_EXTENSIONS,
 )
+from codesteer_atlas.context import VALID_INTENTS, build_context  # noqa: E402
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
-from codesteer_atlas.graph import bfs_path, explain, hubs, load_graph  # noqa: E402
+from codesteer_atlas.graph import (  # noqa: E402
+    affected,
+    bfs_path,
+    enforce_graph_response_budget,
+    explain,
+    hubs,
+    load_graph,
+)
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
     index_workspace,
@@ -663,6 +672,11 @@ def atlas_search(
     return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
 
+def _dump_graph_payload(payload: dict) -> str:
+    enforce_graph_response_budget(payload, GRAPH_RESPONSE_MAX_CHARS)
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
 @app.tool()
 def atlas_graph(
     mode: str,
@@ -672,16 +686,18 @@ def atlas_graph(
     ctx: "Context | None" = None,
 ) -> str:
     """
-    Query the derived knowledge graph for hubs, paths, or neighborhood explanations.
+    Query the derived knowledge graph for hubs, paths, neighborhood explanations,
+    or the reverse-impact radius of a node.
 
-    Call this directly when the question is about connectivity, rationale, or
-    centrality in the indexed workspace. It reads the derived `graph.json`
-    produced by `atlas_index`; it does not rebuild the graph itself.
+    Call this directly when the question is about connectivity, rationale,
+    centrality, or "what breaks if I change this?" in the indexed workspace.
+    It reads the derived `graph.json` produced by `atlas_index`; it does not
+    rebuild the graph itself.
 
     Args:
-        mode: One of `hubs`, `path`, or `explain`.
-        target: Required for `path` and `explain`. Accepts exact node id, exact label,
-            or a unique suffix.
+        mode: One of `hubs`, `path`, `explain`, or `affected`.
+        target: Required for `path`, `explain`, and `affected`. Accepts exact node id,
+            exact label, or a unique suffix.
         source: Required for `path`. Accepts exact node id, exact label, or a unique suffix.
         top_n: Number of hubs to return for `hubs` mode. Must be between 1 and 50.
 
@@ -690,8 +706,8 @@ def atlas_graph(
     """
     _resolve_index_dir_via_roots(ctx)
 
-    if mode not in {"hubs", "path", "explain"}:
-        raise ValueError("O parâmetro 'mode' deve ser 'hubs', 'path' ou 'explain'.")
+    if mode not in {"hubs", "path", "explain", "affected"}:
+        raise ValueError("O parâmetro 'mode' deve ser 'hubs', 'path', 'explain' ou 'affected'.")
     if top_n < 1 or top_n > 50:
         raise ValueError("O parâmetro 'top_n' deve estar entre 1 e 50.")
 
@@ -699,19 +715,73 @@ def atlas_graph(
 
     if mode == "hubs":
         payload = {"mode": "hubs", "items": hubs(graph, top_n)}
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return _dump_graph_payload(payload)
 
     if mode == "path":
         if not source or not target:
             raise ValueError("Os parâmetros 'source' e 'target' são obrigatórios em mode='path'.")
         payload = bfs_path(graph, source, target, max_hops=GRAPH_PATH_MAX_HOPS)
         payload["mode"] = "path"
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return _dump_graph_payload(payload)
+
+    if mode == "affected":
+        if not target:
+            raise ValueError("O parâmetro 'target' é obrigatório em mode='affected'.")
+        payload = affected(graph, target)
+        payload["mode"] = "affected"
+        return _dump_graph_payload(payload)
 
     if not target:
         raise ValueError("O parâmetro 'target' é obrigatório em mode='explain'.")
     payload = explain(graph, target)
     payload["mode"] = "explain"
+    return _dump_graph_payload(payload)
+
+
+@app.tool()
+def atlas_context(
+    target: str,
+    intent: str,
+    ctx: "Context | None" = None,
+) -> str:
+    """
+    Assemble a task-oriented context pack for a symbol or file in one call.
+
+    Use this first when you already know which symbol or file you will edit,
+    debug, review, or understand. It composes neighborhood, impact radius,
+    inferred tests and brief layer under a token budget so you do not need
+    to chain atlas_graph / atlas_brief / atlas_search yourself.
+
+    Args:
+        target: Node id, exact label, or unique suffix (same resolution as atlas_graph).
+        intent: One of `edit`, `debug`, `review`, or `understand`.
+
+    Returns:
+        JSON string with `target`, `intent`, `sections`, optional `truncated`,
+        `warnings` and `budget`.
+    """
+    # @MindSpec: Input target+intent | Output JSON ≤ CONTEXT_RESPONSE_MAX_CHARS | Error ValueError / índice ausente
+    _resolve_index_dir_via_roots(ctx)
+
+    if not target or not str(target).strip():
+        raise ValueError("O parâmetro 'target' é obrigatório.")
+    if intent not in VALID_INTENTS:
+        raise ValueError(
+            "O parâmetro 'intent' deve ser 'edit', 'debug', 'review' ou 'understand'."
+        )
+
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+
+    graph = load_graph(INDEX_DIR_PATH)
+    payload = build_context(
+        graph,
+        target=target,
+        intent=intent,
+        manifest=storage.get_manifest(),
+        brief=load_brief(INDEX_DIR_PATH),
+    )
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 

@@ -8,7 +8,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from codesteer_atlas.config import GRAPH_FILENAME, GRAPH_PATH_MAX_HOPS, GRAPH_TOP_HUBS_LIMIT
+from codesteer_atlas.config import (
+    GRAPH_AFFECTED_MAX_RESULTS,
+    GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND,
+    GRAPH_FILENAME,
+    GRAPH_NOISE_HUB_LABELS,
+    GRAPH_PATH_MAX_HOPS,
+    GRAPH_RESPONSE_MAX_CHARS,
+    GRAPH_TOP_HUBS_LIMIT,
+)
 from codesteer_atlas.markdown_links import extract_markdown_link_targets
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
@@ -172,12 +180,113 @@ def _node_summary(node: dict) -> dict:
     }
 
 
+def is_noise_hub(node: dict) -> bool:
+    # @MindWhy: denylist só no ranking/expansão; o nó permanece no grafo e no explain direto
+    kind = node.get("kind")
+    if kind in {"section", "rationale"}:
+        return True
+    label = str(node.get("label") or "").casefold()
+    return label in GRAPH_NOISE_HUB_LABELS
+
+
 def _build_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str]]]:
     adjacency: Dict[str, List[Tuple[str, str]]] = {}
     for edge in graph.get("edges", []):
         adjacency.setdefault(edge["source"], []).append((edge["target"], edge["kind"]))
         adjacency.setdefault(edge["target"], []).append((edge["source"], edge["kind"]))
     return adjacency
+
+
+def _build_reverse_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str, dict]]]:
+    """target → [(source, kind, edge), ...] — dependentes de cada dependência."""
+    reverse: Dict[str, List[Tuple[str, str, dict]]] = {}
+    for edge in graph.get("edges", []):
+        reverse.setdefault(edge["target"], []).append((edge["source"], edge["kind"], edge))
+    return reverse
+
+
+def _via_location(dependent: dict, edge: dict) -> Optional[dict]:
+    location = edge.get("location")
+    if location:
+        return location
+    file_path = dependent.get("file_path")
+    lines = dependent.get("lines")
+    if file_path and lines:
+        return {"file_path": file_path, "lines": lines}
+    if file_path:
+        return {"file_path": file_path}
+    return None
+
+
+def _serialized_len(payload: dict) -> int:
+    return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+
+
+def _mark_graph_truncated(payload: dict, omitted: int = 1) -> None:
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    payload["warnings"] = sorted(warnings)
+    mode = payload.get("mode")
+    truncated = payload.get("truncated")
+    if mode == "explain":
+        current = dict(truncated) if isinstance(truncated, dict) else {}
+        current["budget"] = current.get("budget", 0) + omitted
+        payload["truncated"] = current
+        return
+    if mode == "affected" or isinstance(truncated, dict) and "omitted" in (truncated or {}):
+        previous = truncated.get("omitted", 0) if isinstance(truncated, dict) else 0
+        payload["truncated"] = {"omitted": previous + omitted}
+        return
+    payload["truncated"] = True
+
+
+def enforce_graph_response_budget(
+    payload: dict, max_chars: int = GRAPH_RESPONSE_MAX_CHARS
+) -> dict:
+    """Pós-condição: JSON do grafo ≤ teto; corte declarado em truncated/warnings."""
+    if _serialized_len(payload) <= max_chars:
+        return payload
+
+    items = payload.get("items")
+    while isinstance(items, list) and items and _serialized_len(payload) > max_chars:
+        items.pop()
+        _mark_graph_truncated(payload)
+        if _serialized_len(payload) <= max_chars:
+            return payload
+
+    neighbors = payload.get("neighbors")
+    if isinstance(neighbors, dict):
+        for kind in list(neighbors):
+            bucket = neighbors.get(kind)
+            while isinstance(bucket, list) and bucket and _serialized_len(payload) > max_chars:
+                bucket.pop()
+                _mark_graph_truncated(payload)
+                if _serialized_len(payload) <= max_chars:
+                    return payload
+
+    for key in ("rationale", "notes"):
+        bucket = payload.get(key)
+        while isinstance(bucket, list) and bucket and _serialized_len(payload) > max_chars:
+            bucket.pop()
+            _mark_graph_truncated(payload)
+            if _serialized_len(payload) <= max_chars:
+                return payload
+
+    path = payload.get("path")
+    while isinstance(path, list) and len(path) > 1 and _serialized_len(payload) > max_chars:
+        path.pop()
+        _mark_graph_truncated(payload)
+        if _serialized_len(payload) <= max_chars:
+            return payload
+
+    return payload
+
+
+def _attach_query_indexes(graph: dict) -> dict:
+    graph["_nodes_by_id"] = {node["id"]: node for node in graph.get("nodes", [])}
+    graph["_adjacency"] = _build_adjacency(graph)
+    graph["_reverse_adjacency"] = _build_reverse_adjacency(graph)
+    return graph
 
 
 def _clear_graph_cache(graph_path: Optional[Path] = None) -> None:
@@ -352,7 +461,11 @@ def _finalize_graph(graph: dict) -> dict:
         nodes[node_id]["degree"] = degree
 
     top_hubs = sorted(
-        ({"id": node_id, "degree": degree} for node_id, degree in degree_by_id.items()),
+        (
+            {"id": node_id, "degree": degree}
+            for node_id, degree in degree_by_id.items()
+            if node_id in nodes and not is_noise_hub(nodes[node_id])
+        ),
         key=lambda item: (-item["degree"], item["id"]),
     )[:GRAPH_TOP_HUBS_LIMIT]
 
@@ -504,8 +617,7 @@ def load_graph(index_dir: Path) -> dict:
 
     with open(graph_path, "r", encoding="utf-8") as f:
         graph = json.load(f)
-    graph["_nodes_by_id"] = {node["id"]: node for node in graph.get("nodes", [])}
-    graph["_adjacency"] = _build_adjacency(graph)
+    _attach_query_indexes(graph)
     with _GRAPH_CACHE_LOCK:
         _GRAPH_CACHE.update(
             {
@@ -616,9 +728,11 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
 
 def hubs(graph: dict, top_n: int) -> List[dict]:
     result = []
-    for item in graph.get("metrics", {}).get("top_hubs", [])[:top_n]:
+    for item in graph.get("metrics", {}).get("top_hubs", []):
+        if len(result) >= top_n:
+            break
         node = graph["_nodes_by_id"].get(item["id"])
-        if node is None:
+        if node is None or is_noise_hub(node):
             continue
         result.append(
             {
@@ -636,33 +750,109 @@ def explain(graph: dict, ref: str) -> dict:
     node = resolve_node(graph, ref)
     adjacency = graph["_adjacency"]
     neighbors: Dict[str, List[dict]] = {}
-    rationale_nodes: List[dict] = []
-    notes: List[dict] = []
 
     for neighbor_id, edge_kind in adjacency.get(node["id"], []):
         neighbor = graph["_nodes_by_id"][neighbor_id]
         summary = _node_summary(neighbor)
         summary["edge_kind"] = edge_kind
         neighbors.setdefault(neighbor["kind"], []).append(summary)
-        if neighbor["kind"] == "rationale":
-            rationale_nodes.append(summary)
-        if neighbor["kind"] == "doc":
-            notes.append(
-                {
-                    "id": neighbor["id"],
-                    "label": neighbor.get("label"),
-                    "file_path": neighbor.get("file_path"),
-                    "lines": neighbor.get("lines"),
-                }
-            )
 
-    for kind in neighbors:
-        neighbors[kind] = sorted(neighbors[kind], key=lambda item: (item["label"] or "", item["id"]))
-    notes = sorted(notes, key=lambda item: item["file_path"] or "")
+    truncated: Dict[str, int] = {}
+    capped: Dict[str, List[dict]] = {}
+    for kind, items in neighbors.items():
+        ordered = sorted(
+            items,
+            key=lambda item: (-(item.get("degree") or 0), item.get("label") or "", item["id"]),
+        )
+        omitted = max(0, len(ordered) - GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND)
+        if omitted:
+            truncated[kind] = omitted
+        capped[kind] = ordered[:GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND]
 
-    return {
+    notes = sorted(
+        [
+            {
+                "id": item["id"],
+                "label": item.get("label"),
+                "file_path": item.get("file_path"),
+                "lines": item.get("lines"),
+            }
+            for item in capped.get("doc", [])
+        ],
+        key=lambda item: item["file_path"] or "",
+    )
+
+    result = {
         "node": _node_summary(node),
-        "neighbors": neighbors,
-        "rationale": rationale_nodes,
+        "neighbors": capped,
+        "rationale": list(capped.get("rationale", [])),
         "notes": notes,
+    }
+    if truncated:
+        result["truncated"] = truncated
+    return result
+
+
+_AFFECTED_RELATIONS = frozenset({"calls", "imports"})
+
+
+def affected(graph: dict, ref: str) -> dict:
+    # @MindFlow: resolve → semeia contains (não reporta) → BFS reversa {calls,imports} → cap
+    # @MindRisk: reusar _adjacency não-dirigida marcaria dependência e dependente como afetados
+    seed = resolve_node(graph, ref)
+    nodes_by_id = graph["_nodes_by_id"]
+    reverse = graph.get("_reverse_adjacency")
+    if reverse is None:
+        reverse = _build_reverse_adjacency(graph)
+
+    warnings: List[str] = []
+    if not any(edge.get("kind") == "calls" for edge in graph.get("edges", [])):
+        warnings.append("calls_unavailable")
+
+    seed_ids = {seed["id"]}
+    for edge in graph.get("edges", []):
+        if edge["kind"] == "contains" and edge["source"] == seed["id"]:
+            seed_ids.add(edge["target"])
+
+    visited = set(seed_ids)
+    queue: deque[tuple[str, int, str, Optional[dict]]] = deque()
+
+    def enqueue_from(origin_id: str, hops: int) -> None:
+        origin = nodes_by_id.get(origin_id)
+        if origin is None:
+            return
+        if is_noise_hub(origin) and origin_id != seed["id"]:
+            return
+        for neighbor_id, kind, edge in reverse.get(origin_id, []):
+            if kind not in _AFFECTED_RELATIONS or neighbor_id in visited:
+                continue
+            neighbor = nodes_by_id.get(neighbor_id)
+            if neighbor is None:
+                continue
+            if is_noise_hub(neighbor) and neighbor_id != seed["id"]:
+                continue
+            visited.add(neighbor_id)
+            queue.append((neighbor_id, hops, kind, _via_location(neighbor, edge)))
+
+    for sid in seed_ids:
+        enqueue_from(sid, 1)
+
+    items: List[dict] = []
+    while queue:
+        node_id, hops, via, location = queue.popleft()
+        neighbor = nodes_by_id[node_id]
+        entry = {**_node_summary(neighbor), "hops": hops, "via": via}
+        if location:
+            entry["via_location"] = location
+        items.append(entry)
+        enqueue_from(node_id, hops + 1)
+
+    items.sort(key=lambda item: (item["hops"], -(item.get("degree") or 0), item["id"]))
+    omitted = max(0, len(items) - GRAPH_AFFECTED_MAX_RESULTS)
+    items = items[:GRAPH_AFFECTED_MAX_RESULTS]
+    return {
+        "target": _node_summary(seed),
+        "items": items,
+        "truncated": {"omitted": omitted} if omitted else False,
+        "warnings": warnings,
     }

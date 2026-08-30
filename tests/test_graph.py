@@ -3,7 +3,18 @@ from unittest.mock import patch
 
 import pytest
 
-from codesteer_atlas.graph import bfs_path, build_and_write, explain, hubs, load_graph, resolve_node
+from codesteer_atlas.config import GRAPH_AFFECTED_MAX_RESULTS, GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND
+from codesteer_atlas.graph import (
+    _clear_graph_cache,
+    affected,
+    bfs_path,
+    build_and_write,
+    explain,
+    hubs,
+    is_noise_hub,
+    load_graph,
+    resolve_node,
+)
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.storage import StorageBackend
 
@@ -452,3 +463,179 @@ def test_import_resolvido_gera_grau_para_ranqueamento(temp_storage):
 
     assert degrees["file:src/demo/core.py"] == 1
     assert degrees["file:src/demo/util.py"] == 1
+
+
+def _write_query_graph(index_dir, nodes, edges, top_hubs=None):
+    _clear_graph_cache()
+    payload = {
+        "nodes": nodes,
+        "edges": edges,
+        "metrics": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "top_hubs": top_hubs if top_hubs is not None else [],
+        },
+    }
+    (index_dir / "graph.json").write_text(json.dumps(payload), encoding="utf-8")
+    return load_graph(index_dir)
+
+
+def _file_node(path, degree=0, label=None):
+    return {
+        "id": f"file:{path}",
+        "kind": "file",
+        "label": label or path.rsplit("/", 1)[-1],
+        "file_path": path,
+        "lines": None,
+        "degree": degree,
+    }
+
+
+def _sym_node(path, name, degree=0, lines=None):
+    return {
+        "id": f"sym:{path}#{name}",
+        "kind": "symbol",
+        "label": name,
+        "file_path": path,
+        "lines": lines or [1, 10],
+        "degree": degree,
+    }
+
+
+def test_explain_caps_neighbors_per_kind_and_reports_truncated(tmp_path):
+    hub = _file_node("pkg/hub.py", degree=20)
+    neighbors = [_sym_node("pkg/hub.py", f"fn{i}", degree=20 - i) for i in range(15)]
+    edges = [{"source": hub["id"], "target": n["id"], "kind": "contains"} for n in neighbors]
+    graph = _write_query_graph(tmp_path, [hub, *neighbors], edges)
+
+    result = explain(graph, hub["id"])
+
+    assert len(result["neighbors"]["symbol"]) == GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND
+    assert result["truncated"]["symbol"] == 15 - GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND
+    degrees = [item["degree"] for item in result["neighbors"]["symbol"]]
+    assert degrees == sorted(degrees, reverse=True)
+    assert {"node", "neighbors", "rationale", "notes"} <= set(result)
+
+
+def test_hubs_excludes_noise_labels_and_section_rationale(tmp_path):
+    nodes = [
+        {"id": "sec:doc.md#T", "kind": "section", "label": "T", "file_path": "doc.md", "degree": 99},
+        {"id": "rat:abc", "kind": "rationale", "label": "why", "file_path": "a.py", "degree": 80},
+        _sym_node("lib/codec.py", "json", degree=70),
+        _sym_node("lib/pathlib.py", "Path", degree=60),
+        _file_node("core.py", degree=5),
+    ]
+    top_hubs = [{"id": n["id"], "degree": n["degree"]} for n in nodes]
+    graph = _write_query_graph(tmp_path, nodes, [], top_hubs=top_hubs)
+
+    result = hubs(graph, 10)
+    labels = {item["label"] for item in result}
+    kinds = {item["kind"] for item in result}
+
+    assert "json" not in labels
+    assert "Path" not in labels
+    assert "section" not in kinds
+    assert "rationale" not in kinds
+    assert "core.py" in labels
+    assert is_noise_hub(nodes[2]) is True
+
+
+def test_affected_follows_reverse_imports_not_undirected_adjacency(tmp_path):
+    a = _file_node("pkg/a.py", degree=1)
+    b = _file_node("pkg/b.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path, [a, b], [{"source": a["id"], "target": b["id"], "kind": "imports"}]
+    )
+
+    from_b = affected(graph, b["id"])
+    from_a = affected(graph, a["id"])
+
+    assert any(item["id"] == a["id"] for item in from_b["items"])
+    assert all(item["id"] != b["id"] for item in from_a["items"])
+
+
+def test_affected_seeds_class_members_via_contains_without_reporting_them(tmp_path):
+    cls = _sym_node("pkg/mod.py", "Service", degree=2)
+    method = _sym_node("pkg/mod.py", "Service.run", degree=1)
+    caller = _file_node("pkg/client.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path,
+        [cls, method, caller],
+        [
+            {"source": cls["id"], "target": method["id"], "kind": "contains"},
+            {"source": caller["id"], "target": method["id"], "kind": "calls"},
+        ],
+    )
+
+    result = affected(graph, cls["id"])
+    ids = [item["id"] for item in result["items"]]
+
+    assert caller["id"] in ids
+    assert method["id"] not in ids
+    assert "calls_unavailable" not in result["warnings"]
+
+
+def test_affected_skips_noise_hubs_in_expansion(tmp_path):
+    target = _file_node("pkg/core.py", degree=1)
+    noise = _sym_node("lib/json.py", "json", degree=9)
+    beyond = _file_node("pkg/beyond.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path,
+        [target, noise, beyond],
+        [
+            {"source": noise["id"], "target": target["id"], "kind": "imports"},
+            {"source": beyond["id"], "target": noise["id"], "kind": "imports"},
+        ],
+    )
+
+    result = affected(graph, target["id"])
+    ids = [item["id"] for item in result["items"]]
+
+    assert noise["id"] not in ids
+    assert beyond["id"] not in ids
+
+
+def test_affected_caps_at_GRAPH_AFFECTED_MAX_RESULTS(tmp_path):
+    target = _file_node("pkg/lib.py", degree=GRAPH_AFFECTED_MAX_RESULTS + 5)
+    dependents = [
+        _file_node(f"pkg/dep{i}.py", degree=GRAPH_AFFECTED_MAX_RESULTS + 5 - i)
+        for i in range(GRAPH_AFFECTED_MAX_RESULTS + 5)
+    ]
+    edges = [
+        {"source": dep["id"], "target": target["id"], "kind": "imports"} for dep in dependents
+    ]
+    graph = _write_query_graph(tmp_path, [target, *dependents], edges)
+
+    result = affected(graph, target["id"])
+
+    assert len(result["items"]) == GRAPH_AFFECTED_MAX_RESULTS
+    assert result["truncated"] == {"omitted": 5}
+
+
+def test_affected_warns_calls_unavailable_when_no_calls_edges(tmp_path):
+    a = _file_node("pkg/a.py", degree=1)
+    b = _file_node("pkg/b.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path, [a, b], [{"source": a["id"], "target": b["id"], "kind": "imports"}]
+    )
+
+    result = affected(graph, b["id"])
+
+    assert "calls_unavailable" in result["warnings"]
+    assert any(item["id"] == a["id"] and item["via"] == "imports" for item in result["items"])
+
+
+def test_load_graph_caches_reverse_adjacency_with_same_mtime_key(tmp_path):
+    a = _file_node("pkg/a.py", degree=1)
+    b = _file_node("pkg/b.py", degree=1)
+    first = _write_query_graph(
+        tmp_path, [a, b], [{"source": a["id"], "target": b["id"], "kind": "imports"}]
+    )
+
+    with patch("builtins.open", side_effect=AssertionError("nao deveria reler graph.json")):
+        second = load_graph(tmp_path)
+
+    assert first is second
+    assert first["_reverse_adjacency"] is second["_reverse_adjacency"]
+    assert a["id"] in first["_reverse_adjacency"][b["id"]][0]
+
