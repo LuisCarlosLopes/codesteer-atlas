@@ -5,6 +5,21 @@ Todas as mudanças relevantes deste projeto são documentadas neste arquivo.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o
 projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [Unreleased]
+
+### Added
+
+- Cross-encoder ONNX opt-in na reordenação pós-RRF, via `ATLAS_RERANK_MODEL`
+  (`reranker.CrossEncoderReranker`, fastembed já presente). Ausente, o rerank
+  lexical de `ranking.py` permanece inalterado. Falha de carga emite
+  `cross_encoder_unavailable` e cai no lexical. Ver `dec-008`.
+- Braço estrutural opt-in na fusão RRF, via `atlas_search(..., structural=True)`
+  (default `False`). Spreading activation sobre `graph.json`; grafo ausente emite
+  `structural_arm_unavailable`. Ver `dec-009`.
+- Harness `scripts/eval_search.py --structural` e registro do reranker ativo no
+  relatório. Baseline recapturada em `tests/eval/baseline.json` (1644 chunks,
+  MRR 0.4289, defaults de produção).
+
 ## [2.1.1] - 2026-08-26
 
 ### Fixed

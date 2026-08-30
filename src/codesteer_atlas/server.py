@@ -479,6 +479,7 @@ def atlas_search(
     path_prefix: Optional[str] = None,
     include_content: bool = False,
     limit: Optional[int] = None,
+    structural: bool = False,
     ctx: "Context | None" = None,
 ) -> str:
     """
@@ -507,6 +508,8 @@ def atlas_search(
         include_content: When true, includes each result's 'content'. Defaults to false
             (metadata/location only) to save tokens.
         limit: Alias for 'top_k'; overrides it when provided.
+        structural: When true, adds a graph spreading-activation arm to the RRF fusion
+            for this call only. Defaults to false (opt-in; does not change default ranking).
 
     Returns:
         JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
@@ -514,9 +517,10 @@ def atlas_search(
         `total_chunks_searched`, and `query_time_ms`.
 
         `match_arms` names which arms of the hybrid search retrieved the chunk:
-        `vector` (semantic) and/or `fts` (BM25). A hit found by both arms had consensus
-        between them; a hit from a single arm is weaker evidence and worth confirming
-        before acting on it.
+        `vector` (semantic), `fts` (BM25), and `graph` (structural, only when
+        structural=true). A hit found by both vector and fts had consensus between them;
+        a hit from a single arm is weaker evidence and worth confirming before acting
+        on it.
 
         Markdown results may also include `markdown_references`
         ({file_path, anchor, resolved_section}) for links to other `.md` files.
@@ -525,10 +529,14 @@ def atlas_search(
         A `warnings` array appears ONLY when the hybrid search ran degraded:
         `fts_unavailable` (BM25 arm failed — results are vector-only, so exact symbol
         and error-string matches may be missing), `vector_search_unavailable`
-        (semantic arm failed — results are keyword-only, so paraphrased queries may miss).
-        Treat a degraded result as incomplete: reindex with `atlas_index(full=true)`
-        before concluding that something does not exist in the codebase. When both arms
-        fail the call raises instead of returning an empty result set.
+        (semantic arm failed — results are keyword-only, so paraphrased queries may miss),
+        `cross_encoder_unavailable` (ATLAS_RERANK_MODEL was set but the model failed to
+        load — order fell back to lexical rerank), `structural_arm_unavailable`
+        (structural=true but graph.json is missing or unreadable — the graph arm was
+        skipped). Treat a degraded result as incomplete: reindex with
+        `atlas_index(full=true)` before concluding that something does not exist in the
+        codebase. When both original arms fail the call raises instead of returning an
+        empty result set.
     """
     start_time = time.time()
 
@@ -563,7 +571,11 @@ def atlas_search(
 
     # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
     outcome = storage.search_hybrid(
-        query_vector=query_vector, query_text=query, filters=filters, top_k=top_k
+        query_vector=query_vector,
+        query_text=query,
+        filters=filters,
+        top_k=top_k,
+        structural=structural,
     )
     results = outcome.results
 
