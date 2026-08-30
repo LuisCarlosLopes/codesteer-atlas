@@ -89,8 +89,9 @@ class SearchResult(BaseModel):
     match_arms: List[str] = Field(
         default_factory=list,
         description="Braços da busca híbrida que recuperaram este chunk:"
-        " 'vector' (semântico) e/ou 'fts' (BM25). Um resultado presente nos dois"
-        " braços teve consenso entre eles",
+        " 'vector' (semântico), 'fts' (BM25) e/ou 'graph' (ativação estrutural,"
+        " só quando structural=True). Um resultado presente em mais de um"
+        " braço teve consenso entre eles",
     )
 
 
@@ -106,7 +107,9 @@ class SearchOutcome(BaseModel):
     results: List[SearchResult] = Field(default_factory=list)
     warnings: List[str] = Field(
         default_factory=list,
-        description="Códigos de degradação: 'vector_search_unavailable' | 'fts_unavailable'",
+        description="Códigos de degradação: 'vector_search_unavailable' |"
+        " 'fts_unavailable' | 'cross_encoder_unavailable' |"
+        " 'structural_arm_unavailable'",
     )
 
 

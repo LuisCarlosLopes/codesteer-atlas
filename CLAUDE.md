@@ -146,6 +146,23 @@ tried and dropped: its effect is ±0.002, indistinguishable from zero against a 
 ±0.07. `QUERY_STOPWORDS` survives because `ranking.query_terms` needs it to keep generic words from
 earning a title boost.
 
+**F2 opt-in stages (DECISAO-008 / DECISAO-009), both off by default:**
+
+- **`ATLAS_RERANK_MODEL`** — when set, `reranker.CrossEncoderReranker` (fastembed
+  `TextCrossEncoder`, lazy singleton) reorders the post-RRF pool. Absent → `ranking.rerank`
+  unchanged. Load failure → `warnings: cross_encoder_unavailable` and lexical fallback.
+  `ATLAS_RERANK=0` still disables **all** reordering, including the cross-encoder.
+- **`atlas_search(..., structural=True)`** — adds a third RRF arm (`graph`) via spreading
+  activation over `graph.json`. Default `False`. Missing graph → `warnings:
+  structural_arm_unavailable` (no-op). The arm only re-ranks chunks already in the pool.
+  `structural.is_noise_hub` is the single noise predicate (expansion only; F1 §1.3 should reuse it).
+
+Gate is `tests/eval/baseline.json` recaptured on a clean `--full` index (1644 chunks, lexical
+rerank ON, structural OFF): total MRR **0.4289**, not the historical 0.3057 (RRF-only) nor the
+roadmap's 0.605 (contaminated FTS). Measured on that same index: 2.1 total MRR 0.4391 but
+`exact_symbol` regressed → **keep opt-in**; 2.2 total MRR 0.4521 but `partial_identifier`
+regressed → **keep opt-in**. Do not promote either stage on a global mean.
+
 **Any change to ranking must be measured**, not argued: run `scripts/eval_search.py` against
 `tests/eval/golden_queries.yaml` and compare per class to `tests/eval/baseline.json`. A global mean
 hides a change that helps literal matching while hurting natural language — which is exactly what

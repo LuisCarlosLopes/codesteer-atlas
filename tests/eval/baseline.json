@@ -2,8 +2,8 @@
   "top_k": 10,
   "overall": {
     "n": 28,
-    "mrr": 0.3057,
-    "recall_at_5": 0.4643
+    "mrr": 0.4289,
+    "recall_at_5": 0.5714
   },
   "by_class": {
     "cross_file": {
@@ -13,18 +13,18 @@
     },
     "exact_symbol": {
       "n": 7,
-      "mrr": 0.5619,
-      "recall_at_5": 0.8571
+      "mrr": 0.7143,
+      "recall_at_5": 1.0
     },
     "natural": {
       "n": 8,
-      "mrr": 0.0781,
+      "mrr": 0.0804,
       "recall_at_5": 0.125
     },
     "partial_identifier": {
       "n": 8,
-      "mrr": 0.4792,
-      "recall_at_5": 0.75
+      "mrr": 0.775,
+      "recall_at_5": 1.0
     }
   },
   "per_query": [
@@ -47,16 +47,16 @@
     {
       "query": "carregar o modelo de embedding só na primeira chamada",
       "klass": "natural",
-      "rank": 3,
-      "rr": 0.3333333333333333,
+      "rank": 2,
+      "rr": 0.5,
       "hit_at_5": true,
       "warnings": []
     },
     {
       "query": "decidir se um arquivo deve ser pulado durante a varredura",
       "klass": "natural",
-      "rank": 8,
-      "rr": 0.125,
+      "rank": 7,
+      "rr": 0.14285714285714285,
       "hit_at_5": false,
       "warnings": []
     },
@@ -79,8 +79,8 @@
     {
       "query": "gravar o manifesto sem risco de leitura parcial",
       "klass": "natural",
-      "rank": 6,
-      "rr": 0.16666666666666666,
+      "rank": null,
+      "rr": 0.0,
       "hit_at_5": false,
       "warnings": []
     },
@@ -95,16 +95,16 @@
     {
       "query": "search_hybrid",
       "klass": "exact_symbol",
-      "rank": 10,
-      "rr": 0.1,
-      "hit_at_5": false,
+      "rank": 4,
+      "rr": 0.25,
+      "hit_at_5": true,
       "warnings": []
     },
     {
       "query": "EmbeddingEngine",
       "klass": "exact_symbol",
-      "rank": 4,
-      "rr": 0.25,
+      "rank": 1,
+      "rr": 1.0,
       "hit_at_5": true,
       "warnings": []
     },
@@ -135,8 +135,8 @@
     {
       "query": "resolve_module_path",
       "klass": "exact_symbol",
-      "rank": 3,
-      "rr": 0.3333333333333333,
+      "rank": 2,
+      "rr": 0.5,
       "hit_at_5": true,
       "warnings": []
     },
@@ -151,16 +151,16 @@
     {
       "query": "search_hyb",
       "klass": "partial_identifier",
-      "rank": null,
-      "rr": 0.0,
-      "hit_at_5": false,
+      "rank": 5,
+      "rr": 0.2,
+      "hit_at_5": true,
       "warnings": []
     },
     {
       "query": "atlasignore_spec",
       "klass": "partial_identifier",
-      "rank": 3,
-      "rr": 0.3333333333333333,
+      "rank": 2,
+      "rr": 0.5,
       "hit_at_5": true,
       "warnings": []
     },
@@ -175,16 +175,16 @@
     {
       "query": "EmbeddingEng",
       "klass": "partial_identifier",
-      "rank": 6,
-      "rr": 0.16666666666666666,
-      "hit_at_5": false,
+      "rank": 1,
+      "rr": 1.0,
+      "hit_at_5": true,
       "warnings": []
     },
     {
       "query": "build_and_write_incr",
       "klass": "partial_identifier",
-      "rank": 3,
-      "rr": 0.3333333333333333,
+      "rank": 1,
+      "rr": 1.0,
       "hit_at_5": true,
       "warnings": []
     },
@@ -199,8 +199,8 @@
     {
       "query": "ProgressReporter",
       "klass": "partial_identifier",
-      "rank": 2,
-      "rr": 0.5,
+      "rank": 1,
+      "rr": 1.0,
       "hit_at_5": true,
       "warnings": []
     },
@@ -215,16 +215,16 @@
     {
       "query": "reciprocal rank fusion",
       "klass": "cross_file",
-      "rank": 6,
-      "rr": 0.16666666666666666,
+      "rank": null,
+      "rr": 0.0,
       "hit_at_5": false,
       "warnings": []
     },
     {
       "query": "parsing de AST com tree-sitter",
       "klass": "cross_file",
-      "rank": null,
-      "rr": 0.0,
+      "rank": 6,
+      "rr": 0.16666666666666666,
       "hit_at_5": false,
       "warnings": []
     },
@@ -252,5 +252,10 @@
       "hit_at_5": false,
       "warnings": []
     }
-  ]
+  ],
+  "structural": false,
+  "reranker": "lexical",
+  "rerank_model": null,
+  "total_chunks": 1644,
+  "query_time_ms": 25.42
 }

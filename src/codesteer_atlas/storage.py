@@ -3,7 +3,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import lancedb
 
@@ -13,13 +13,16 @@ from codesteer_atlas.config import (
     DEFAULT_INDEX_DIR,
     MIN_INDEX_VERSION,
     RERANK_ENV_FLAG,
+    RERANK_MODEL_ENV_FLAG,
     RERANK_POOL_MULTIPLIER,
     RRF_K,
+    STRUCTURAL_SEED_TOP_N,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
 from codesteer_atlas.models import CodeChunk, IndexManifest, SearchOutcome, SearchResult
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
+from codesteer_atlas.structural import node_id_for, spreading_activation
 
 
 def _rerank_enabled() -> bool:
@@ -277,7 +280,13 @@ class StorageBackend:
         return " AND ".join(clauses)
 
     def search_hybrid(
-        self, query_vector: List[float], query_text: str, filters: Dict[str, Any], top_k: int
+        self,
+        query_vector: List[float],
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+        *,
+        structural: bool = False,
     ) -> SearchOutcome:
         """
         Executa uma busca híbrida combinando busca vetorial (cosseno) e léxica (BM25 FTS)
@@ -289,6 +298,9 @@ class StorageBackend:
 
         A reordenação pós-RRF roda sobre um pool maior que `top_k`, e a regra veio de
         medição no golden set, não de intuição. Veja CLAUDE.md (DECISAO-007).
+
+        `structural=True` acrescenta o braço de grafo à fusão (opt-in por chamada).
+        Sem `ATLAS_RERANK_MODEL`, a reordenação permanece a lexical de `ranking.rerank`.
 
         A falha de um braço isolado degrada a busca em vez de derrubá-la, mas é
         reportada em `SearchOutcome.warnings` — degradação silenciosa aqui significa
@@ -371,6 +383,9 @@ class StorageBackend:
         _fuse(vector_results, "vector")
         _fuse(text_results, "fts")
 
+        if structural:
+            self._fuse_structural_arm(rrf_scores, items_by_id, _fuse, warnings)
+
         # Ordena os ids de chunks baseados no score RRF decrescente
         sorted_chunk_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
 
@@ -403,9 +418,75 @@ class StorageBackend:
             )
 
         if _rerank_enabled():
-            pool = rerank(pool, query_text)
+            pool = self._rerank_pool(pool, query_text, warnings)
 
         return SearchOutcome(results=pool[:top_k], warnings=warnings)
+
+    def _fuse_structural_arm(
+        self,
+        rrf_scores: Dict[str, float],
+        items_by_id: Dict[str, Dict[str, Any]],
+        fuse: Callable[[List[Dict[str, Any]], str], None],
+        warnings: List[str],
+    ) -> None:
+        # @MindFlow: load_graph → sementes RRF → spreading_activation → _fuse("graph")
+        # @MindRisk: junção chunk↔nó só em memória; chunk fora do pool nunca é materializado
+        """Acrescenta o braço `graph` à fusão; grafo ausente vira aviso e no-op."""
+        try:
+            from codesteer_atlas.graph import load_graph
+
+            graph = load_graph(self.index_dir)
+        except Exception as e:
+            warnings.append("structural_arm_unavailable")
+            print(
+                f"[atlas] Braço estrutural indisponível ({type(e).__name__}: {e}); "
+                "busca segue sem o braço.",
+                file=sys.stderr,
+            )
+            return
+
+        chunk_id_by_node: Dict[str, str] = {}
+        for chunk_id, item in items_by_id.items():
+            chunk_id_by_node[node_id_for(item)] = chunk_id
+
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
+        seed_node_ids = [
+            node_id_for(items_by_id[chunk_id])
+            for chunk_id in sorted_ids[:STRUCTURAL_SEED_TOP_N]
+        ]
+        ranked_node_ids = spreading_activation(
+            graph, seed_node_ids, chunk_id_by_node.keys()
+        )
+
+        graph_results: List[Dict[str, Any]] = []
+        for node_id in ranked_node_ids:
+            chunk_id = chunk_id_by_node.get(node_id)
+            if chunk_id is None:
+                continue
+            graph_results.append(items_by_id[chunk_id])
+
+        fuse(graph_results, "graph")
+
+    def _rerank_pool(
+        self, pool: List[SearchResult], query_text: str, warnings: List[str]
+    ) -> List[SearchResult]:
+        """Escolhe lexical vs cross-encoder; falha do CE cai no lexical com aviso."""
+        model_name = os.environ.get(RERANK_MODEL_ENV_FLAG)
+        if not model_name:
+            return rerank(pool, query_text)
+
+        try:
+            from codesteer_atlas.reranker import CrossEncoderReranker
+
+            return CrossEncoderReranker().rerank(query_text, pool)
+        except Exception as e:
+            warnings.append("cross_encoder_unavailable")
+            print(
+                f"[atlas] Cross-encoder indisponível ({type(e).__name__}: {e}); "
+                "reordenação degradada para ranking lexical.",
+                file=sys.stderr,
+            )
+            return rerank(pool, query_text)
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """

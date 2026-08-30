@@ -1971,3 +1971,58 @@ def test_atlas_search_expoe_match_arms():
 
     assert result["results"][0]["match_arms"] == ["vector", "fts"]
 
+
+def test_atlas_search_repassa_structural_true_para_search_hybrid():
+    """Opt-in por chamada: structural=True chega em search_hybrid."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=[]),
+        ) as mock_search,
+    ):
+        atlas_search(query="how to run app", top_k=2, structural=True)
+
+    assert mock_search.call_args.kwargs["structural"] is True
+
+
+def test_atlas_search_omite_structural_mantem_default_false():
+    """Omitir o parâmetro não muda a superfície pública — default seguro."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=[]),
+        ) as mock_search,
+    ):
+        atlas_search(query="how to run app", top_k=2)
+
+    assert mock_search.call_args.kwargs.get("structural") is False
+
+
+def test_importar_server_nao_carrega_cross_encoder_nem_graph_json():
+    """Princípio V: o import do servidor não dispara carga de CE nem leitura de graph.json."""
+    script = (
+        "import sys\n"
+        "import codesteer_atlas.server  # noqa: F401\n"
+        "assert 'codesteer_atlas.reranker' not in sys.modules\n"
+        "assert 'fastembed.rerank.cross_encoder' not in sys.modules\n"
+        "from codesteer_atlas.graph import _GRAPH_CACHE\n"
+        "assert _GRAPH_CACHE.get('graph') is None\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+

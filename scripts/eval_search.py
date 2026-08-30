@@ -13,18 +13,22 @@ Uso:
     uv run python scripts/eval_search.py
     uv run python scripts/eval_search.py --baseline tests/eval/baseline.json
     uv run python scripts/eval_search.py --out tests/eval/baseline.json
+    uv run python scripts/eval_search.py --structural
 """
 
 import argparse
 import io
 import json
+import os
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
+from codesteer_atlas.config import RERANK_ENV_FLAG, RERANK_MODEL_ENV_FLAG
 from codesteer_atlas.embeddings import EmbeddingEngine
 from codesteer_atlas.storage import StorageBackend
 
@@ -78,7 +82,19 @@ def _first_hit_rank(results: List[Any], targets: List[Dict[str, str]]) -> Option
     return None
 
 
-def run_eval(index_dir: Path, golden_path: Path) -> Dict[str, Any]:
+def _active_reranker() -> Dict[str, Any]:
+    """Registra qual reordenador está ativo — sem isso o A/B de 2.1 fica opaco."""
+    if os.environ.get(RERANK_ENV_FLAG, "1") == "0":
+        return {"reranker": "none", "rerank_model": None}
+    model = os.environ.get(RERANK_MODEL_ENV_FLAG)
+    if model:
+        return {"reranker": "cross_encoder", "rerank_model": model}
+    return {"reranker": "lexical", "rerank_model": None}
+
+
+def run_eval(
+    index_dir: Path, golden_path: Path, *, structural: bool = False
+) -> Dict[str, Any]:
     storage = StorageBackend(index_dir=index_dir)
     if not storage.exists():
         raise SystemExit(
@@ -91,15 +107,19 @@ def run_eval(index_dir: Path, golden_path: Path) -> Dict[str, Any]:
 
     engine = EmbeddingEngine()
     per_query: List[Dict[str, Any]] = []
+    query_times_ms: List[float] = []
 
     for entry in queries:
         query = entry["query"]
+        started = time.perf_counter()
         outcome = storage.search_hybrid(
             query_vector=engine.encode_single(query),
             query_text=query,
             filters={},
             top_k=EVAL_TOP_K,
+            structural=structural,
         )
+        query_times_ms.append((time.perf_counter() - started) * 1000)
         rank = _first_hit_rank(outcome.results, entry["targets"])
         per_query.append(
             {
@@ -124,11 +144,20 @@ def run_eval(index_dir: Path, golden_path: Path) -> Dict[str, Any]:
             "recall_at_5": round(sum(1 for r in rows if r["hit_at_5"]) / n, 4),
         }
 
+    reranker_info = _active_reranker()
+    manifest = storage.get_manifest()
     return {
         "top_k": EVAL_TOP_K,
         "overall": _agg(per_query),
         "by_class": {k: _agg(v) for k, v in sorted(by_class.items())},
         "per_query": per_query,
+        "structural": structural,
+        "reranker": reranker_info["reranker"],
+        "rerank_model": reranker_info["rerank_model"],
+        "total_chunks": manifest.total_chunks,
+        "query_time_ms": round(sum(query_times_ms) / len(query_times_ms), 2)
+        if query_times_ms
+        else 0.0,
     }
 
 
@@ -160,6 +189,13 @@ def print_report(report: Dict[str, Any], baseline: Optional[Dict[str, Any]]) -> 
         f"{'TOTAL':<20} {o['n']:>3}  {o['mrr']:>7.4f}{_fmt_delta(o['mrr'], bo.get('mrr')):>8}"
         f"  {o['recall_at_5']:>8.4f}{_fmt_delta(o['recall_at_5'], bo.get('recall_at_5'))}"
     )
+    print(
+        f"\nreranker={report.get('reranker', 'lexical')}"
+        f"  model={report.get('rerank_model') or '-'}"
+        f"  structural={report.get('structural', False)}"
+        f"  total_chunks={report.get('total_chunks', '?')}"
+        f"  query_time_ms={report.get('query_time_ms', '?')}"
+    )
 
     misses = [r for r in report["per_query"] if r["rank"] is None]
     if misses:
@@ -187,9 +223,14 @@ def main() -> int:
     )
     parser.add_argument("--baseline", default=None, help="JSON de baseline para comparar.")
     parser.add_argument("--out", default=None, help="Grava o relatório JSON neste caminho.")
+    parser.add_argument(
+        "--structural",
+        action="store_true",
+        help="Liga o braço estrutural nas queries da avaliação (default: desligado).",
+    )
     args = parser.parse_args()
 
-    report = run_eval(Path(args.index_dir), Path(args.golden))
+    report = run_eval(Path(args.index_dir), Path(args.golden), structural=args.structural)
 
     baseline = None
     if args.baseline:

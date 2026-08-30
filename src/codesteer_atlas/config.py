@@ -29,6 +29,35 @@ RERANK_POOL_MULTIPLIER = 4
 # RRF puro. Existe para A/B no harness de avaliação e para rollback sem redeploy.
 RERANK_ENV_FLAG = "ATLAS_RERANK"
 
+# Ausente (default) → ranking.rerank lexical. Presente → cross-encoder ONNX.
+# ATLAS_RERANK=0 tem precedência e desliga TODA reordenação, inclusive a do CE.
+RERANK_MODEL_ENV_FLAG = "ATLAS_RERANK_MODEL"
+
+# Único ~30M/ONNX listado pelo fastembed que casa com a descrição do roadmap (A1).
+CROSS_ENCODER_DEFAULT_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+# Truncar o documento limita a latência dos pares query×documento no pool.
+CROSS_ENCODER_MAX_DOC_CHARS = 2000
+
+# Spreading activation do braço estrutural (A2): faixa conservadora sobre 50 candidatos.
+STRUCTURAL_SEED_TOP_N = 10
+STRUCTURAL_MAX_HOPS = 2
+STRUCTURAL_HOP_DECAY = 0.5
+STRUCTURAL_MAX_NEIGHBORS_PER_NODE = 25
+# Guarda agnóstica de repositório contra explosão por hub (DECISÃO-002).
+STRUCTURAL_HUB_DEGREE_CEILING = 40
+
+# Rótulos de arquivo genéricos usados só na expansão do braço (não no ranking de hubs).
+GRAPH_NOISE_LABELS = frozenset(
+    {
+        "__init__.py",
+        "utils.py",
+        "index.ts",
+        "types.ts",
+        "constants.py",
+    }
+)
+
 # Termos ignorados pela reordenação pós-RRF ao calcular boost de título e proximidade:
 # aparecem em quase todo chunk e dariam boost a candidato irrelevante. Cobre pt-BR,
 # inglês e genéricos de código. Comparação sobre o token normalizado (minúsculo, sem

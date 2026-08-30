@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import lancedb
 import pytest
@@ -1020,6 +1021,144 @@ def test_rerank_desligado_por_env_preserva_ordem_do_rrf(temp_storage, monkeypatc
 
     # Com o rerank desligado a ordem é estritamente decrescente em score RRF
     scores = [r.score for r in sem_rerank.results]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_sem_atlas_rerank_model_mantem_ordem_do_rerank_lexical(temp_storage, monkeypatch):
+    """Sem a variável, a ordem final é byte-a-byte a de ranking.rerank."""
+    from codesteer_atlas.ranking import rerank as lexical_rerank
+
+    _seed_identifier_chunks(temp_storage)
+    monkeypatch.delenv("ATLAS_RERANK_MODEL", raising=False)
+    monkeypatch.delenv("ATLAS_RERANK", raising=False)
+
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    rrf = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+    monkeypatch.delenv("ATLAS_RERANK")
+    esperado = [r.scope_name for r in lexical_rerank(list(rrf.results), "search_hybrid")]
+
+    atual = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+    assert [r.scope_name for r in atual.results] == esperado
+    assert "cross_encoder_unavailable" not in atual.warnings
+
+
+def test_cross_encoder_falhando_emite_aviso_e_cai_no_lexical(temp_storage, monkeypatch):
+    from codesteer_atlas.reranker import CrossEncoderReranker
+
+    _seed_identifier_chunks(temp_storage)
+    monkeypatch.setenv("ATLAS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+
+    def _boom(self, query, results):
+        raise RuntimeError("modelo indisponível")
+
+    monkeypatch.setattr(CrossEncoderReranker, "rerank", _boom)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+
+    assert "cross_encoder_unavailable" in outcome.warnings
+    assert outcome.results
+
+
+def test_structural_false_nao_altera_match_arms(temp_storage, monkeypatch):
+    _seed_two_chunks(temp_storage)
+    monkeypatch.delenv("ATLAS_RERANK_MODEL", raising=False)
+
+    padrao = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+    explicito = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5, structural=False
+    )
+
+    assert [r.match_arms for r in padrao.results] == [r.match_arms for r in explicito.results]
+    for resultado in explicito.results:
+        assert "graph" not in resultado.match_arms
+
+
+def _write_synthetic_graph(index_dir, chunks):
+    import json
+
+    nodes = []
+    edges = []
+    prev = None
+    for chunk in chunks:
+        node_id = f"sym:{chunk.file_path}#{chunk.scope_name}"
+        nodes.append(
+            {
+                "id": node_id,
+                "kind": "symbol",
+                "label": chunk.scope_name,
+                "file_path": chunk.file_path,
+                "degree": 1,
+            }
+        )
+        if prev is not None:
+            edges.append({"source": prev, "target": node_id, "kind": "relates"})
+        prev = node_id
+    payload = {"nodes": nodes, "edges": edges}
+    (index_dir / "graph.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_structural_true_acrescenta_graph_a_match_arms(temp_storage, monkeypatch):
+    _seed_two_chunks(temp_storage)
+    _write_synthetic_graph(
+        temp_storage.index_dir,
+        [
+            SimpleNamespace(file_path="src/main.py", scope_name="main"),
+            SimpleNamespace(file_path="src/utils.py", scope_name="helper"),
+        ],
+    )
+    monkeypatch.delenv("ATLAS_RERANK_MODEL", raising=False)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5, structural=True
+    )
+
+    ativados = [r for r in outcome.results if "graph" in r.match_arms]
+    assert ativados
+    assert "structural_arm_unavailable" not in outcome.warnings
+
+
+def test_structural_true_sem_graph_json_emite_aviso_e_nao_quebra(temp_storage, monkeypatch):
+    _seed_two_chunks(temp_storage)
+    monkeypatch.delenv("ATLAS_RERANK_MODEL", raising=False)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5, structural=True
+    )
+
+    assert "structural_arm_unavailable" in outcome.warnings
+    assert outcome.results
+    for resultado in outcome.results:
+        assert "graph" not in resultado.match_arms
+
+
+def test_atlas_rerank_zero_desliga_toda_reordenacao_inclusive_ce(temp_storage, monkeypatch):
+    from codesteer_atlas.reranker import CrossEncoderReranker
+
+    _seed_identifier_chunks(temp_storage)
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    monkeypatch.setenv("ATLAS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+    called = {"n": 0}
+
+    def _spy(self, query, results):
+        called["n"] += 1
+        return results
+
+    monkeypatch.setattr(CrossEncoderReranker, "rerank", _spy)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+
+    assert called["n"] == 0
+    scores = [r.score for r in outcome.results]
     assert scores == sorted(scores, reverse=True)
 
 
