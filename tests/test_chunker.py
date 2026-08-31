@@ -611,3 +611,108 @@ def test_chunk_file_com_parser_classico_real(tmp_path):
     assert "A.m" in names
     assert "f" in names
     assert version("tree-sitter-language-pack")  # só para deixar a dep explícita no teste
+
+
+# --- §3.3: imports multi-linguagem e declaração de namespace -------------------
+
+_IMPORT_FIXTURES = {
+    "svc.go": (
+        'package main\n\nimport "fmt"\nimport (\n  "os"\n'
+        '  svc "github.com/x/y/internal/svc"\n)\n',
+        ["fmt", "os", "github.com/x/y/internal/svc"],
+    ),
+    "App.java": (
+        "package com.example.app;\nimport com.example.core.Service;\n"
+        "import static java.lang.Math.max;\nimport a.c.*;\n",
+        ["com.example.core.Service", "java.lang.Math.max", "a.c"],
+    ),
+    "Home.cs": (
+        "namespace MinhaApp.Web;\nusing System.Text;\nusing MinhaApp.Servicos;\n"
+        "using Alias = MinhaApp.Outro;\nglobal using System;\n",
+        ["System.Text", "MinhaApp.Servicos", "MinhaApp.Outro", "System"],
+    ),
+    "lib.rs": (
+        "use crate::bar::Baz;\nuse std::collections::HashMap;\npub use self::thing::Other;\n",
+        ["crate::bar::Baz", "std::collections::HashMap", "self::thing::Other"],
+    ),
+    "Main.kt": (
+        "package com.example.app\nimport com.example.core.Service\n"
+        "import java.util.List as JList\nimport c.d.*\n",
+        ["com.example.core.Service", "java.util.List", "c.d"],
+    ),
+    "Kernel.php": (
+        '<?php\nnamespace App\\Http;\nuse App\\Models\\User;\nrequire_once "bootstrap.php";\n',
+        ["App\\Models\\User", "bootstrap.php"],
+    ),
+    "thing.rb": (
+        'require "json"\nrequire_relative "lib/thing"\nputs "nao e import"\n',
+        ["json", "lib/thing"],
+    ),
+    "App.swift": ("import Foundation\nimport MyModule\n", ["Foundation", "MyModule"]),
+    "App.scala": (
+        "package com.example.app\nimport com.example.core.Service\n"
+        "import scala.collection.mutable._\n",
+        ["com.example.core.Service", "scala.collection.mutable"],
+    ),
+    "web.ex": (
+        "defmodule MyApp.Web do\n  import MyApp.Core\n  alias MyApp.Other\nend\n",
+        ["MyApp.Core", "MyApp.Other"],
+    ),
+}
+
+
+@pytest.mark.parametrize("file_name", sorted(_IMPORT_FIXTURES))
+def test_extract_imports_cobre_as_linguagens_da_fase_3(tmp_path, file_name):
+    """
+    Antes da §3.3 todas estas linguagens retornavam `[]` — indexadas e buscáveis,
+    mas mudas sobre como se conectam.
+    """
+    source, expected = _IMPORT_FIXTURES[file_name]
+    target = tmp_path / file_name
+    target.write_text(source, encoding="utf-8")
+
+    assert ASTChunker().extract_imports(target) == expected
+
+
+def test_extract_imports_de_linguagem_sem_entrada_na_tabela_retorna_vazio(tmp_path):
+    source = tmp_path / "script.lua"
+    source.write_text('local m = require("mod")\n', encoding="utf-8")
+
+    assert ASTChunker().extract_imports(source) == []
+
+
+@pytest.mark.parametrize(
+    ("file_name", "source", "expected"),
+    [
+        ("App.java", "package com.example.app;\nclass App {}\n", "com.example.app"),
+        ("Home.cs", "namespace MinhaApp.Web;\nclass Home {}\n", "MinhaApp.Web"),
+        ("Block.cs", "namespace MinhaApp.Bloco\n{\n  class C {}\n}\n", "MinhaApp.Bloco"),
+        ("Main.kt", "package com.example.app\nfun main() {}\n", "com.example.app"),
+        ("App.scala", "package com.example.app\nobject App\n", "com.example.app"),
+    ],
+)
+def test_extract_package_declaration_nas_quatro_linguagens(tmp_path, file_name, source, expected):
+    target = tmp_path / file_name
+    target.write_text(source, encoding="utf-8")
+
+    assert ASTChunker().extract_package_declaration(target) == expected
+
+
+@pytest.mark.parametrize(
+    ("file_name", "source"),
+    [
+        ("mod.py", "import os\n"),
+        ("main.go", 'package main\nimport "fmt"\n'),
+        ("Solto.java", "class Solto {}\n"),
+        ("inexistente.txt", ""),
+    ],
+)
+def test_extract_package_declaration_retorna_none_fora_da_familia(tmp_path, file_name, source):
+    target = tmp_path / file_name
+    target.write_text(source, encoding="utf-8")
+
+    assert ASTChunker().extract_package_declaration(target) is None
+
+
+def test_extract_package_declaration_em_arquivo_ausente_nao_levanta(tmp_path):
+    assert ASTChunker().extract_package_declaration(tmp_path / "sumiu.java") is None

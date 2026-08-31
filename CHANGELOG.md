@@ -7,18 +7,69 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+_Nada ainda._
+
+## [2.2.0] - 2026-08-30
+
+Fase 3 do roadmap — "o índice reflete a realidade". Watcher, grafo de chamadas via
+SCIP e imports multi-linguagem. As duas capacidades novas entram **desligadas por
+padrão**: sem as flags, o comportamento é idêntico ao de 2.1.x. Esta versão também
+publica os estágios opt-in da Fase 2 (recuperação medida), já mesclados na branch
+antes do corte.
+
 ### Added
 
-- Cross-encoder ONNX opt-in na reordenação pós-RRF, via `ATLAS_RERANK_MODEL`
+- **Watcher de workspace** (`watcher.py`), ativado por `ATLAS_WATCH=1`. Observa o
+  workspace numa thread daemon do `watchdog`, coalesce a rajada de eventos em uma
+  janela de `WATCH_DEBOUNCE_S` (2 s) e delega a reindexação incremental ao mesmo
+  subprocesso já usado no startup — nunca indexa dentro do processo do servidor.
+  Eventos filtrados por `should_ignore` + `.atlasignore`, o que inclui `.code-index/`
+  e impede o loop de auto-reindexação. `watchdog` é um **extra opcional**
+  (`pip install "codesteer-atlas[watch]"`); ausente, o servidor sobe igual e
+  `atlas_status` reporta `watch: "unavailable"`.
+- **Ingestão SCIP** (`scip_ingest.py`), ativada por `ATLAS_SCIP=1`. Detecta o
+  indexador da linguagem (`scip-python`, `scip-typescript`, `scip-go`,
+  `rust-analyzer`), invoca-o em subprocesso com timeout e lê o `index.scip` com um
+  leitor próprio do wire format do protobuf — **sem dependência nova**. Produz as
+  primeiras arestas `kind: "calls"` do grafo, com `origin: "scip"`.
+- **Imports multi-linguagem** no grafo: Go, Java, C#, Kotlin, Scala, Rust, PHP,
+  Ruby e Swift passam a produzir arestas `imports` (antes só Python/JS/TS). As
+  famílias de namespace (Java, C#, Kotlin, Scala) resolvem por
+  `manifest.files_declares`; as de convenção de path resolvem pela raiz do pacote
+  inferida do manifesto de build (`go.mod`, `pom.xml`, `*.csproj`, `Cargo.toml`).
+- **`origin` por aresta** (`"scip"` | `"treesitter"`), presente apenas em `calls` e
+  `imports` — os kinds em que a qualidade da resolução varia. `explain` e `affected`
+  reportam `origin: "unknown"` quando o campo não existe.
+- **`resolution_coverage`** no `graph.json` e em `atlas_status`: quais linguagens do
+  índice resolvem por `scip`, quais por `treesitter`, quais **não resolvem** (`none`)
+  e quantos arquivos ficaram sem resolução (Princípio VI — degradação explícita).
+- **`watch`** reportado por `atlas_status` (∈ `active|disabled|unavailable|failed`)
+  e **`scip_status`/`scip_edges`** reportados por `atlas_index` (`scip_status` ∈
+  `ok|disabled|toolchain_missing|timeout|parse_failed`).
+- `graph.html` distingue a origem da aresta pelo traço (`scip` sólida, `treesitter`
+  tracejada, sem origem pontilhada) e traz na legenda os tiers de cobertura,
+  incluindo as linguagens que o índice **não** resolve. Segue autocontido e offline.
+- Extra opcional `watch = ["watchdog>=4.0,<7"]` em `[project.optional-dependencies]`.
+  `[project].dependencies` permanece inalterado — nenhuma dependência obrigatória nova.
+- **(Fase 2)** Cross-encoder ONNX opt-in na reordenação pós-RRF, via `ATLAS_RERANK_MODEL`
   (`reranker.CrossEncoderReranker`, fastembed já presente). Ausente, o rerank
   lexical de `ranking.py` permanece inalterado. Falha de carga emite
   `cross_encoder_unavailable` e cai no lexical. Ver `dec-008`.
-- Braço estrutural opt-in na fusão RRF, via `atlas_search(..., structural=True)`
+- **(Fase 2)** Braço estrutural opt-in na fusão RRF, via `atlas_search(..., structural=True)`
   (default `False`). Spreading activation sobre `graph.json`; grafo ausente emite
   `structural_arm_unavailable`. Ver `dec-009`.
-- Harness `scripts/eval_search.py --structural` e registro do reranker ativo no
+- **(Fase 2)** Harness `scripts/eval_search.py --structural` e registro do reranker ativo no
   relatório. Baseline recapturada em `tests/eval/baseline.json` (1644 chunks,
   MRR 0.4289, defaults de produção).
+
+### Changed
+
+- `CURRENT_INDEX_VERSION` passa de `2.1.0` para **`2.2.0`** (novo campo
+  `files_declares` no manifest). **`MIN_INDEX_VERSION` continua `2.0.0`**: índices
+  2.0.x e 2.1.0 seguem buscáveis, **sem reindexação forçada**. Um grafo anterior a
+  2.2.0 simplesmente não tem `origin` nem `resolution_coverage`, e `atlas_status`
+  responde `{"status": "unknown", "reason": "index_version_below_2_2_0"}` em vez de
+  listas vazias.
 
 ## [2.1.1] - 2026-08-26
 

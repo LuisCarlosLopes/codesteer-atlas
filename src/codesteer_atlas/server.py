@@ -72,6 +72,7 @@ from codesteer_atlas.markdown_links import (  # noqa: E402
 )
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
+from codesteer_atlas.watcher import WATCH_DISABLED, start_watcher_if_enabled  # noqa: E402
 
 # 4. Patch defensivo no SDK do MCP: se um tool handler síncrono demorar o
 # suficiente para o cliente desistir (timeout) e enviar `notifications/cancelled`,
@@ -378,6 +379,10 @@ def _index_not_found_error(storage: "StorageBackend") -> FileNotFoundError:
 # resolvido por discovery ascendente a partir do CWD.
 INDEX_DIR_PATH = resolve_index_dir()
 
+# Estado do watcher (§3.1), reportado em `atlas_status`. Nasce "disabled": só
+# `main()` ativa, e apenas atrás de ATLAS_WATCH — importar o módulo não observa nada.
+WATCH_STATE = WATCH_DISABLED
+
 
 def _index_workspace_root() -> Path:
     """
@@ -389,6 +394,26 @@ def _index_workspace_root() -> Path:
     if resolved.name == INDEX_DIR_NAME:
         return resolved.parent
     return resolved.parent if resolved.parent != resolved else resolved
+
+
+def _read_resolution_coverage(graph_path: Path) -> dict:
+    """
+    Bloco `resolution_coverage` do grafo (DECISÃO-005).
+
+    Índice anterior a 2.2.0 não tem o bloco: responde `unknown` com o motivo, nunca
+    listas vazias — uma lista vazia se leria como "nada a resolver", que é exatamente
+    o índice antigo se apresentando como se tivesse resolução (Princípio VI).
+    """
+    unknown = {"status": "unknown", "reason": "index_version_below_2_2_0"}
+    if not graph_path.exists():
+        return unknown
+    try:
+        with open(graph_path, "r", encoding="utf-8") as f:
+            coverage = json.load(f).get("resolution_coverage")
+    except Exception as e:
+        print(f"[atlas] Falha ao ler resolution_coverage de graph.json: {e}", file=sys.stderr)
+        return unknown
+    return coverage if isinstance(coverage, dict) else unknown
 
 
 def get_status_data() -> dict:
@@ -415,6 +440,8 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": False,
             "graph_viewer_path": None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
         }
 
     try:
@@ -443,6 +470,8 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": graph_path.exists(),
             "graph_viewer_path": str(graph_viewer_path.resolve()) if graph_viewer_path.exists() else None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
@@ -453,6 +482,8 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": False,
             "graph_viewer_path": None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
         }
 
 
@@ -882,6 +913,20 @@ def atlas_status(ctx: "Context | None" = None) -> str:
         `git_head_sha`, `is_stale` (true when the indexed git HEAD differs from the
         workspace's current HEAD), and `reindexing` (true when another process
         currently holds the reindex lock for this index).
+
+        Also `resolution_coverage`: which languages had their imports resolved and
+        how. Either `{scip: [...], treesitter: [...], none: [...], files_unresolved: N}`
+        — each language in exactly one tier, `none` meaning "indexed and searchable,
+        but mute about how it connects" — or `{status: "unknown", reason:
+        "index_version_below_2_2_0"}` for an index built before 2.2.0. Never trust an
+        absent tier as "nothing to resolve".
+
+        And `watch`: whether this server is watching the workspace for changes —
+        "active" (watching; edits trigger an incremental reindex after a debounce),
+        "disabled" (ATLAS_WATCH not set — the default), "unavailable" (ATLAS_WATCH
+        set but the optional `watchdog` dependency is not installed) or "failed"
+        (the observer could not start; see stderr). Only "active" means the index
+        keeps itself current while the server runs.
     """
     _resolve_index_dir_via_roots(ctx)
     data = get_status_data()
@@ -933,7 +978,9 @@ def atlas_index(
         `pid`/`reason`/`error`, and `message`.
         sync ('paths' set, full=false): JSON with `workspace`, `indexed_paths`,
         `files_processed`, `files_skipped_unchanged`, `files_removed`,
-        `chunks_persisted`, `duration_s`, `git_head_sha`, and optional
+        `chunks_persisted`, `duration_s`, `git_head_sha`, `scip_status`
+        ("disabled" unless ATLAS_SCIP is set; also "toolchain_missing"|"timeout"|
+        "parse_failed"|"ok") with `scip_edges`, and optional
         `skipped_reason`/`message` if another process holds the reindex lock.
     """
     # Resolve o índice via MCP roots quando a resolução de startup caiu em fallback,
@@ -1074,6 +1121,10 @@ def atlas_index(
         "graph_edges": stats.graph_edges,
         "graph_bytes": stats.graph_bytes,
         "graph_html_bytes": stats.graph_html_bytes,
+        # Princípio VI: a fase SCIP degrada (toolchain_missing/timeout/parse_failed)
+        # sem interromper a indexação — omiti-la aqui seria degradação silenciosa.
+        "scip_status": stats.scip_status,
+        "scip_edges": stats.scip_edges,
         "brief_status": stats.brief_status,
         "brief_bytes": stats.brief_bytes,
         "brief_layers": stats.brief_layers,
@@ -1259,6 +1310,35 @@ def _spawn_background_reindex() -> None:
         )
 
 
+def _watch_spawn_reindex(workspace_path: Path) -> None:
+    """
+    Callback do watcher: só delega ao subprocesso (DECISÃO-004).
+
+    @MindWhy: nunca chama `index_workspace` — indexar na thread do servidor é o
+    bug documentado em `_spawn_background_reindex` (o GIL retido pelas libs
+    nativas deixaria o event loop do FastMCP sem CPU).
+    """
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=False)
+    if result["status"] == "error":
+        print(
+            f"[atlas] Watcher: erro ao iniciar a reindexação: {result['error']}",
+            file=sys.stderr,
+        )
+
+
+def _start_watcher() -> None:
+    """Ativa o watcher de workspace (§3.1) e registra o estado para `atlas_status`."""
+    global WATCH_STATE
+    workspace_path = _index_workspace_root()
+    # @MindWhy: o index dir resolvido vai junto — com --index-dir/ATLAS_INDEX_DIR
+    # o diretório do índice não se chama `.code-index` e `IGNORE_DIRS` não o cobre.
+    WATCH_STATE = start_watcher_if_enabled(
+        workspace_path,
+        lambda: _watch_spawn_reindex(workspace_path),
+        index_dir=INDEX_DIR_PATH,
+    )
+
+
 def main():
     # Faz o parsing de --index-dir ANTES de app.run() (DECISAO-002).
     # FastMCP/stdio não usa argv adicional, então é seguro interceptar aqui.
@@ -1282,6 +1362,9 @@ def main():
     # Dispara reindex incremental em background (processo separado), sem bloquear
     # o startup do MCP nem competir pelo GIL com o event loop [GA-XX]
     _spawn_background_reindex()
+
+    # Watcher de workspace (§3.1): no-op sem ATLAS_WATCH=1
+    _start_watcher()
 
     # Roda o servidor MCP stdio de forma síncrona
     app.run()

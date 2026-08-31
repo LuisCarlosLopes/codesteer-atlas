@@ -110,14 +110,16 @@ uv run python deploy_mcp.py
 
 Source lives under `src/codesteer_atlas/`:
 
-- **`config.py`** — central constants: `SUPPORTED_EXTENSIONS` (languages parsed by Tree-sitter), `IGNORE_DIRS`, `MIN_INDEX_VERSION`, `RRF_K`, `CANDIDATES_LIMIT`, `MAX_TOKENS_PER_CHUNK`, `DEFAULT_INDEX_DIR` (`.code-index`).
+- **`config.py`** — central constants: `SUPPORTED_EXTENSIONS` (languages parsed by Tree-sitter), `IGNORE_DIRS`, `MIN_INDEX_VERSION`, `RRF_K`, `CANDIDATES_LIMIT`, `MAX_TOKENS_PER_CHUNK`, `DEFAULT_INDEX_DIR` (`.code-index`), `IMPORT_RESOLUTION_TIERS` (tier de resolução por linguagem), `WATCH_*`/`SCIP_*` (flags e tetos da F3).
 - **`chunker.py` (`ASTChunker`)** — parses files with `tree_sitter_language_pack`, walks the AST to extract `CodeChunk`s at class/function/method granularity (falling back to whole-module chunks when no parser/symbols are found), and truncates oversized chunks while preserving signatures.
 - **`embeddings.py` (`EmbeddingEngine`)** — singleton, lazy-loaded `fastembed.TextEmbedding` wrapper (`FASTEMBED_MODEL_NAME = sentence-transformers/all-MiniLM-L6-v2`). Loads the model only on first `encode`/`encode_single` call to keep server startup instant.
 - **`storage.py` (`StorageBackend`)** — all LanceDB interaction and `manifest.json` read/write. Owns hybrid search (`search_hybrid`): runs vector + FTS queries with prefilters, fuses results with RRF, and returns `SearchResult`s. Also handles incremental add/delete of chunks and manifest updates (`update_manifest_after_incremental`). Enforces `MIN_INDEX_VERSION` — manifests from older (sentence-transformers/torch) backends raise an actionable `RuntimeError` requiring reindex.
 - **`indexer.py`** — `index_workspace()` is the reusable indexing core (used by both the CLI and the MCP `atlas_index` tool): scans the workspace (or selected `paths` subtrees, with anti-traversal validation), hashes file contents (sha256) for incremental indexing, chunks/embeds only new-or-changed files, and decides between full overwrite vs. incremental delete+append persistence. Also exposes `get_git_head_sha()` and `should_ignore()`.
 - **`graph.py`** — rebuild completo do `graph.json`, resolução de imports/cites, métricas de hubs, `explain` capado, `affected` (BFS reversa) e predicado `is_noise_hub`.
 - **`context.py`** — monta o pacote `atlas_context(target, intent)` sob cotas por seção e teto `CONTEXT_RESPONSE_MAX_CHARS`, sem embeddings.
-- **`viewer.py`** — gera `graph.html` autocontido em `.code-index/`, com dados embutidos para abrir via `file://`; esmaece `noise_hub_ids`.
+- **`viewer.py`** — gera `graph.html` autocontido em `.code-index/`, com dados embutidos para abrir via `file://`; esmaece `noise_hub_ids`. O traço da aresta declara o `origin` (`scip` sólida, `treesitter` tracejada, ausente pontilhada) e a legenda lista os tiers de `resolution_coverage`, inclusive as linguagens que não resolvem.
+- **`watcher.py`** — watcher de workspace (`ATLAS_WATCH=1`, desligado por padrão). Thread daemon do `watchdog` (extra opcional `[watch]`, importado preguiçosamente dentro de `start_watcher_if_enabled`) que filtra eventos por `should_ignore` + `.atlasignore`, coalesce a rajada em `WATCH_DEBOUNCE_S` e delega a reindexação ao **subprocesso** — nunca indexa in-process. Estado declarado em `atlas_status` → `watch` (`active`/`disabled`/`unavailable`/`failed`).
+- **`scip_ingest.py`** — ingestão de `index.scip` (`ATLAS_SCIP=1`, desligada por padrão): detecta o toolchain por linguagem (`SCIP_INDEXERS`), invoca-o em subprocesso com `SCIP_TIMEOUT_S` e lê o wire format do protobuf com leitor próprio (nenhuma dependência nova). É o **único** produtor de arestas `kind: "calls"`, todas com `origin: "scip"`. Degrada em `scip_status` (`ok`/`disabled`/`toolchain_missing`/`timeout`/`parse_failed`) sem interromper a indexação.
 - **`brief.py`** — gera `brief.json` (briefing ranqueado do projeto: identidade, camadas, entrypoints, hubs) consumido por `atlas_brief`. Deriva tudo de `manifest` + `graph.json`, **sem tocar o `StorageBackend`**, o que mantém a recomputação sob demanda barata. Todas as listas são capadas pelas constantes `BRIEF_*`, e `render_brief` impõe o teto de caracteres como pós-condição. Hubs usam o mesmo `is_noise_hub` do grafo.
 - **`server.py`** — FastMCP server (`app = FastMCP("CodeSteer Atlas")`). Critically, `sys.stdout` is redirected to `stderr` at import time (before heavy deps like `lancedb`/`fastembed` load) and only restored to the real stdout in `main()` right before `app.run()`, to keep the stdio JSON-RPC channel clean. Exposes MCP tools `atlas_search`, `atlas_brief`, `atlas_context`, `atlas_graph`, `atlas_index` (with `dry_run` mode), `atlas_status`, and resource `atlas://status`.
 - **`models.py`** — Pydantic models: `CodeChunk`, `IndexManifest`, `SearchResult`, `IndexStats`.
@@ -177,6 +179,32 @@ Two traps this eval already fell into, both worth re-reading before trusting a n
    experiment's artifacts, not merely with the code reverted.
 2. **The golden set targets this repo**, so the corpus moves whenever the source does. Compare only
    old-vs-new on one index, and prefer a frozen external corpus for serious ranking work.
+
+### Resolução de relações por tier e frescor do índice (F3, index_version 2.2.0)
+
+A origem de cada relação é registrada **por aresta**, seguindo a hierarquia do Princípio II
+(índice do toolchain → Tree-sitter). `origin` existe apenas em `calls` (sempre `"scip"`) e
+`imports` (`"treesitter"`) — os kinds em que a qualidade varia; `contains`/`cites`/`links_to`/
+`annotates` são exatos por construção e não carregam o campo. `origin` **não** influencia grau,
+`top_hubs` nem `is_noise_hub`.
+
+`config.IMPORT_RESOLUTION_TIERS` classifica **toda** linguagem de `SUPPORTED_EXTENSIONS` em
+exatamente um tier (`scip`, `treesitter`, `none`); `tests/test_resolution_coverage.py` falha
+quando uma extensão nova entra sem decisão de tier. O bloco `resolution_coverage` do
+`graph.json` (também em `atlas_status`) lista as linguagens **presentes no índice** por tier
+mais `files_unresolved` — grafo anterior a 2.2.0 devolve
+`{"status": "unknown", "reason": "index_version_below_2_2_0"}`, nunca listas vazias.
+
+Duas variáveis de ambiente, ambas **desligadas por padrão** (`= "1"` liga):
+
+| Variável | Efeito | Degradação declarada |
+| --- | --- | --- |
+| `ATLAS_WATCH` | `watcher.py` observa o workspace e dispara reindexação incremental em subprocesso após o debounce | `atlas_status` → `watch`: `unavailable` (sem o extra `[watch]`), `failed`, `disabled` |
+| `ATLAS_SCIP` | fase `scip` da indexação invoca o indexador externo e ingere `index.scip` | `atlas_index` → `scip_status` + `scip_edges` (`atlas_status` não expõe esses campos) |
+
+`CURRENT_INDEX_VERSION` é `2.2.0` (campo `files_declares` no manifest, usado para resolver
+imports por namespace em Java/C#/Kotlin/Scala). **`MIN_INDEX_VERSION` continua `2.0.0`** — não
+há reindexação forçada.
 
 ### Incremental indexing (DECISAO-005 / [J])
 

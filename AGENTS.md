@@ -19,6 +19,24 @@ Use as tools do MCP **antes** de `grep`/`rg`/`find`/glob ou leitura em massa.
 `path_prefix`/`language`/`top_k` baixo; depois `Read` nas linhas ou
 `include_content=true` nos poucos hits relevantes. Não chame `atlas_status` antes.
 
+## Frescor e cobertura do índice (2.2.0)
+
+O índice **declara o que não sabe** — leia isso antes de confiar no grafo:
+
+- `atlas_status` traz `resolution_coverage` (linguagens que resolvem por `scip`, por
+  `treesitter` e as que **não resolvem**, em `none`, mais `files_unresolved`) e `watch`
+  (`active`/`disabled`/`unavailable`/`failed`). Índice anterior a 2.2.0 devolve
+  `{"status": "unknown", "reason": "index_version_below_2_2_0"}`.
+- Arestas `imports` e `calls` carregam `origin` (`treesitter`/`scip`); `contains`, `cites`,
+  `links_to` e `annotates` não carregam. Ausência de `origin` = grafo pré-2.2.0. Se a linguagem
+  do arquivo está em `none`, o grafo **não** tem as arestas `imports` dele: não conclua
+  "sem dependências" a partir disso.
+- Duas flags, desligadas por padrão: `ATLAS_WATCH=1` (`watcher.py` reindexa em subprocesso após
+  o debounce; exige o extra opcional `codesteer-atlas[watch]` — sem ele, `watch: "unavailable"`)
+  e `ATLAS_SCIP=1` (`scip_ingest.py` ingere `index.scip`; sem toolchain instalado,
+  `scip_status: "toolchain_missing"` e **nenhuma** aresta `calls` existe).
+- `MIN_INDEX_VERSION` continua `2.0.0`: índices 2.0.x/2.1.0 seguem buscáveis sem reindexar.
+
 <!-- codesteer:constitution-precedence -->
 ## Precedência de governança (CodeSteer)
 

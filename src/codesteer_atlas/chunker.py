@@ -36,6 +36,121 @@ _SQL_STATEMENT_SCOPE_TYPES = {
     "truncate": "query",
 }
 
+# @MindContext: kinds de nó de import por linguagem (§3.3). Cada entrada foi SONDADA
+# na gramática real do tree_sitter_language_pack — os nomes divergem entre gramáticas
+# e a leitura literal do roadmap erraria em pelo menos quatro delas.
+# @MindWhy: Go expõe um `import_spec` por import (o `import_declaration` agrupa vários);
+# Ruby e Elixir não têm nó de import — `require`/`import` são `call` genéricos, filtrados
+# por palavra-chave em `_IMPORT_CALL_KEYWORDS`.
+_IMPORT_NODE_KINDS: dict[str, set[str]] = {
+    "python": {"import_statement", "import_from_statement"},
+    "javascript": {"import_statement", "export_statement"},
+    "typescript": {"import_statement", "export_statement"},
+    "go": {"import_spec"},
+    "java": {"import_declaration"},
+    "csharp": {"using_directive"},
+    "rust": {"use_declaration"},
+    "kotlin": {"import_header"},
+    "php": {
+        "namespace_use_clause",
+        "include_expression",
+        "include_once_expression",
+        "require_expression",
+        "require_once_expression",
+    },
+    "ruby": {"call"},
+    "swift": {"import_declaration"},
+    "scala": {"import_declaration"},
+    "elixir": {"call"},
+}
+
+# Linguagens sem nó de import dedicado: aceita só o `call` cuja chamada é uma diretiva.
+_IMPORT_CALL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "ruby": ("require_relative", "require", "load"),
+    "elixir": ("import", "alias", "require", "use"),
+}
+
+# Tokens que prefixam o alvo do import e não fazem parte dele.
+_IMPORT_DROP_TOKENS = frozenset(
+    {
+        "import",
+        "using",
+        "use",
+        "global",
+        "static",
+        "pub",
+        "extern",
+        "crate",
+        "require",
+        "require_once",
+        "require_relative",
+        "include",
+        "include_once",
+        "load",
+        "alias",
+        "function",
+        "const",
+    }
+)
+
+# Sufixos de wildcard/selector que não pertencem ao caminho do módulo
+# (`import a.c.*` em Java, `mutable._` em Scala, `c.d.*` em Kotlin).
+_IMPORT_TRAILING_NOISE = ("::*", ".*", "._", "*", "\\", ".", "::")
+
+# @MindContext: kinds de declaração de namespace/package (DECISÃO-003), também sondados.
+# Kotlin usa `package_header` e Scala `package_clause` — NÃO `package_declaration`,
+# como a premissa de architecture.md supunha.
+_PACKAGE_DECLARATION_NODE_KINDS: dict[str, set[str]] = {
+    "java": {"package_declaration"},
+    "csharp": {"file_scoped_namespace_declaration", "namespace_declaration"},
+    "kotlin": {"package_header"},
+    "scala": {"package_clause"},
+}
+
+# Filho que carrega o nome qualificado dentro do nó de declaração. Decodificar o nó
+# inteiro não serve: em C# o `namespace_declaration` de bloco contém todo o corpo.
+_PACKAGE_NAME_NODE_KINDS = frozenset(
+    {"scoped_identifier", "qualified_name", "package_identifier", "identifier"}
+)
+
+_QUOTED_IMPORT_RE = re.compile(r"""["']([^"']+)["']""")
+
+
+def _normalize_import_target(statement: str) -> Optional[str]:
+    """
+    Reduz o texto cru de um nó de import ao alvo do módulo/arquivo.
+
+    Cobre as quatro formas encontradas na sondagem: alvo entre aspas (Go, Ruby,
+    include/require do PHP), alias por `=` (C#), prefixo de palavra-chave
+    (`import static`, `pub use`, `global using`) e selector `{...}` (Scala, PHP).
+    """
+    text = statement.strip().rstrip(";").strip()
+    if not text:
+        return None
+
+    quoted = _QUOTED_IMPORT_RE.search(text)
+    if quoted:
+        return quoted.group(1).strip() or None
+
+    # `import c.d.{E, F}` / `use App\{A, B}`: o grupo não faz parte do caminho
+    text = re.split(r"[{(]", text, maxsplit=1)[0].strip()
+
+    tokens = text.split()
+    while tokens and tokens[0].casefold() in _IMPORT_DROP_TOKENS:
+        tokens.pop(0)
+    if not tokens:
+        return None
+    target = tokens[tokens.index("=") + 1] if "=" in tokens else tokens[0]
+
+    changed = True
+    while changed:
+        changed = False
+        for noise in _IMPORT_TRAILING_NOISE:
+            if target.endswith(noise) and len(target) > len(noise):
+                target = target[: -len(noise)]
+                changed = True
+    return target.strip() or None
+
 
 class IncompatibleParserError(RuntimeError):
     """
@@ -548,35 +663,106 @@ class ASTChunker:
             imports.append(value)
         return imports
 
+    def _extract_generic_imports(self, tree, source_text: str, language: str) -> List[str]:
+        """Extrai alvos crus para as linguagens despachadas por `_IMPORT_NODE_KINDS`."""
+        source_bytes = source_text.encode("utf-8")
+        keywords = _IMPORT_CALL_KEYWORDS.get(language)
+        imports: List[str] = []
+        seen = set()
+        for node in self._collect_nodes_by_kind(tree.root_node(), _IMPORT_NODE_KINDS[language]):
+            statement = self._decode_node(node, source_bytes)
+            if keywords:
+                head = statement.lstrip().split(maxsplit=1)[0] if statement.strip() else ""
+                if head.rstrip("(").split("(")[0] not in keywords:
+                    continue
+            value = _normalize_import_target(statement)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            imports.append(value)
+        return imports
+
+    def _parse_source(self, file_path: Path, language: str):
+        """Lê e parseia um arquivo com o parser cacheado. `(tree, source_text)` ou `None`."""
+        parser = self._get_parser(language)
+        if not parser:
+            return None
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                source_text = f.read()
+        except Exception:
+            return None
+
+        try:
+            tree = parser.parse(source_text)
+        except Exception:
+            return None
+        if not tree:
+            return None
+        return tree, source_text
+
     def extract_imports(self, file_path: Path) -> List[str]:
         """
-        Retorna alvos crus de import para Python e JS/TS, reusando o parser cacheado.
+        Retorna alvos crus de import, despachados por `_IMPORT_NODE_KINDS` (§3.3).
+
+        Linguagem sem entrada na tabela retorna `[]` — degradação silenciosa aqui é
+        intencional; quem declara a lacuna é `resolution_coverage` (Princípio VI).
         """
         if not file_path.exists():
             return []
 
         ext = file_path.suffix.lower()
         language = SUPPORTED_EXTENSIONS.get(ext)
-        if language not in {"python", "javascript", "typescript"}:
+        if language not in _IMPORT_NODE_KINDS:
             return []
 
-        parser = self._get_parser(language)
-        if not parser:
+        parsed = self._parse_source(file_path, language)
+        if parsed is None:
             return []
-
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                source_text = f.read()
-        except Exception:
-            return []
-
-        tree = parser.parse(source_text)
-        if not tree:
-            return []
+        tree, source_text = parsed
 
         if language == "python":
             return self._extract_python_imports(tree, source_text)
-        return self._extract_js_ts_imports(tree, source_text)
+        if language in {"javascript", "typescript"}:
+            return self._extract_js_ts_imports(tree, source_text)
+        return self._extract_generic_imports(tree, source_text, language)
+
+    def extract_package_declaration(self, file_path: Path) -> Optional[str]:
+        """
+        Retorna o namespace/package declarado no arquivo (Java, C#, Kotlin, Scala).
+
+        É o outro lado da aresta em linguagens cujo namespace não é o caminho
+        (DECISÃO-003): `using MinhaApp.Servicos` só resolve consultando quem declara
+        aquele namespace. `None` para qualquer outra linguagem, arquivo sem declaração
+        ou parse falho.
+        """
+        if not file_path.exists():
+            return None
+
+        ext = file_path.suffix.lower()
+        language = SUPPORTED_EXTENSIONS.get(ext)
+        if language is None:
+            return None
+        kinds = _PACKAGE_DECLARATION_NODE_KINDS.get(language)
+        if not kinds:
+            return None
+
+        parsed = self._parse_source(file_path, language)
+        if parsed is None:
+            return None
+        tree, source_text = parsed
+        source_bytes = source_text.encode("utf-8")
+
+        for node in self._collect_nodes_by_kind(tree.root_node(), kinds):
+            for i in range(node.child_count()):
+                child = node.child(i)
+                if child.kind() not in _PACKAGE_NAME_NODE_KINDS:
+                    continue
+                value = self._decode_node(child, source_bytes).strip()
+                if value:
+                    return value
+        return None
 
     def _first_sql_statement_child(self, statement_node):
         """Retorna o primeiro filho semântico de um nó `statement` (ignora ';')."""

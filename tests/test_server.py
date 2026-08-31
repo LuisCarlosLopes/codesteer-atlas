@@ -18,6 +18,8 @@ from codesteer_atlas.server import (
     _safe_responder_respond,
     _spawn_background_reindex,
     _spawn_index_subprocess,
+    _start_watcher,
+    _watch_spawn_reindex,
     atlas_brief,
     atlas_context,
     atlas_graph,
@@ -2026,3 +2028,281 @@ def test_importar_server_nao_carrega_cross_encoder_nem_graph_json():
     )
     assert result.returncode == 0, result.stderr or result.stdout
 
+
+
+# --- §3.3 / DECISÃO-005: resolution_coverage no atlas_status -------------------
+
+
+def _patch_status(tmp_path):
+    return (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    )
+
+
+def test_atlas_status_expoe_resolution_coverage_do_grafo(tmp_path):
+    coverage = {
+        "scip": [],
+        "treesitter": ["go", "java"],
+        "none": ["yaml"],
+        "files_unresolved": 34,
+    }
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"nodes": [], "edges": [], "resolution_coverage": coverage}), encoding="utf-8"
+    )
+
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["resolution_coverage"] == coverage
+
+
+def test_atlas_status_reporta_unknown_em_indice_anterior_a_2_2_0(tmp_path):
+    """
+    Um grafo 2.1.0 não tem o bloco. Responder listas vazias se leria como
+    "nada a resolver" — que é exatamente o índice antigo se apresentando como se
+    tivesse resolução (Princípio VI).
+    """
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"nodes": [], "edges": [], "metrics": {}}), encoding="utf-8"
+    )
+
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["resolution_coverage"] == {
+        "status": "unknown",
+        "reason": "index_version_below_2_2_0",
+    }
+
+
+def test_atlas_status_sem_graph_json_tambem_reporta_unknown(tmp_path):
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["resolution_coverage"]["status"] == "unknown"
+
+
+def test_atlas_status_sem_indice_reporta_unknown_sem_listas_vazias(tmp_path):
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["index_exists"] is False
+    assert result["resolution_coverage"] == {
+        "status": "unknown",
+        "reason": "index_version_below_2_2_0",
+    }
+
+
+def test_atlas_status_com_graph_json_corrompido_degrada_para_unknown(tmp_path):
+    (tmp_path / "graph.json").write_text("{ nao e json", encoding="utf-8")
+
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["resolution_coverage"]["status"] == "unknown"
+
+
+# --- §3.1 / DECISÃO-004: watcher no startup e no status -----------------------
+
+
+def test_atlas_status_expoe_estado_do_watcher(tmp_path, monkeypatch):
+    """Princípio VI: o chamador sabe se o índice se mantém atualizado sozinho."""
+    monkeypatch.setattr("codesteer_atlas.server.WATCH_STATE", "active")
+
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["watch"] == "active"
+
+
+def test_atlas_status_sem_indice_tambem_expoe_watch(tmp_path, monkeypatch):
+    monkeypatch.setattr("codesteer_atlas.server.WATCH_STATE", "unavailable")
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["watch"] == "unavailable"
+
+
+def test_atlas_status_watch_default_e_disabled(tmp_path):
+    """Importar o servidor não liga watcher nenhum: o default é `disabled`."""
+    patches = _patch_status(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = json.loads(atlas_status())
+
+    assert result["watch"] == "disabled"
+
+
+def test_atlas_status_docstring_documenta_os_quatro_estados_do_watch():
+    doc = atlas_status.__doc__ or ""
+
+    assert "`watch`" in doc
+    for estado in ("active", "disabled", "unavailable", "failed"):
+        assert f'"{estado}"' in doc
+
+
+def test_importar_server_nao_carrega_watchdog_em_sys_modules():
+    """Princípio V: `watchdog` é extra opcional e só entra na ativação do watcher."""
+    script = (
+        "import sys\n"
+        "import codesteer_atlas.server  # noqa: F401\n"
+        "assert 'watchdog' not in sys.modules, sorted(m for m in sys.modules if 'watch' in m)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_main_ativa_o_watcher_depois_do_reindex_de_startup(monkeypatch, tmp_path):
+    monkeypatch.setattr("sys.argv", ["atlas-serve"])
+    ordem = []
+
+    with (
+        patch(
+            "codesteer_atlas.server._spawn_background_reindex",
+            side_effect=lambda: ordem.append("reindex"),
+        ),
+        patch(
+            "codesteer_atlas.server._start_watcher",
+            side_effect=lambda: ordem.append("watcher"),
+        ),
+        patch("codesteer_atlas.server.app.run", side_effect=lambda: ordem.append("run")),
+        patch("codesteer_atlas.server.resolve_index_dir", return_value=tmp_path / ".code-index"),
+    ):
+        main()
+
+    assert ordem == ["reindex", "watcher", "run"]
+
+
+def test_start_watcher_injeta_o_spawner_e_registra_o_estado(monkeypatch, tmp_path):
+    """O callback injetado dispara o subprocesso — nunca `index_workspace`."""
+    monkeypatch.setattr("codesteer_atlas.server.WATCH_STATE", "disabled")
+    monkeypatch.setattr("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index")
+    capturado = {}
+
+    def _fake_start(workspace_path, spawn, *args, **kwargs):
+        capturado["workspace"] = workspace_path
+        capturado["spawn"] = spawn
+        return "active"
+
+    with (
+        patch("codesteer_atlas.server.start_watcher_if_enabled", side_effect=_fake_start),
+        patch(
+            "codesteer_atlas.server._spawn_index_subprocess",
+            return_value={"status": "started", "pid": 42, "log_path": "x"},
+        ) as mock_spawn,
+        patch("codesteer_atlas.server.index_workspace") as mock_index,
+    ):
+        _start_watcher()
+        capturado["spawn"]()
+
+    from codesteer_atlas.server import WATCH_STATE
+
+    assert WATCH_STATE == "active"
+    assert capturado["workspace"] == tmp_path
+    mock_spawn.assert_called_once_with(tmp_path, paths=None, full=False)
+    mock_index.assert_not_called()
+
+
+def test_start_watcher_sem_a_flag_mantem_disabled(monkeypatch, tmp_path):
+    """Sem `ATLAS_WATCH`, o caminho de startup é o de hoje: nada é ativado, nada é logado."""
+    monkeypatch.delenv("ATLAS_WATCH", raising=False)
+    monkeypatch.setattr("codesteer_atlas.server.WATCH_STATE", "active")
+    monkeypatch.setattr("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index")
+
+    _start_watcher()
+
+    from codesteer_atlas.server import WATCH_STATE
+
+    assert WATCH_STATE == "disabled"
+
+
+def test_watch_spawn_reindex_loga_erro_sem_propagar(tmp_path, capsys):
+    with patch(
+        "codesteer_atlas.server._spawn_index_subprocess",
+        return_value={"status": "error", "error": "Popen falhou", "log_path": "x"},
+    ):
+        _watch_spawn_reindex(tmp_path)
+
+    err = capsys.readouterr().err
+    assert "[atlas]" in err
+    assert "Popen falhou" in err
+
+
+# --- Fechamento do bloco S: a fase SCIP precisa aparecer na resposta ----------
+
+
+def test_atlas_index_sync_expoe_scip_status_e_edges(tmp_path):
+    """Princípio VI: `timeout`/`parse_failed`/`toolchain_missing` não podem ser silenciosos."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+
+    mock_stats = IndexStats(
+        files_processed=1,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=3,
+        duration_s=0.1,
+        git_head_sha="sha123",
+        scip_status="timeout",
+        scip_edges=0,
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.server.index_workspace", return_value=mock_stats),
+    ):
+        result = json.loads(
+            atlas_index(workspace=str(workspace), paths=["src"], full=False, dry_run=False)
+        )
+
+    assert result["scip_status"] == "timeout"
+    assert result["scip_edges"] == 0
+
+
+def test_atlas_index_sync_expoe_scip_ok_com_arestas(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+
+    mock_stats = IndexStats(
+        files_processed=1,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=3,
+        duration_s=0.1,
+        git_head_sha="sha123",
+        scip_status="ok",
+        scip_edges=57,
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / ".code-index"),
+        patch("codesteer_atlas.server.index_workspace", return_value=mock_stats),
+    ):
+        result = json.loads(
+            atlas_index(workspace=str(workspace), paths=["src"], full=False, dry_run=False)
+        )
+
+    assert result["scip_status"] == "ok"
+    assert result["scip_edges"] == 57

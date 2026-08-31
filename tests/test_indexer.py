@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -865,3 +866,357 @@ def test_falha_de_arquivo_e_contada_e_nao_aborta(tmp_path):
     assert stats.files_failed == 1
     assert stats.files_processed == 1
     assert stats.chunks_persisted > 0
+
+
+# --- §3.3 / DECISÃO-003: índice de declarações e versão do índice --------------
+
+
+def _f3_workspace(tmp_path):
+    """Workspace Go + Java + C# com imports que só a §3.3 resolve."""
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "internal" / "svc").mkdir(parents=True)
+    (workspace_dir / "cmd").mkdir(parents=True)
+    (workspace_dir / "Web").mkdir(parents=True)
+    (workspace_dir / "Servicos").mkdir(parents=True)
+
+    (workspace_dir / "go.mod").write_text("module github.com/acme/app\n\ngo 1.22\n", encoding="utf-8")
+    (workspace_dir / "cmd" / "main.go").write_text(
+        'package main\n\nimport "github.com/acme/app/internal/svc"\n\nfunc main() { svc.Run() }\n',
+        encoding="utf-8",
+    )
+    (workspace_dir / "internal" / "svc" / "svc.go").write_text(
+        "package svc\n\nfunc Run() {}\n", encoding="utf-8"
+    )
+    (workspace_dir / "App.java").write_text(
+        "package com.acme.web;\n\nimport com.acme.core.Service;\n\nclass App {}\n",
+        encoding="utf-8",
+    )
+    (workspace_dir / "Service.java").write_text(
+        "package com.acme.core;\n\npublic class Service {}\n", encoding="utf-8"
+    )
+    (workspace_dir / "Web" / "Home.cs").write_text(
+        "namespace MinhaApp.Web;\n\nusing MinhaApp.Servicos;\n\nclass Home {}\n", encoding="utf-8"
+    )
+    (workspace_dir / "Servicos" / "A.cs").write_text(
+        "namespace MinhaApp.Servicos;\n\npublic class A {}\n", encoding="utf-8"
+    )
+    return workspace_dir
+
+
+def test_index_workspace_persiste_files_declares_e_arestas_multi_linguagem(tmp_path):
+    """
+    Go, Java e C# produziam ZERO arestas `imports` antes da §3.3. Este teste conta
+    as arestas por linguagem — "não levantou erro" não provaria nada aqui.
+    """
+    workspace_dir = _f3_workspace(tmp_path)
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+
+    manifest = StorageBackend(index_dir=index_dir).get_manifest()
+    assert manifest.index_version == "2.2.0"
+    assert manifest.files_declares == {
+        "App.java": "com.acme.web",
+        "Service.java": "com.acme.core",
+        "Web/Home.cs": "MinhaApp.Web",
+        "Servicos/A.cs": "MinhaApp.Servicos",
+    }
+
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    imports = {
+        (edge["source"], edge["target"]) for edge in graph["edges"] if edge["kind"] == "imports"
+    }
+    assert imports == {
+        ("file:cmd/main.go", "file:internal/svc/svc.go"),
+        ("file:App.java", "file:Service.java"),
+        ("file:Web/Home.cs", "file:Servicos/A.cs"),
+    }
+    assert all(
+        edge["origin"] == "treesitter" for edge in graph["edges"] if edge["kind"] == "imports"
+    )
+
+    coverage = graph["resolution_coverage"]
+    assert set(coverage["treesitter"]) == {"go", "java", "csharp"}
+    assert coverage["scip"] == []
+    assert coverage["files_unresolved"] == 0
+
+
+def test_files_declares_some_para_arquivo_deletado(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    keep = workspace_dir / "Keep.java"
+    keep.write_text("package com.acme.a;\nclass Keep {}\n", encoding="utf-8")
+    removed = workspace_dir / "Gone.java"
+    removed.write_text("package com.acme.b;\nclass Gone {}\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="git_sha_1"),
+    ):
+        index_workspace(workspace_dir, index_dir)
+        assert StorageBackend(index_dir=index_dir).get_manifest().files_declares == {
+            "Keep.java": "com.acme.a",
+            "Gone.java": "com.acme.b",
+        }
+
+        removed.unlink()
+        index_workspace(workspace_dir, index_dir)
+
+    assert StorageBackend(index_dir=index_dir).get_manifest().files_declares == {
+        "Keep.java": "com.acme.a"
+    }
+
+
+def test_manifest_antigo_sem_files_declares_carrega_pelo_default(tmp_path):
+    """Manifest 2.1.0 não tem a chave; o default vazio evita erro de validação."""
+    from codesteer_atlas.models import IndexManifest
+
+    manifest = IndexManifest.model_validate(
+        {
+            "total_chunks": 1,
+            "repos_indexed": ["demo"],
+            "embedding_model": "m",
+            "embedding_dim": 384,
+            "last_indexed_at": "2026-06-05T12:00:00Z",
+            "languages_indexed": ["python"],
+            "index_version": "2.1.0",
+            "files": {"a.py": "h"},
+        }
+    )
+
+    assert manifest.files_declares == {}
+
+
+# ---------------------------------------------------------------------------
+# TASK-018 / TASK-019 — fase `scip` no pipeline de indexação
+# ---------------------------------------------------------------------------
+
+
+def _workspace_com_chamada(tmp_path):
+    """`run_app` (app.py) chama `helper` (util.py); ambos ocupam as linhas 1-2."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "app.py").write_text(
+        "def run_app():\n    return helper()\n", encoding="utf-8"
+    )
+    (workspace_dir / "util.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    return workspace_dir
+
+
+def _scip_fixture_bytes():
+    from tests.test_scip_ingest import enc_document, enc_index, enc_occurrence
+
+    return enc_index(
+        [
+            enc_document(
+                "app.py",
+                [
+                    enc_occurrence("sym-run", 0, 1, definition=True),
+                    enc_occurrence("sym-helper", 1, 1),
+                ],
+            ),
+            enc_document("util.py", [enc_occurrence("sym-helper", 0, 1, definition=True)]),
+        ]
+    )
+
+
+def test_fase_scip_desligada_por_padrao_nao_invoca_subprocesso(tmp_path, monkeypatch):
+    """Nenhuma indexação atual pode passar a executar um binário externo."""
+    monkeypatch.delenv("ATLAS_SCIP", raising=False)
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch("codesteer_atlas.indexer._run_scip_phase") as fase_mock,
+    ):
+        stats = index_workspace(workspace_dir, index_dir)
+
+    fase_mock.assert_not_called()
+    assert stats.scip_status == "disabled"
+    assert stats.scip_edges == 0
+    assert "scip" not in stats.phase_durations_s
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert "scip" not in graph
+    assert [edge for edge in graph["edges"] if edge["kind"] == "calls"] == []
+
+
+def test_fase_scip_ligada_grava_arestas_calls_no_grafo(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ATLAS_SCIP", "1")
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    index_dir = tmp_path / "index_output"
+    payload = _scip_fixture_bytes()
+
+    def _fake_run(binary, argv_tail, workspace_root, output_path):
+        Path(output_path).write_bytes(payload)
+        return "ok"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch(
+            "codesteer_atlas.scip_ingest.detect_toolchains",
+            return_value={"python": "/usr/bin/scip-python"},
+        ),
+        patch("codesteer_atlas.scip_ingest.run_indexer", side_effect=_fake_run),
+    ):
+        stats = index_workspace(workspace_dir, index_dir, report_progress=False)
+
+    assert stats.scip_status == "ok"
+    assert stats.scip_edges == 1
+    assert "scip" in stats.phase_durations_s
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert [edge for edge in graph["edges"] if edge["kind"] == "calls"] == [
+        {
+            "source": "sym:app.py#run_app",
+            "target": "sym:util.py#helper",
+            "kind": "calls",
+            "origin": "scip",
+            "location": {"file_path": "app.py", "lines": [2, 2]},
+        }
+    ]
+    assert graph["scip"] == {
+        "status": "ok",
+        "head_sha": "sha-1",
+        "languages": ["python"],
+        "edges": 1,
+    }
+    assert graph["resolution_coverage"]["scip"] == ["python"]
+    assert "python" not in graph["resolution_coverage"]["treesitter"]
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "status_do_run, status_esperado",
+    [("timeout", "timeout"), ("parse_failed", "parse_failed")],
+)
+def test_fase_scip_degradada_conclui_a_indexacao(
+    tmp_path, monkeypatch, capsys, status_do_run, status_esperado
+):
+    """Timeout e índice ilegível viram status; `files_processed`/`chunks_persisted` intactos."""
+    monkeypatch.setenv("ATLAS_SCIP", "1")
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch(
+            "codesteer_atlas.scip_ingest.detect_toolchains",
+            return_value={"python": "/usr/bin/scip-python"},
+        ),
+        patch("codesteer_atlas.scip_ingest.run_indexer", return_value=status_do_run),
+    ):
+        stats = index_workspace(workspace_dir, index_dir, report_progress=False)
+
+    assert stats.scip_status == status_esperado
+    assert stats.scip_edges == 0
+    assert stats.files_processed == 2
+    assert stats.chunks_persisted == 2
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert graph["scip"]["status"] == status_esperado
+    assert graph["resolution_coverage"]["scip"] == []
+    assert capsys.readouterr().out == ""
+
+
+def test_fase_scip_sem_toolchain_reporta_toolchain_missing_e_conclui(tmp_path, monkeypatch):
+    """Nenhum indexador instalado (caso real desta máquina): indexação termina normal."""
+    monkeypatch.setenv("ATLAS_SCIP", "1")
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    index_dir = tmp_path / "index_output"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch("codesteer_atlas.scip_ingest.subprocess.run") as run_mock,
+    ):
+        stats = index_workspace(workspace_dir, index_dir, report_progress=False)
+
+    run_mock.assert_not_called()
+    assert stats.scip_status == "toolchain_missing"
+    assert stats.files_processed == 2
+    assert stats.chunks_persisted == 2
+
+
+def test_fase_scip_pula_incremental_com_head_inalterado(tmp_path, monkeypatch):
+    """DECISÃO-002: indexador SCIP é whole-project; sem HEAD novo, preserva o que há."""
+    monkeypatch.setenv("ATLAS_SCIP", "1")
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    (workspace_dir / "outro.py").write_text("def outro():\n    return 0\n", encoding="utf-8")
+    index_dir = tmp_path / "index_output"
+    payload = _scip_fixture_bytes()
+
+    def _fake_run(binary, argv_tail, workspace_root, output_path):
+        Path(output_path).write_bytes(payload)
+        return "ok"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch(
+            "codesteer_atlas.scip_ingest.detect_toolchains",
+            return_value={"python": "/usr/bin/scip-python"},
+        ),
+        patch("codesteer_atlas.scip_ingest.run_indexer", side_effect=_fake_run) as run_mock,
+    ):
+        index_workspace(workspace_dir, index_dir, report_progress=False)
+        (workspace_dir / "outro.py").write_text("def outro():\n    return 1\n", encoding="utf-8")
+        segunda = index_workspace(workspace_dir, index_dir, report_progress=False)
+
+    assert segunda.graph_strategy == "incremental-code"
+    assert run_mock.call_count == 1  # a 2ª execução não reinvoca o indexador
+    assert segunda.scip_status == "ok"
+    assert segunda.scip_edges == 1
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert graph["scip"] == {
+        "status": "ok",
+        "head_sha": "sha-1",
+        "languages": ["python"],
+        "edges": 1,
+    }
+    assert graph["resolution_coverage"]["scip"] == ["python"]
+    assert [edge["source"] for edge in graph["edges"] if edge["kind"] == "calls"] == [
+        "sym:app.py#run_app"
+    ]
+
+
+def test_rebuild_incremental_do_arquivo_alterado_derruba_suas_arestas_calls(
+    tmp_path, monkeypatch
+):
+    """O símbolo é re-chunkado; a aresta SCIP dele fica velha e não é preservada."""
+    monkeypatch.setenv("ATLAS_SCIP", "1")
+    workspace_dir = _workspace_com_chamada(tmp_path)
+    index_dir = tmp_path / "index_output"
+    payload = _scip_fixture_bytes()
+
+    def _fake_run(binary, argv_tail, workspace_root, output_path):
+        Path(output_path).write_bytes(payload)
+        return "ok"
+
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+        patch(
+            "codesteer_atlas.scip_ingest.detect_toolchains",
+            return_value={"python": "/usr/bin/scip-python"},
+        ),
+        patch("codesteer_atlas.scip_ingest.run_indexer", side_effect=_fake_run),
+    ):
+        index_workspace(workspace_dir, index_dir, report_progress=False)
+        (workspace_dir / "app.py").write_text(
+            "def run_app():\n    return helper() + 1\n", encoding="utf-8"
+        )
+        segunda = index_workspace(workspace_dir, index_dir, report_progress=False)
+
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert [edge for edge in graph["edges"] if edge["kind"] == "calls"] == []
+    assert segunda.scip_edges == 0
+    # A declaração sobrevive ao rebuild: o índice não volta a se dizer sem SCIP
+    assert graph["scip"]["status"] == "ok"
+    assert graph["scip"]["head_sha"] == "sha-1"

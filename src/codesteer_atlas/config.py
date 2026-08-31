@@ -94,7 +94,7 @@ QUERY_STOPWORDS = frozenset(
 # Versão mínima de manifest aceita pelo server; manifests anteriores usam backend
 # de embeddings incompatível (sentence-transformers/torch) e exigem reindexação
 MIN_INDEX_VERSION = "2.0.0"
-CURRENT_INDEX_VERSION = "2.1.0"
+CURRENT_INDEX_VERSION = "2.2.0"
 
 # Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
 ATLASIGNORE_FILENAME = ".atlasignore"
@@ -227,4 +227,86 @@ SUPPORTED_EXTENSIONS = {
     ".scss": "scss",
     ".ex": "elixir",
     ".exs": "elixir",
+}
+
+# ---------------------------------------------------------------------------
+# Fase 3 — "o índice reflete a realidade" (§3.1 watcher, §3.2 SCIP, §3.3 imports)
+# Bloco acrescentado ao FINAL do arquivo de propósito: a F2 edita constantes acima
+# e as duas fases não devem disputar as mesmas linhas.
+# ---------------------------------------------------------------------------
+
+# Watcher de workspace (§3.1) — desligado por padrão; ligar muda o comportamento
+# de todo usuário existente sem opt-in.
+WATCH_ENV_FLAG = "ATLAS_WATCH"
+# Coalesce a rajada de eventos de um `git pull`/save do editor em um único spawn.
+WATCH_DEBOUNCE_S = 2.0
+
+# Ingestão SCIP (§3.2) — também desligada por padrão: executa binário externo.
+SCIP_ENV_FLAG = "ATLAS_SCIP"
+SCIP_TIMEOUT_S = 300
+SCIP_INDEX_FILENAME = "index.scip"
+# Teto próprio de leitura: MAX_FILE_SIZE não se aplica a artefato de toolchain.
+SCIP_MAX_INDEX_BYTES = 256 * 1024 * 1024
+# Binário por linguagem, na ordem em que `shutil.which` deve procurá-lo. O argv
+# completo (saída, workspace) é montado por quem invoca o subprocesso (§3.2).
+SCIP_INDEXERS: dict[str, list[str]] = {
+    "python": ["scip-python", "index"],
+    "typescript": ["scip-typescript", "index"],
+    "javascript": ["scip-typescript", "index"],
+    "go": ["scip-go"],
+    "rust": ["rust-analyzer", "scip"],
+}
+
+# Tier de resolução de import por linguagem (DECISÃO-005). Cada linguagem de
+# SUPPORTED_EXTENSIONS aparece em EXATAMENTE um tier — `tests/test_resolution_coverage.py`
+# falha quando uma extensão nova entra sem decisão de tier, que é o modo de falha
+# por esquecimento que o roadmap pede para guardar.
+#
+# `scip` nasce vazio: nenhuma linguagem é SCIP por natureza; a fase §3.2 promove
+# em tempo de execução a linguagem cuja ingestão realmente casou uma ocorrência.
+# `treesitter` é exatamente o conjunto coberto por `graph._IMPORT_RESOLVERS`.
+IMPORT_RESOLUTION_TIERS: dict[str, frozenset[str]] = {
+    "scip": frozenset(),
+    "treesitter": frozenset(
+        {
+            "python",
+            "javascript",
+            "typescript",
+            "go",
+            "java",
+            "csharp",
+            "kotlin",
+            "scala",
+            "rust",
+            "php",
+            "ruby",
+            "swift",
+        }
+    ),
+    "none": frozenset(
+        {
+            "markdown",
+            "text",
+            "xml",
+            "razor",
+            "dart",
+            "pascal",
+            "vb6",
+            "c",
+            "cpp",
+            "sql",
+            "bash",
+            "yaml",
+            "json",
+            "toml",
+            "vue",
+            "lua",
+            "html",
+            "css",
+            "scss",
+            # Imports são extraídos (chunker), mas nenhum resolver mapeia
+            # `MyApp.Core` -> `lib/my_app/core.ex` — declarado, não silenciado.
+            "elixir",
+        }
+    ),
 }

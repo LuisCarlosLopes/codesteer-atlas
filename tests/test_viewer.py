@@ -218,3 +218,103 @@ def test_viewer_template_has_performance_guardrails_and_debug_hooks(tmp_path):
     assert "cooldownTicks" in html
     assert 'id="debug-panel"' in html
     assert "debugEnabled" in html
+
+
+def test_write_graph_html_embeds_edge_origin_and_dashes_by_tier(tmp_path):
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [
+            {"id": "file:src/a.py", "kind": "file", "label": "a.py", "degree": 1},
+            {"id": "file:src/b.py", "kind": "file", "label": "b.py", "degree": 1},
+            {"id": "sym:src/a.py#f", "kind": "symbol", "label": "f", "degree": 1},
+        ],
+        "edges": [
+            {
+                "source": "file:src/a.py",
+                "target": "file:src/b.py",
+                "kind": "imports",
+                "origin": "treesitter",
+            },
+            {
+                "source": "sym:src/a.py#f",
+                "target": "file:src/b.py",
+                "kind": "calls",
+                "origin": "scip",
+            },
+            {"source": "file:src/a.py", "target": "sym:src/a.py#f", "kind": "contains"},
+        ],
+        "resolution_coverage": {
+            "scip": [],
+            "treesitter": ["python"],
+            "none": [],
+            "files_unresolved": 0,
+        },
+        "metrics": {"node_count": 3, "edge_count": 3, "top_hubs": []},
+    }
+
+    html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+    embedded = _extract_json_payload(html)
+
+    origins = {edge["kind"]: edge.get("origin") for edge in embedded["edges"]}
+    assert origins["imports"] == "treesitter"
+    assert origins["calls"] == "scip"
+    assert origins["contains"] is None
+    # O link montado em buildVisibleData carrega a origem, e o traco a consome.
+    assert "origin: edge.origin || \"unknown\"" in html
+    assert "linkLineDash" in html
+    assert "dashForLink" in html
+    assert 'css: "dashed"' in html
+    assert 'css: "dotted"' in html
+
+
+def test_graph_html_legend_lists_languages_without_resolver(tmp_path):
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [{"id": "file:main.hs", "kind": "file", "label": "main.hs", "degree": 0}],
+        "edges": [],
+        "resolution_coverage": {
+            "scip": [],
+            "treesitter": ["python", "go"],
+            "none": ["haskell", "lua"],
+            "files_unresolved": 7,
+        },
+        "metrics": {"node_count": 1, "edge_count": 0, "top_hubs": []},
+    }
+
+    html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+    embedded = _extract_json_payload(html)
+
+    # Os dados do tier chegam ao HTML e a legenda os renderiza (container + funcao).
+    assert embedded["resolution_coverage"]["none"] == ["haskell", "lua"]
+    assert embedded["resolution_coverage"]["files_unresolved"] == 7
+    assert 'id="coverage"' in html
+    assert "renderCoverageLegend" in html
+    assert "graph.resolution_coverage || {}" in html
+    assert "arquivos sem resolver" in html
+
+
+def test_graph_sem_origin_nem_coverage_continua_renderizando(tmp_path):
+    # Grafo no formato 2.1.0: sem `origin` nas arestas e sem `resolution_coverage`.
+    graph = {
+        "workspace_repo": "repo",
+        "generated_at": "2026-06-05T12:00:00Z",
+        "nodes": [
+            {"id": "file:src/a.py", "kind": "file", "label": "a.py", "degree": 1},
+            {"id": "file:src/b.py", "kind": "file", "label": "b.py", "degree": 1},
+        ],
+        "edges": [
+            {"source": "file:src/a.py", "target": "file:src/b.py", "kind": "imports"},
+        ],
+        "metrics": {"node_count": 2, "edge_count": 1, "top_hubs": []},
+    }
+
+    html = write_graph_html(graph, tmp_path).read_text(encoding="utf-8")
+    embedded = _extract_json_payload(html)
+
+    assert "origin" not in embedded["edges"][0]
+    assert "resolution_coverage" not in embedded
+    # Invariante offline preservada mesmo sem os campos novos.
+    assert "<script src=" not in html
+    assert "//cdn" not in html

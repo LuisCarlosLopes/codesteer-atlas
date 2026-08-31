@@ -2,11 +2,12 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import sys
 import threading
 from collections import deque
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from pathlib import Path, PurePath
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from codesteer_atlas.config import (
     GRAPH_AFFECTED_MAX_RESULTS,
@@ -16,6 +17,8 @@ from codesteer_atlas.config import (
     GRAPH_PATH_MAX_HOPS,
     GRAPH_RESPONSE_MAX_CHARS,
     GRAPH_TOP_HUBS_LIMIT,
+    IGNORE_DIRS,
+    IMPORT_RESOLUTION_TIERS,
 )
 from codesteer_atlas.markdown_links import extract_markdown_link_targets
 from codesteer_atlas.models import CodeChunk
@@ -55,8 +58,77 @@ def _resolve_note_matches(name_to_paths: Dict[str, List[str]], key: str) -> List
 # Diretórios que convencionalmente hospedam pacotes sem serem parte do nome do módulo
 _CONVENTIONAL_SOURCE_ROOTS = ("src", "lib")
 
+# Manifestos de build que marcam raiz de módulo. `go.mod` e `*.csproj` NÃO têm
+# extensão em SUPPORTED_EXTENSIONS, logo não estão no manifest do índice — só são
+# descobertos varrendo o workspace, e por isso `workspace_root` é opcional aqui.
+_BUILD_MANIFEST_NAMES = frozenset({"go.mod", "pom.xml", "Cargo.toml", "build.gradle"})
+_BUILD_MANIFEST_SUFFIXES = (".csproj",)
+# Teto de profundidade: cobre monorepo (`services/api/go.mod`) sem varrer a árvore toda.
+_BUILD_MANIFEST_MAX_DEPTH = 3
 
-def infer_package_roots(manifest_files: set[str]) -> List[str]:
+_GO_MODULE_RE = re.compile(r"^\s*module\s+(\S+)", re.MULTILINE)
+
+
+def _is_build_manifest(name: str) -> bool:
+    return name in _BUILD_MANIFEST_NAMES or name.endswith(_BUILD_MANIFEST_SUFFIXES)
+
+
+def _discover_build_manifests(workspace_root: Optional[Path]) -> List[Tuple[str, str]]:
+    """[(diretório relativo POSIX, nome do arquivo)] dos manifestos de build."""
+    if workspace_root is None:
+        return []
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return []
+
+    found: List[Tuple[str, str]] = []
+    for current_dir, dir_names, file_names in os.walk(root):
+        rel_dir = PurePath(Path(current_dir).relative_to(root)).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        depth = 0 if not rel_dir else rel_dir.count("/") + 1
+        if depth >= _BUILD_MANIFEST_MAX_DEPTH:
+            dir_names[:] = []
+        else:
+            dir_names[:] = [
+                name for name in dir_names if name not in IGNORE_DIRS and not name.startswith(".")
+            ]
+        for file_name in file_names:
+            if _is_build_manifest(file_name):
+                found.append((rel_dir, file_name))
+    return sorted(found)
+
+
+def infer_go_modules(
+    manifest_files: set[str], workspace_root: Optional[Path] = None
+) -> List[Tuple[str, str]]:
+    """
+    [(caminho do módulo declarado no `go.mod`, diretório relativo da raiz)].
+
+    Ordenado do módulo mais longo para o mais curto para que, num monorepo com
+    módulos aninhados, o prefixo mais específico case primeiro.
+    """
+    if workspace_root is None or not any(path.endswith(".go") for path in manifest_files):
+        return []
+
+    modules: List[Tuple[str, str]] = []
+    for rel_dir, file_name in _discover_build_manifests(workspace_root):
+        if file_name != "go.mod":
+            continue
+        try:
+            content = (Path(workspace_root) / rel_dir / file_name).read_text(
+                encoding="utf-8", errors="ignore"
+            )
+        except OSError:
+            continue
+        match = _GO_MODULE_RE.search(content)
+        if match:
+            modules.append((match.group(1).strip(), rel_dir))
+    return sorted(modules, key=lambda item: (-len(item[0]), item[0]))
+
+
+def infer_package_roots(
+    manifest_files: set[str], workspace_root: Optional[Path] = None
+) -> List[str]:
     """
     Deduz os prefixos de diretório que NÃO fazem parte do nome do módulo.
 
@@ -69,6 +141,10 @@ def infer_package_roots(manifest_files: set[str]) -> List[str]:
     pacote, e a raiz é o pai do pacote mais externo. Retorna sempre a raiz do
     workspace ("") como fallback, e a lista é ordenada para tornar a resolução
     determinística.
+
+    Com `workspace_root`, o diretório de cada manifesto de build (`go.mod`,
+    `pom.xml`, `*.csproj`, `Cargo.toml`) também vira raiz — sem ele, só os
+    manifestos indexáveis (`pom.xml`, `Cargo.toml`) são vistos (§3.3).
     """
     package_dirs = {
         posixpath.dirname(file_path)
@@ -91,6 +167,20 @@ def infer_package_roots(manifest_files: set[str]) -> List[str]:
         prefix = f"{candidate}/"
         if any(file_path.startswith(prefix) for file_path in manifest_files):
             roots.add(candidate)
+
+    # Manifestos de build indexáveis já estão no manifest do índice
+    for file_path in manifest_files:
+        if _is_build_manifest(posixpath.basename(file_path)):
+            roots.add(posixpath.dirname(file_path))
+
+    for rel_dir, file_name in _discover_build_manifests(workspace_root):
+        if _is_build_manifest(file_name):
+            roots.add(rel_dir)
+            # Layout Maven/Gradle: as fontes ficam sob src/main/<linguagem>
+            for nested in ("src/main/java", "src/main/kotlin", "src/main/scala", "src"):
+                candidate = posixpath.join(rel_dir, nested) if rel_dir else nested
+                if any(path.startswith(f"{candidate}/") for path in manifest_files):
+                    roots.add(candidate)
 
     # Raiz do workspace primeiro; depois as mais rasas — determinístico
     return sorted(roots, key=lambda root: (len(root), root))
@@ -167,6 +257,265 @@ def _resolve_js_ts_import(source_path: str, raw_import: str, manifest_files: set
         if candidate in manifest_files:
             return candidate
     return None
+
+
+# Só estas duas arestas têm mais de um tier de qualidade possível; a presença do
+# campo `origin` já significa "esta aresta tem tier" (DECISÃO-006).
+_ORIGIN_EDGE_KINDS = frozenset({"imports", "calls"})
+IMPORT_ORIGIN_TREESITTER = "treesitter"
+# Grafo 2.1.0 não tem `origin`; o consumidor recebe isto em vez de nada (Princípio VI)
+EDGE_ORIGIN_UNKNOWN = "unknown"
+
+
+class _ImportContext:
+    """Índices derivados uma vez por build e compartilhados por todos os resolvers."""
+
+    __slots__ = (
+        "manifest_files",
+        "package_roots",
+        "declares_index",
+        "go_modules",
+        "files_by_dir",
+        "dirs_by_name",
+    )
+
+    def __init__(
+        self,
+        manifest_files: set[str],
+        package_roots: List[str],
+        files_declares: Dict[str, str],
+        go_modules: List[Tuple[str, str]],
+    ):
+        self.manifest_files = manifest_files
+        self.package_roots = package_roots
+        self.go_modules = go_modules
+
+        declares_index: Dict[str, List[str]] = {}
+        for path, namespace in files_declares.items():
+            declares_index.setdefault(namespace, []).append(path)
+        self.declares_index = {key: sorted(value) for key, value in declares_index.items()}
+
+        files_by_dir: Dict[str, List[str]] = {}
+        for path in manifest_files:
+            files_by_dir.setdefault(posixpath.dirname(path), []).append(path)
+        self.files_by_dir = {key: sorted(value) for key, value in files_by_dir.items()}
+
+        dirs_by_name: Dict[str, List[str]] = {}
+        for directory in self.files_by_dir:
+            if directory:
+                dirs_by_name.setdefault(posixpath.basename(directory), []).append(directory)
+        self.dirs_by_name = {key: sorted(value) for key, value in dirs_by_name.items()}
+
+
+def _resolve_python_targets(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = _resolve_python_import(
+        source_path, raw_import, ctx.manifest_files, ctx.package_roots
+    )
+    return [target] if target else []
+
+
+def _resolve_js_ts_targets(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = _resolve_js_ts_import(source_path, raw_import, ctx.manifest_files)
+    return [target] if target else []
+
+
+def _files_in_package_dir(ctx: _ImportContext, directory: str, suffix: str, source_path: str):
+    directory = "" if directory in {".", "/"} else directory.strip("/")
+    return [
+        path
+        for path in ctx.files_by_dir.get(directory, ())
+        if path.endswith(suffix) and path != source_path
+    ]
+
+
+def _resolve_go_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    """
+    Em Go o pacote é o diretório: o import aponta para TODOS os `.go` daquele diretório.
+
+    O caminho do import é absoluto pelo `module` do `go.mod`; sem casar um módulo
+    conhecido, o alvo é externo (stdlib ou dependência) e não gera aresta.
+    """
+    if raw_import.startswith(("./", "../")):
+        target_dir = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), raw_import))
+        return _files_in_package_dir(ctx, target_dir, ".go", source_path)
+
+    for module, root in ctx.go_modules:
+        if raw_import == module:
+            remainder = ""
+        elif raw_import.startswith(f"{module}/"):
+            remainder = raw_import[len(module) + 1 :]
+        else:
+            continue
+        target_dir = posixpath.join(root, remainder) if root else remainder
+        return _files_in_package_dir(ctx, target_dir, ".go", source_path)
+    return []
+
+
+def _resolve_declared_namespace_import(
+    source_path: str, raw_import: str, ctx: _ImportContext
+) -> List[str]:
+    """
+    Java, C#, Kotlin e Scala: o namespace é declarado, não é o caminho (DECISÃO-003).
+
+    Casa o prefixo mais longo do import que alguém declara. Se sobrar um segmento
+    depois do namespace (`com.pkg.Service` sobre o pacote `com.pkg`), prefere o
+    arquivo cujo nome é esse segmento; senão devolve todos os arquivos do namespace.
+    """
+    parts = [part for part in raw_import.split(".") if part]
+    for cut in range(len(parts), 0, -1):
+        paths = ctx.declares_index.get(".".join(parts[:cut]))
+        if not paths:
+            continue
+        remainder = parts[cut:]
+        if remainder:
+            stem = remainder[0]
+            exact = [
+                path
+                for path in paths
+                if posixpath.splitext(posixpath.basename(path))[0] == stem
+                and path != source_path
+            ]
+            if exact:
+                return exact
+        return [path for path in paths if path != source_path]
+    return []
+
+
+def _resolve_rust_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    parts = [part for part in raw_import.split("::") if part]
+    if not parts:
+        return []
+    source_dir = posixpath.dirname(source_path)
+    head = parts[0]
+    if head == "crate":
+        rest, bases = parts[1:], list(ctx.package_roots)
+    elif head == "self":
+        rest, bases = parts[1:], [source_dir]
+    elif head == "super":
+        rest, bases = parts[1:], [posixpath.dirname(source_dir)]
+    else:
+        rest, bases = parts, [source_dir, *ctx.package_roots]
+
+    while rest:
+        joined = "/".join(rest)
+        for base in bases:
+            prefix = posixpath.join(base, joined) if base else joined
+            for candidate in (f"{prefix}.rs", posixpath.join(prefix, "mod.rs")):
+                normalized = posixpath.normpath(candidate)
+                if normalized in ctx.manifest_files and normalized != source_path:
+                    return [normalized]
+        rest = rest[:-1]
+    return []
+
+
+def _resolve_php_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    # include/require carregam um caminho de arquivo; `use` carrega um namespace PSR-4
+    if raw_import.endswith(".php") or raw_import.startswith(("./", "../", "/")):
+        base = posixpath.dirname(source_path)
+        target = posixpath.normpath(posixpath.join(base, raw_import.lstrip("/")))
+        return [target] if target in ctx.manifest_files and target != source_path else []
+
+    parts = [part for part in raw_import.replace("\\", "/").split("/") if part]
+    while parts:
+        joined = "/".join(parts)
+        for root in ctx.package_roots:
+            prefix = posixpath.join(root, joined) if root else joined
+            candidate = posixpath.normpath(f"{prefix}.php")
+            if candidate in ctx.manifest_files and candidate != source_path:
+                return [candidate]
+        parts = parts[:-1]
+    return []
+
+
+def _resolve_ruby_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = raw_import if raw_import.endswith(".rb") else f"{raw_import}.rb"
+    # `require_relative` ancora no arquivo; `require` ancora no load path (as raízes)
+    for base in (posixpath.dirname(source_path), *ctx.package_roots):
+        candidate = posixpath.normpath(posixpath.join(base, target) if base else target)
+        if candidate in ctx.manifest_files and candidate != source_path:
+            return [candidate]
+    return []
+
+
+def _resolve_swift_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    # Swift importa módulo, não arquivo: o módulo é o diretório de fontes homônimo
+    module = raw_import.split(".")[0]
+    targets: List[str] = []
+    for directory in ctx.dirs_by_name.get(module, ()):
+        targets.extend(_files_in_package_dir(ctx, directory, ".swift", source_path))
+    return sorted(set(targets))
+
+
+ImportResolver = Callable[[str, str, _ImportContext], List[str]]
+
+# @MindContext: registry de resolução de import por sufixo (§3.3). O conjunto de
+# LINGUAGENS coberto aqui tem de ser exatamente `IMPORT_RESOLUTION_TIERS["treesitter"]`
+# — `tests/test_resolution_coverage.py` guarda essa igualdade.
+_IMPORT_RESOLVERS: Dict[str, ImportResolver] = {
+    ".py": _resolve_python_targets,
+    ".js": _resolve_js_ts_targets,
+    ".jsx": _resolve_js_ts_targets,
+    ".ts": _resolve_js_ts_targets,
+    ".tsx": _resolve_js_ts_targets,
+    ".go": _resolve_go_import,
+    ".java": _resolve_declared_namespace_import,
+    ".cs": _resolve_declared_namespace_import,
+    ".kt": _resolve_declared_namespace_import,
+    ".kts": _resolve_declared_namespace_import,
+    ".scala": _resolve_declared_namespace_import,
+    ".rs": _resolve_rust_import,
+    ".php": _resolve_php_import,
+    ".rb": _resolve_ruby_import,
+    ".swift": _resolve_swift_import,
+}
+
+
+def _resolve_import_targets(
+    file_path: str, raw_import: str, ctx: _ImportContext
+) -> List[str]:
+    resolver = _IMPORT_RESOLVERS.get(posixpath.splitext(file_path)[1].lower())
+    if resolver is None:
+        return []
+    return resolver(file_path, raw_import, ctx)
+
+
+def count_unresolved_import_files(manifest, ctx: _ImportContext) -> int:
+    """
+    Arquivos que declaram import mas não produziram nenhuma aresta.
+
+    É a métrica de `resolution_coverage.files_unresolved`: mede exatamente o modo de
+    falha que a F3 existe para tornar visível — arquivo indexado, mas mudo sobre como
+    se conecta. Fica igual nos dois caminhos de build por ser a única implementação.
+    """
+    unresolved = 0
+    for file_path, raw_imports in manifest.files_imports.items():
+        if not raw_imports:
+            continue
+        if not any(
+            _resolve_import_targets(file_path, raw_import, ctx) for raw_import in raw_imports
+        ):
+            unresolved += 1
+    return unresolved
+
+
+def _build_resolution_coverage(languages: Iterable[str], files_unresolved: int) -> dict:
+    """
+    Bloco `resolution_coverage` do grafo (DECISÃO-005).
+
+    Lista só as linguagens efetivamente presentes no índice e garante, por construção,
+    que nenhuma apareça em dois tiers.
+    """
+    present = set(languages or ())
+    coverage: Dict[str, Any] = {}
+    assigned: set[str] = set()
+    for tier in ("scip", "treesitter", "none"):
+        tier_languages = sorted(
+            (present & set(IMPORT_RESOLUTION_TIERS.get(tier, frozenset()))) - assigned
+        )
+        assigned.update(tier_languages)
+        coverage[tier] = tier_languages
+    coverage["files_unresolved"] = files_unresolved
+    return coverage
 
 
 def _node_summary(node: dict) -> dict:
@@ -335,7 +684,7 @@ def _build_empty_graph(manifest) -> dict:
         "graph_version": "1.0",
         "generated_at": manifest.last_indexed_at,
         "workspace_repo": manifest.repos_indexed[0] if manifest.repos_indexed else "",
-        "import_languages": ["python", "javascript", "typescript"],
+        "import_languages": sorted(IMPORT_RESOLUTION_TIERS["treesitter"]),
         "nodes": [],
         "edges": [],
         "metrics": {
@@ -355,7 +704,7 @@ def _add_contribution_from_rows(
     nodes: Dict[str, dict],
     edges: List[dict],
     edge_keys: set[tuple[str, str, str]],
-    package_roots: Optional[List[str]] = None,
+    import_context: _ImportContext,
 ) -> None:
     file_kind = "doc" if file_path.lower().endswith(".md") else "file"
     file_node_id = f"file:{file_path}"
@@ -368,12 +717,18 @@ def _add_contribution_from_rows(
             "lines": None,
         }
 
-    def _add_edge(source: str, target: str, kind: str) -> None:
+    def _add_edge(source: str, target: str, kind: str, origin: Optional[str] = None) -> None:
         key = (source, target, kind)
         if source == target or key in edge_keys:
             return
         edge_keys.add(key)
-        edges.append({"source": source, "target": target, "kind": kind})
+        edge = {"source": source, "target": target, "kind": kind}
+        # @MindWhy: `origin` só onde a qualidade da aresta varia (DECISÃO-006).
+        # Em `contains`/`cites`/`links_to`/`annotates` não há tier a declarar, e o
+        # campo só inflaria o graph.json, que é lido inteiro e cacheado em memória.
+        if origin and kind in _ORIGIN_EDGE_KINDS:
+            edge["origin"] = origin
+        edges.append(edge)
 
     for row in rows:
         references = decode_references_json(row.get("references_json"))
@@ -433,21 +788,17 @@ def _add_contribution_from_rows(
 
     source_id = f"file:{file_path}"
     for raw_import in raw_imports:
-        target_path = None
-        if file_path.endswith(".py"):
-            target_path = _resolve_python_import(
-                file_path, raw_import, manifest_files, package_roots
-            )
-        elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
-            target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
-        if target_path is None:
-            continue
-        target_id = f"file:{target_path}"
-        if target_id in nodes:
-            _add_edge(source_id, target_id, "imports")
+        for target_path in _resolve_import_targets(file_path, raw_import, import_context):
+            target_id = f"file:{target_path}"
+            if target_id in nodes:
+                _add_edge(source_id, target_id, "imports", origin=IMPORT_ORIGIN_TREESITTER)
 
 
-def _finalize_graph(graph: dict) -> dict:
+def _finalize_graph(
+    graph: dict,
+    languages: Optional[Iterable[str]] = None,
+    files_unresolved: Optional[int] = None,
+) -> dict:
     nodes = {node["id"]: dict(node) for node in graph.get("nodes", [])}
     edges = list(graph.get("edges", []))
 
@@ -476,6 +827,12 @@ def _finalize_graph(graph: dict) -> dict:
         "edge_count": len(edges),
         "top_hubs": top_hubs,
     }
+    # @MindWhy: `origin` não entra em `degree` nem em `top_hubs` — §1.2/§1.3 não podem
+    # regredir. O bloco de cobertura é anexado depois das métricas, não dentro delas.
+    if languages is not None:
+        graph["resolution_coverage"] = _build_resolution_coverage(
+            languages, files_unresolved or 0
+        )
     return graph
 
 
@@ -497,14 +854,30 @@ def _graph_rows_from_chunks(chunks: List[CodeChunk]) -> Dict[str, List[dict]]:
     return rows_by_file
 
 
-def build_and_write(storage, manifest, index_path: Path, return_metadata: bool = False):
+def build_and_write(
+    storage,
+    manifest,
+    index_path: Path,
+    return_metadata: bool = False,
+    workspace_root: Optional[Path] = None,
+):
     """
     Reconstrói `graph.json` inteiro a partir do estado atual do índice.
+
+    `workspace_root` é opcional e serve só para descobrir manifestos de build que o
+    índice não contém (`go.mod`, `*.csproj`); sem ele a resolução Go degrada para
+    nenhuma aresta, o que `resolution_coverage` declara.
     """
     rows = storage.get_graph_projection()
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
-    package_roots = infer_package_roots(manifest_files)
+    package_roots = infer_package_roots(manifest_files, workspace_root)
+    import_context = _ImportContext(
+        manifest_files=manifest_files,
+        package_roots=package_roots,
+        files_declares=dict(manifest.files_declares),
+        go_modules=infer_go_modules(manifest_files, workspace_root),
+    )
     rows_by_file: Dict[str, List[dict]] = {}
     for row in rows:
         rows_by_file.setdefault(row["file_path"], []).append(row)
@@ -531,10 +904,14 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
             nodes=nodes,
             edges=edges,
             edge_keys=edge_keys,
-            package_roots=package_roots,
+            import_context=import_context,
         )
 
-    graph = _finalize_graph(_build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges})
+    graph = _finalize_graph(
+        _build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges},
+        languages=manifest.languages_indexed,
+        files_unresolved=count_unresolved_import_files(manifest, import_context),
+    )
     graph_path, metadata = _persist_graph(graph, index_path)
     if return_metadata:
         return graph_path, metadata
@@ -546,6 +923,7 @@ def build_and_write_incremental(
     manifest,
     updated_chunks: List[CodeChunk],
     updated_file_paths: set[str],
+    workspace_root: Optional[Path] = None,
 ) -> tuple[Path, dict]:
     """
     Atualiza `graph.json` a partir do grafo anterior quando apenas arquivos de
@@ -574,7 +952,13 @@ def build_and_write_incremental(
     edge_keys = {(edge["source"], edge["target"], edge["kind"]) for edge in kept_edges}
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
-    package_roots = infer_package_roots(manifest_files)
+    package_roots = infer_package_roots(manifest_files, workspace_root)
+    import_context = _ImportContext(
+        manifest_files=manifest_files,
+        package_roots=package_roots,
+        files_declares=dict(manifest.files_declares),
+        go_modules=infer_go_modules(manifest_files, workspace_root),
+    )
     rows_by_file = _graph_rows_from_chunks(updated_chunks)
 
     for file_path in updated_file_paths:
@@ -587,14 +971,19 @@ def build_and_write_incremental(
             nodes=nodes,
             edges=kept_edges,
             edge_keys=edge_keys,
-            package_roots=package_roots,
+            import_context=import_context,
         )
 
     updated_graph = _build_empty_graph(manifest) | {
         "nodes": list(nodes.values()),
         "edges": kept_edges,
     }
-    updated_graph = _finalize_graph(updated_graph)
+    updated_graph = _finalize_graph(
+        updated_graph,
+        languages=manifest.languages_indexed,
+        files_unresolved=count_unresolved_import_files(manifest, import_context),
+    )
+    _carry_over_scip_block(graph, updated_graph)
     return _persist_graph(updated_graph, index_path)
 
 
@@ -628,6 +1017,81 @@ def load_graph(index_dir: Path) -> dict:
             }
         )
     return graph
+
+
+def _promote_scip_languages(graph: dict, languages: Iterable[str]) -> None:
+    """Move para o tier `scip` quem a ingestão cobriu — nunca deixa em dois tiers."""
+    coverage = graph.get("resolution_coverage")
+    if not isinstance(coverage, dict):
+        return
+    promoted = set(languages)
+    if not promoted:
+        return
+    coverage = dict(coverage)
+    for tier in ("treesitter", "none"):
+        coverage[tier] = [lang for lang in coverage.get(tier, []) if lang not in promoted]
+    coverage["scip"] = sorted(set(coverage.get("scip", [])) | promoted)
+    graph["resolution_coverage"] = coverage
+
+
+def _carry_over_scip_block(previous: dict, graph: dict) -> None:
+    """
+    Mantém a declaração da última ingestão SCIP através de um rebuild incremental.
+
+    `_build_empty_graph` cria um grafo do zero, então sem isto o bloco `scip` e o
+    tier de cobertura sumiriam a cada indexação incremental — o índice passaria a
+    se apresentar como se nunca tivesse tido resolução semântica (Princípio VI).
+    `edges` é recontado sobre o grafo novo: arestas `calls` de arquivos alterados
+    caem junto com os nós que foram re-chunkados.
+    """
+    scip = previous.get("scip")
+    if not isinstance(scip, dict):
+        return
+    surviving = sum(1 for edge in graph.get("edges", []) if edge.get("kind") == "calls")
+    graph["scip"] = {**scip, "edges": surviving}
+    if scip.get("status") == "ok":
+        _promote_scip_languages(graph, scip.get("languages", []))
+
+
+def apply_scip_result(
+    index_path: Path,
+    call_edges: List[dict],
+    status: str,
+    head_sha: Optional[str],
+    languages: Iterable[str],
+) -> tuple[Path, dict]:
+    """
+    Aplica o resultado da ingestão SCIP ao `graph.json` já persistido (DECISÃO-002).
+
+    Substitui **apenas** as arestas `kind="calls"`; as demais seguem intactas. Em
+    status diferente de `ok` nada é reescrito além do bloco `graph["scip"]`, que
+    declara a degradação sem descartar as arestas da ingestão anterior (Princípio VI).
+    """
+    # As chaves `_*` são índices de consulta anexados por `load_graph`; ficam fora
+    # do que é persistido, e a cópia evita mutar o dict que está no cache.
+    graph = {key: value for key, value in load_graph(index_path).items() if not key.startswith("_")}
+    previous = graph.get("scip") or {}
+
+    if status == "ok":
+        kept_edges = [edge for edge in graph.get("edges", []) if edge.get("kind") != "calls"]
+        graph["edges"] = kept_edges + [dict(edge) for edge in call_edges]
+        ingested_languages = sorted(set(languages))
+        graph["scip"] = {
+            "status": status,
+            "head_sha": head_sha,
+            "languages": ingested_languages,
+            "edges": len(call_edges),
+        }
+        _promote_scip_languages(graph, ingested_languages)
+    else:
+        graph["scip"] = {
+            "status": status,
+            "head_sha": previous.get("head_sha"),
+            "languages": list(previous.get("languages", [])),
+            "edges": int(previous.get("edges", 0)),
+        }
+
+    return _persist_graph(_finalize_graph(graph), index_path)
 
 
 def resolve_node(graph: dict, ref: str) -> dict:
@@ -746,15 +1210,33 @@ def hubs(graph: dict, top_n: int) -> List[dict]:
     return result
 
 
+def _origins_by_edge(graph: dict) -> Dict[Tuple[str, str, str], str]:
+    """Origem por aresta nos dois sentidos — `_adjacency` é não-dirigida."""
+    origins: Dict[Tuple[str, str, str], str] = {}
+    for edge in graph.get("edges", []):
+        if edge.get("kind") not in _ORIGIN_EDGE_KINDS:
+            continue
+        origin = edge.get("origin") or EDGE_ORIGIN_UNKNOWN
+        origins[(edge["source"], edge["target"], edge["kind"])] = origin
+        origins[(edge["target"], edge["source"], edge["kind"])] = origin
+    return origins
+
+
 def explain(graph: dict, ref: str) -> dict:
     node = resolve_node(graph, ref)
     adjacency = graph["_adjacency"]
+    origins = _origins_by_edge(graph)
     neighbors: Dict[str, List[dict]] = {}
 
     for neighbor_id, edge_kind in adjacency.get(node["id"], []):
         neighbor = graph["_nodes_by_id"][neighbor_id]
         summary = _node_summary(neighbor)
         summary["edge_kind"] = edge_kind
+        # Grafo 2.1.0 não grava `origin`; o consumidor recebe "unknown" (DECISÃO-006)
+        if edge_kind in _ORIGIN_EDGE_KINDS:
+            summary["origin"] = origins.get(
+                (node["id"], neighbor_id, edge_kind), EDGE_ORIGIN_UNKNOWN
+            )
         neighbors.setdefault(neighbor["kind"], []).append(summary)
 
     truncated: Dict[str, int] = {}
@@ -815,7 +1297,7 @@ def affected(graph: dict, ref: str) -> dict:
             seed_ids.add(edge["target"])
 
     visited = set(seed_ids)
-    queue: deque[tuple[str, int, str, Optional[dict]]] = deque()
+    queue: deque[tuple[str, int, str, Optional[dict], str]] = deque()
 
     def enqueue_from(origin_id: str, hops: int) -> None:
         origin = nodes_by_id.get(origin_id)
@@ -832,16 +1314,24 @@ def affected(graph: dict, ref: str) -> dict:
             if is_noise_hub(neighbor) and neighbor_id != seed["id"]:
                 continue
             visited.add(neighbor_id)
-            queue.append((neighbor_id, hops, kind, _via_location(neighbor, edge)))
+            queue.append(
+                (
+                    neighbor_id,
+                    hops,
+                    kind,
+                    _via_location(neighbor, edge),
+                    edge.get("origin") or EDGE_ORIGIN_UNKNOWN,
+                )
+            )
 
     for sid in seed_ids:
         enqueue_from(sid, 1)
 
     items: List[dict] = []
     while queue:
-        node_id, hops, via, location = queue.popleft()
+        node_id, hops, via, location, origin = queue.popleft()
         neighbor = nodes_by_id[node_id]
-        entry = {**_node_summary(neighbor), "hops": hops, "via": via}
+        entry = {**_node_summary(neighbor), "hops": hops, "via": via, "origin": origin}
         if location:
             entry["via_location"] = location
         items.append(entry)

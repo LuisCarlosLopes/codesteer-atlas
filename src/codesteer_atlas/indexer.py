@@ -16,10 +16,16 @@ from codesteer_atlas.config import (
     GRAPH_FILENAME,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
+    SCIP_ENV_FLAG,
     SUPPORTED_EXTENSIONS,
 )
 from codesteer_atlas.embeddings import EmbeddingEngine
-from codesteer_atlas.graph import build_and_write, build_and_write_incremental, load_graph
+from codesteer_atlas.graph import (
+    apply_scip_result,
+    build_and_write,
+    build_and_write_incremental,
+    load_graph,
+)
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
 from codesteer_atlas.storage import StorageBackend
@@ -318,6 +324,43 @@ def index_workspace(
         return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress)
 
 
+def _run_scip_phase(
+    workspace_path: Path,
+    index_path: Path,
+    manifest,
+    graph_strategy: str,
+    git_sha: Optional[str],
+) -> tuple[str, int, Optional[dict]]:
+    """
+    Fase `scip` (§3.2 · DECISÃO-002). Devolve `(status, arestas, métricas do grafo)`.
+
+    @MindWhy: o import é preguiçoso porque `server.py` importa este módulo — pôr
+    `scip_ingest` no topo o arrastaria para o caminho de import do servidor (Princípio V).
+    @MindDecision: indexador SCIP é whole-project e leva de dezenas de segundos a
+    minutos; roda só em rebuild completo do grafo ou quando o HEAD mudou desde a
+    ingestão anterior, senão as arestas `calls` já gravadas são preservadas.
+    """
+    from codesteer_atlas import scip_ingest
+
+    graph = load_graph(index_path)
+    previous = graph.get("scip") or {}
+    if graph_strategy != "full" and previous and previous.get("head_sha") == git_sha:
+        preserved_status = str(previous.get("status", scip_ingest.SCIP_STATUS_OK))
+        return preserved_status, int(previous.get("edges", 0)), None
+
+    result = scip_ingest.ingest_workspace(
+        workspace_path, manifest.languages_indexed, graph.get("nodes", [])
+    )
+    _graph_path, metrics = apply_scip_result(
+        index_path=index_path,
+        call_edges=result.edges,
+        status=result.status,
+        head_sha=git_sha,
+        languages=result.languages,
+    )
+    return result.status, len(result.edges), metrics
+
+
 def _index_workspace_locked(
     workspace_path: Path,
     index_path: Path,
@@ -346,6 +389,7 @@ def _index_workspace_locked(
     existing_files: dict[str, str] = {}
     existing_files_meta: dict[str, list] = {}
     existing_files_imports: dict[str, list] = {}
+    existing_files_declares: dict[str, str] = {}
     existing_manifest = None
     if storage.exists():
         try:
@@ -353,11 +397,13 @@ def _index_workspace_locked(
             existing_files = dict(existing_manifest.files)
             existing_files_meta = dict(existing_manifest.files_meta)
             existing_files_imports = dict(existing_manifest.files_imports)
+            existing_files_declares = dict(existing_manifest.files_declares)
         except Exception:
             # Manifest incompatível/corrompido: trata como índice vazio (full rebuild)
             existing_files = {}
             existing_files_meta = {}
             existing_files_imports = {}
+            existing_files_declares = {}
             existing_manifest = None
 
     # Varre as subárvores selecionadas
@@ -457,6 +503,7 @@ def _index_workspace_locked(
     files_processed = 0
     files_failed = 0
     processed_imports: dict[str, list] = {}
+    processed_declares: dict[str, str] = {}
 
     chunk_total = len(files_to_process)
     phase_started_at = time.perf_counter()
@@ -470,6 +517,11 @@ def _index_workspace_locked(
                 chunk._file_hash = new_hashes[rel_posix]
             all_new_chunks.extend(file_chunks)
             processed_imports[rel_posix] = chunker.extract_imports(file_path)
+            # Só as 4 linguagens de namespace devolvem valor; as demais retornam None
+            # e não entram no mapa (DECISÃO-003)
+            declared = chunker.extract_package_declaration(file_path)
+            if declared:
+                processed_declares[rel_posix] = declared
             files_processed += 1
         except IncompatibleParserError:
             # Falha de ambiente, não do arquivo: continuar produziria um índice vazio
@@ -520,12 +572,18 @@ def _index_workspace_locked(
     progress.tick("persist", 0, 1)
     phase_started_at = time.perf_counter()
     if existing_manifest is None or (full and not paths):
-        storage.store_chunks(all_new_chunks, git_head_sha=git_sha, files_meta=current_meta)
+        storage.store_chunks(
+            all_new_chunks,
+            git_head_sha=git_sha,
+            files_meta=current_meta,
+            files_declares=processed_declares,
+        )
         chunks_persisted = storage.update_manifest_after_incremental(
             files=new_hashes,
             git_head_sha=git_sha,
             files_meta=current_meta,
             files_imports=processed_imports,
+            files_declares=processed_declares,
         )
         manifest = storage.get_manifest()
     else:
@@ -544,14 +602,20 @@ def _index_workspace_locked(
         updated_files = dict(existing_manifest.files)
         updated_files_meta = dict(existing_manifest.files_meta)
         updated_files_imports = dict(existing_files_imports)
+        updated_files_declares = dict(existing_files_declares)
         for rel in files_to_delete_from_index:
             updated_files.pop(rel, None)
             updated_files_meta.pop(rel, None)
             updated_files_imports.pop(rel, None)
+            updated_files_declares.pop(rel, None)
         for rel, file_hash in new_hashes.items():
             if rel in files_to_process:
                 updated_files[rel] = file_hash
                 updated_files_imports[rel] = processed_imports.get(rel, [])
+                # Ausência = arquivo deixou de declarar namespace; a chave some
+                updated_files_declares.pop(rel, None)
+                if rel in processed_declares:
+                    updated_files_declares[rel] = processed_declares[rel]
         # [mtime, size] de todos os arquivos atuais é sempre atualizado, mesmo
         # para arquivos pulados via fast path [P01]
         updated_files_meta.update(current_meta)
@@ -561,6 +625,7 @@ def _index_workspace_locked(
             git_head_sha=git_sha,
             files_meta=updated_files_meta,
             files_imports=updated_files_imports,
+            files_declares=updated_files_declares,
         )
         manifest = storage.get_manifest()
 
@@ -595,17 +660,45 @@ def _index_workspace_locked(
                 manifest=manifest,
                 updated_chunks=all_new_chunks,
                 updated_file_paths=changed_file_paths,
+                workspace_root=workspace_path,
             )
             graph_strategy = "incremental-code"
         else:
             _graph_path, graph_metrics = build_and_write(
-                storage, manifest, index_path, return_metadata=True
+                storage, manifest, index_path, return_metadata=True,
+                workspace_root=workspace_path,
             )
     except Exception as e:
         print(f"[atlas] Falha ao reconstruir graph.json: {e}", file=sys.stderr)
     progress.tick("graph", 1, 1)
     progress.phase_done("graph")
     phase_durations_s["graph"] = round(time.perf_counter() - phase_started_at, 4)
+
+    # Fase `scip`: depois do grafo, porque reescreve as arestas `calls` dele. Fica
+    # fora de `_PHASE_WEIGHTS` de propósito — os pesos existentes somam 1.0 (há teste
+    # de invariante) e a fase é opcional; incluí-la mudaria o progresso de quem não a usa.
+    scip_status = "disabled"
+    scip_edges = 0
+    if os.environ.get(SCIP_ENV_FLAG) == "1":
+        phase_started_at = time.perf_counter()
+        try:
+            scip_status, scip_edges, scip_metrics = _run_scip_phase(
+                workspace_path=workspace_path,
+                index_path=index_path,
+                manifest=manifest,
+                graph_strategy=graph_strategy,
+                git_sha=git_sha,
+            )
+            if scip_metrics is not None:
+                graph_metrics = scip_metrics
+        except Exception as e:
+            print(f"[atlas] Falha na fase SCIP: {e}", file=sys.stderr)
+            scip_status = "parse_failed"
+        phase_durations_s["scip"] = round(time.perf_counter() - phase_started_at, 4)
+        print(
+            f"[atlas] Fase SCIP: {scip_status} ({scip_edges} arestas 'calls').",
+            file=sys.stderr,
+        )
 
     # O brief é sempre reconstruído por inteiro: seu valor está no ranking GLOBAL
     # (top-N camadas/hubs/entrypoints), que uma atualização parcial não preservaria
@@ -652,6 +745,8 @@ def _index_workspace_locked(
         graph_edges=graph_metrics["graph_edges"],
         graph_bytes=graph_metrics["graph_bytes"],
         graph_html_bytes=graph_metrics["graph_html_bytes"],
+        scip_status=scip_status,
+        scip_edges=scip_edges,
         brief_status=brief_status,
         brief_bytes=brief_metrics["brief_bytes"],
         brief_layers=brief_metrics["brief_layers"],

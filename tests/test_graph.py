@@ -262,7 +262,14 @@ def test_python_import_resolution_ignores_stdlib(temp_storage):
 
     import_edges = [edge for edge in graph["edges"] if edge["kind"] == "imports"]
 
-    assert import_edges == [{"source": "file:pkg/a.py", "target": "file:pkg/b.py", "kind": "imports"}]
+    assert import_edges == [
+        {
+            "source": "file:pkg/a.py",
+            "target": "file:pkg/b.py",
+            "kind": "imports",
+            "origin": "treesitter",
+        }
+    ]
 
 
 def test_relative_ts_imports_resolve_with_suffixes_and_bare_imports_are_ignored(temp_storage):
@@ -446,6 +453,7 @@ def test_build_and_write_cria_aresta_imports_em_src_layout(temp_storage):
             "source": "file:src/demo/core.py",
             "target": "file:src/demo/util.py",
             "kind": "imports",
+            "origin": "treesitter",
         }
     ]
 
@@ -639,3 +647,452 @@ def test_load_graph_caches_reverse_adjacency_with_same_mtime_key(tmp_path):
     assert first["_reverse_adjacency"] is second["_reverse_adjacency"]
     assert a["id"] in first["_reverse_adjacency"][b["id"]][0]
 
+
+
+# --- §3.3 / DECISÃO-003 / DECISÃO-006: origin, resolvers e cobertura ----------
+
+_F3_VECTOR = MOCK_VECTOR
+
+
+def _make_multi_language_index(temp_storage, workspace, files, files_imports, files_declares):
+    """Índice mínimo com um chunk por arquivo, sem tocar embeddings reais."""
+    chunks = [
+        CodeChunk(
+            id=f"c{index}",
+            file_path=path,
+            repo="demo",
+            start_line=1,
+            end_line=2,
+            scope_type="function",
+            scope_name=f"s{index}",
+            language=language,
+            content="conteudo",
+            indexed_at="2026-06-05T12:00:00Z",
+            vector=_F3_VECTOR,
+        )
+        for index, (path, language) in enumerate(sorted(files.items()))
+    ]
+    temp_storage.store_chunks(chunks)
+    return temp_storage.get_manifest().model_copy(
+        update={
+            "files": {path: f"h{i}" for i, path in enumerate(sorted(files))},
+            "files_imports": files_imports,
+            "files_declares": files_declares,
+            "languages_indexed": sorted(set(files.values())),
+        }
+    )
+
+
+def _import_edges(graph):
+    return [edge for edge in graph["edges"] if edge["kind"] == "imports"]
+
+
+def test_import_go_resolve_pelo_module_do_go_mod(tmp_path, temp_storage):
+    """Go só resolve com o `module` do `go.mod`: o import é absoluto pelo módulo."""
+    (tmp_path / "go.mod").write_text("module github.com/acme/app\n\ngo 1.22\n", encoding="utf-8")
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"cmd/main.go": "go", "internal/svc/svc.go": "go", "internal/svc/util.go": "go"},
+        {"cmd/main.go": ["github.com/acme/app/internal/svc", "fmt"]},
+        {},
+    )
+
+    graph = json.loads(
+        build_and_write(
+            temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path
+        ).read_text(encoding="utf-8")
+    )
+
+    edges = _import_edges(graph)
+    # O pacote Go é o diretório: as duas fontes do pacote viram alvo; `fmt` não
+    assert len(edges) == 2
+    assert {edge["target"] for edge in edges} == {
+        "file:internal/svc/svc.go",
+        "file:internal/svc/util.go",
+    }
+    assert {edge["origin"] for edge in edges} == {"treesitter"}
+
+
+def test_import_java_resolve_por_files_declares_com_diretorio_divergente(tmp_path, temp_storage):
+    """
+    O `package` é a fonte de verdade, o diretório é só convenção: `Service.java`
+    mora em `deep/` mas declara `com.acme.core`, e o import tem de achá-lo.
+    """
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"src/App.java": "java", "deep/Service.java": "java"},
+        {"src/App.java": ["com.acme.core.Service", "java.util.List"]},
+        {"src/App.java": "com.acme.web", "deep/Service.java": "com.acme.core"},
+    )
+
+    graph = json.loads(
+        build_and_write(
+            temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path
+        ).read_text(encoding="utf-8")
+    )
+
+    assert _import_edges(graph) == [
+        {
+            "source": "file:src/App.java",
+            "target": "file:deep/Service.java",
+            "kind": "imports",
+            "origin": "treesitter",
+        }
+    ]
+
+
+def test_using_csharp_resolve_para_todos_os_arquivos_do_namespace(tmp_path, temp_storage):
+    """`using` importa um namespace, não um tipo: N declarantes ⇒ N arestas."""
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"Web/Home.cs": "csharp", "Servicos/A.cs": "csharp", "Servicos/B.cs": "csharp"},
+        {"Web/Home.cs": ["MinhaApp.Servicos", "System.Text"]},
+        {
+            "Web/Home.cs": "MinhaApp.Web",
+            "Servicos/A.cs": "MinhaApp.Servicos",
+            "Servicos/B.cs": "MinhaApp.Servicos",
+        },
+    )
+
+    graph = json.loads(
+        build_and_write(
+            temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path
+        ).read_text(encoding="utf-8")
+    )
+
+    edges = _import_edges(graph)
+    assert {edge["target"] for edge in edges} == {"file:Servicos/A.cs", "file:Servicos/B.cs"}
+    assert all(edge["origin"] == "treesitter" for edge in edges)
+
+
+def test_import_externo_nao_gera_aresta(tmp_path, temp_storage):
+    """`System.Text`, `github.com/x/y` e `react` são de fora do repositório."""
+    (tmp_path / "go.mod").write_text("module github.com/acme/app\n", encoding="utf-8")
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"Web/Home.cs": "csharp", "cmd/main.go": "go", "app.ts": "typescript"},
+        {
+            "Web/Home.cs": ["System.Text"],
+            "cmd/main.go": ["github.com/outro/repo/pkg"],
+            "app.ts": ["react"],
+        },
+        {"Web/Home.cs": "MinhaApp.Web"},
+    )
+
+    graph = json.loads(
+        build_and_write(
+            temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path
+        ).read_text(encoding="utf-8")
+    )
+
+    assert _import_edges(graph) == []
+    assert graph["resolution_coverage"]["files_unresolved"] == 3
+
+
+def test_origin_so_existe_em_imports_e_nunca_em_contains(temp_storage):
+    manifest = _make_base_graph_index(temp_storage)
+
+    graph = json.loads(
+        build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    for edge in graph["edges"]:
+        if edge["kind"] == "imports":
+            assert edge["origin"] == "treesitter"
+        else:
+            assert "origin" not in edge, edge
+
+
+def test_origin_nao_altera_degree_nem_top_hubs(temp_storage):
+    """§1.2/§1.3 não podem regredir: `origin` é metadado, não peso."""
+    manifest = _make_src_layout_index(temp_storage)
+    graph = json.loads(
+        build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    degrees = {node["id"]: node["degree"] for node in graph["nodes"]}
+    assert degrees["file:src/demo/core.py"] == 1
+    assert degrees["file:src/demo/util.py"] == 1
+    hub_ids = [item["id"] for item in graph["metrics"]["top_hubs"]]
+    assert "file:src/demo/core.py" in hub_ids
+
+
+def test_grafo_2_1_0_sem_origin_continua_carregando(tmp_path):
+    """Compatibilidade: grafo anterior a 2.2.0 não tem `origin` nem cobertura."""
+    a = _file_node("pkg/a.py", degree=1)
+    b = _file_node("pkg/b.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path, [a, b], [{"source": a["id"], "target": b["id"], "kind": "imports"}]
+    )
+
+    assert "resolution_coverage" not in graph
+    assert hubs(graph, 5) == []
+    assert bfs_path(graph, a["id"], b["id"])["found"] is True
+
+    explicacao = explain(graph, a["id"])
+    vizinho = explicacao["neighbors"]["file"][0]
+    assert vizinho["edge_kind"] == "imports"
+    assert vizinho["origin"] == "unknown"
+
+    impacto = affected(graph, b["id"])
+    assert impacto["items"][0]["id"] == a["id"]
+    assert impacto["items"][0]["origin"] == "unknown"
+
+
+def test_explain_e_affected_reportam_origin_da_aresta(tmp_path):
+    a = _file_node("pkg/a.py", degree=1)
+    b = _file_node("pkg/b.py", degree=1)
+    graph = _write_query_graph(
+        tmp_path,
+        [a, b],
+        [{"source": a["id"], "target": b["id"], "kind": "imports", "origin": "treesitter"}],
+    )
+
+    assert explain(graph, a["id"])["neighbors"]["file"][0]["origin"] == "treesitter"
+    assert affected(graph, b["id"])["items"][0]["origin"] == "treesitter"
+
+
+def test_explain_nao_carrega_origin_em_aresta_sem_tier(tmp_path):
+    """`contains` é exata por construção — o campo só inflaria a resposta."""
+    file_node = _file_node("pkg/a.py", degree=0)
+    symbol = _sym_node("pkg/a.py", "run", degree=0)
+    graph = _write_query_graph(
+        tmp_path,
+        [file_node, symbol],
+        [{"source": file_node["id"], "target": symbol["id"], "kind": "contains"}],
+    )
+
+    assert "origin" not in explain(graph, file_node["id"])["neighbors"]["symbol"][0]
+
+
+def test_resolution_coverage_classifica_tiers_e_conta_nao_resolvidos(tmp_path, temp_storage):
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"src/App.java": "java", "deep/Service.java": "java", "notas/doc.md": "markdown"},
+        {"src/App.java": ["com.acme.core.Service"], "deep/Service.java": ["java.util.List"]},
+        {"src/App.java": "com.acme.web", "deep/Service.java": "com.acme.core"},
+    )
+
+    graph = json.loads(
+        build_and_write(
+            temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path
+        ).read_text(encoding="utf-8")
+    )
+
+    coverage = graph["resolution_coverage"]
+    assert coverage["treesitter"] == ["java"]
+    assert coverage["none"] == ["markdown"]
+    assert coverage["scip"] == []
+    # Só `Service.java` ficou mudo (importa apenas `java.util.List`, que é externo)
+    assert coverage["files_unresolved"] == 1
+
+
+def test_build_incremental_produz_o_mesmo_bloco_de_cobertura(tmp_path, temp_storage):
+    from codesteer_atlas.graph import build_and_write_incremental
+
+    manifest = _make_multi_language_index(
+        temp_storage,
+        tmp_path,
+        {"src/App.java": "java", "deep/Service.java": "java"},
+        {"src/App.java": ["com.acme.core.Service"], "deep/Service.java": ["java.util.List"]},
+        {"src/App.java": "com.acme.web", "deep/Service.java": "com.acme.core"},
+    )
+    build_and_write(temp_storage, manifest, temp_storage.index_dir, workspace_root=tmp_path)
+    _clear_graph_cache()
+
+    graph_path, _metadata = build_and_write_incremental(
+        index_path=temp_storage.index_dir,
+        manifest=manifest,
+        updated_chunks=[],
+        updated_file_paths={"src/App.java"},
+        workspace_root=tmp_path,
+    )
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    assert graph["resolution_coverage"] == {
+        "scip": [],
+        "treesitter": ["java"],
+        "none": [],
+        "files_unresolved": 1,
+    }
+    assert all(edge.get("origin") == "treesitter" for edge in _import_edges(graph))
+
+
+# ---------------------------------------------------------------------------
+# TASK-017 — aplicação das arestas SCIP ao grafo persistido
+# ---------------------------------------------------------------------------
+
+
+def _graph_com_cobertura(index_dir, extra_edges=()):
+    """Grafo 2.2.0 com uma aresta de cada `kind` que a ingestão SCIP não pode tocar."""
+    file_a = _file_node("src/a.py", degree=1)
+    file_b = _file_node("src/b.py", degree=1)
+    sym_a = _sym_node("src/a.py", "caller", lines=[2, 9])
+    sym_b = _sym_node("src/b.py", "target", lines=[1, 6])
+    edges = [
+        {"source": file_a["id"], "target": sym_a["id"], "kind": "contains"},
+        {"source": file_b["id"], "target": sym_b["id"], "kind": "contains"},
+        {
+            "source": file_a["id"],
+            "target": file_b["id"],
+            "kind": "imports",
+            "origin": "treesitter",
+        },
+        *extra_edges,
+    ]
+    _clear_graph_cache()
+    payload = {
+        "nodes": [file_a, file_b, sym_a, sym_b],
+        "edges": edges,
+        "metrics": {"node_count": 4, "edge_count": len(edges), "top_hubs": []},
+        "resolution_coverage": {
+            "scip": [],
+            "treesitter": ["python"],
+            "none": ["markdown"],
+            "files_unresolved": 0,
+        },
+    }
+    (index_dir / "graph.json").write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def _calls_edge():
+    return {
+        "source": "sym:src/a.py#caller",
+        "target": "sym:src/b.py#target",
+        "kind": "calls",
+        "origin": "scip",
+    }
+
+
+def test_apply_scip_result_substitui_apenas_as_arestas_calls(tmp_path):
+    from codesteer_atlas.graph import apply_scip_result
+
+    antes = _graph_com_cobertura(
+        tmp_path,
+        extra_edges=[
+            {
+                "source": "sym:src/b.py#target",
+                "target": "sym:src/a.py#caller",
+                "kind": "calls",
+                "origin": "scip",
+            }
+        ],
+    )
+    nao_calls = [edge for edge in antes["edges"] if edge["kind"] != "calls"]
+
+    graph_path, _metadata = apply_scip_result(
+        index_path=tmp_path,
+        call_edges=[_calls_edge()],
+        status="ok",
+        head_sha="sha-novo",
+        languages=["python"],
+    )
+    depois = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    calls = [edge for edge in depois["edges"] if edge["kind"] == "calls"]
+    assert calls == [_calls_edge()]
+    for edge in nao_calls:
+        assert edge in depois["edges"]
+    assert len([e for e in depois["edges"] if e["kind"] == "contains"]) == 2
+    assert depois["scip"] == {
+        "status": "ok",
+        "head_sha": "sha-novo",
+        "languages": ["python"],
+        "edges": 1,
+    }
+
+
+def test_apply_scip_result_move_a_linguagem_para_o_tier_scip(tmp_path):
+    from codesteer_atlas.graph import apply_scip_result
+
+    _graph_com_cobertura(tmp_path)
+
+    graph_path, _metadata = apply_scip_result(
+        index_path=tmp_path,
+        call_edges=[_calls_edge()],
+        status="ok",
+        head_sha="sha-1",
+        languages=["python"],
+    )
+    coverage = json.loads(graph_path.read_text(encoding="utf-8"))["resolution_coverage"]
+
+    assert coverage["scip"] == ["python"]
+    assert coverage["treesitter"] == []
+    assert coverage["none"] == ["markdown"]
+    assert "python" not in coverage["treesitter"] + coverage["none"]
+
+
+def test_apply_scip_result_sem_linguagem_casada_nao_promove_ninguem(tmp_path):
+    from codesteer_atlas.graph import apply_scip_result
+
+    _graph_com_cobertura(tmp_path)
+
+    graph_path, _metadata = apply_scip_result(
+        index_path=tmp_path, call_edges=[], status="ok", head_sha="sha-1", languages=[]
+    )
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    assert graph["resolution_coverage"]["scip"] == []
+    assert graph["resolution_coverage"]["treesitter"] == ["python"]
+    assert graph["scip"]["edges"] == 0
+
+
+def test_apply_scip_result_em_falha_declara_status_e_preserva_arestas_anteriores(tmp_path):
+    """Degradação declarada (Princípio VI): timeout não descarta a ingestão anterior."""
+    from codesteer_atlas.graph import apply_scip_result
+
+    _graph_com_cobertura(tmp_path)
+    apply_scip_result(
+        index_path=tmp_path,
+        call_edges=[_calls_edge()],
+        status="ok",
+        head_sha="sha-1",
+        languages=["python"],
+    )
+    _clear_graph_cache()
+
+    graph_path, _metadata = apply_scip_result(
+        index_path=tmp_path, call_edges=[], status="timeout", head_sha="sha-2", languages=[]
+    )
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    assert graph["scip"] == {
+        "status": "timeout",
+        "head_sha": "sha-1",
+        "languages": ["python"],
+        "edges": 1,
+    }
+    assert [edge for edge in graph["edges"] if edge["kind"] == "calls"] == [_calls_edge()]
+
+
+def test_apply_scip_result_nao_persiste_indices_de_consulta_nem_altera_hubs(tmp_path):
+    from codesteer_atlas.graph import apply_scip_result
+
+    _graph_com_cobertura(tmp_path)
+
+    graph_path, metadata = apply_scip_result(
+        index_path=tmp_path,
+        call_edges=[_calls_edge()],
+        status="ok",
+        head_sha="sha-1",
+        languages=["python"],
+    )
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+    assert not [key for key in graph if key.startswith("_")]
+    assert metadata["graph_edges"] == len(graph["edges"])
+    degrees = {node["id"]: node["degree"] for node in graph["nodes"]}
+    # `contains` continua fora do grau; a aresta `calls` soma 1 em cada ponta
+    assert degrees["sym:src/a.py#caller"] == 1
+    assert degrees["sym:src/b.py#target"] == 1
+    assert degrees["file:src/a.py"] == 1  # só o `imports`

@@ -196,6 +196,18 @@ _HTML_TEMPLATE = """<!doctype html>
       display: inline-block;
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
     }
+    .legend-line {
+      width: 20px;
+      height: 0;
+      display: inline-block;
+      vertical-align: middle;
+      border-top-width: 2px;
+      border-top-color: rgba(230, 237, 243, 0.72);
+    }
+    .legend-sub {
+      color: rgba(230, 237, 243, 0.62);
+      word-break: break-word;
+    }
     .details {
       min-height: 120px;
     }
@@ -269,6 +281,7 @@ _HTML_TEMPLATE = """<!doctype html>
         <div class="section-title">Mapa</div>
         <div id="counts" class="metric-stack small"></div>
         <div id="legend" class="legend-list small"></div>
+        <div id="coverage" class="legend-list small"></div>
       </div>
 
       <div class="panel-block">
@@ -311,6 +324,13 @@ _HTML_TEMPLATE = """<!doctype html>
       links_to: { color: "#f1c27d", alpha: 0.36, width: 1.12 },
       cites: { color: "#76c7b7", alpha: 0.40, width: 1.20 },
       annotates: { color: "#b392f0", alpha: 0.36, width: 1.08 },
+    };
+    // Tracado por tier de resolucao (graph.resolution_coverage / edge.origin):
+    // scip = solida, treesitter = tracejada, origem ausente = pontilhada.
+    const linkDashByOrigin = {
+      scip: { dash: null, css: "solid", label: "scip (indice do toolchain)" },
+      treesitter: { dash: [6, 4], css: "dashed", label: "treesitter (fallback sintatico)" },
+      unknown: { dash: [1, 4], css: "dotted", label: "sem origem declarada" },
     };
     const NODE_REL_SIZE = 4;
 
@@ -362,6 +382,7 @@ _HTML_TEMPLATE = """<!doctype html>
       details: document.getElementById("details"),
       counts: document.getElementById("counts"),
       legend: document.getElementById("legend"),
+      coverage: document.getElementById("coverage"),
       nodeFilters: document.getElementById("node-filters"),
       edgeFilters: document.getElementById("edge-filters"),
       search: document.getElementById("search"),
@@ -417,7 +438,12 @@ _HTML_TEMPLATE = """<!doctype html>
       for (const edge of rawEdges) {
         if (!activeEdgeKinds.has(edge.kind)) continue;
         if (nodeSet.has(edge.source) && nodeSet.has(edge.target)) {
-          links.push({ source: edge.source, target: edge.target, kind: edge.kind });
+          links.push({
+            source: edge.source,
+            target: edge.target,
+            kind: edge.kind,
+            origin: edge.origin || "unknown",
+          });
         }
       }
       const nodes = rawNodes.filter(node => nodeSet.has(node.id));
@@ -477,6 +503,10 @@ _HTML_TEMPLATE = """<!doctype html>
 
     function widthForLink(link) {
       return (edgeStyleByKind[link.kind] || { width: 1 }).width;
+    }
+
+    function dashForLink(link) {
+      return (linkDashByOrigin[link.origin] || linkDashByOrigin.unknown).dash;
     }
 
     function drawNodeDecorations(node, ctx, scale) {
@@ -543,6 +573,7 @@ _HTML_TEMPLATE = """<!doctype html>
       })
       .onBackgroundClick(() => clearSelection());
 
+    if (typeof Graph.linkLineDash === "function") Graph.linkLineDash(dashForLink);
     if (typeof Graph.minZoom === "function") Graph.minZoom(minZoom);
     if (typeof Graph.maxZoom === "function") Graph.maxZoom(maxZoom);
 
@@ -614,6 +645,51 @@ _HTML_TEMPLATE = """<!doctype html>
           `;
         })
         .join("");
+    }
+
+    // Legenda de cobertura: tracado por origem da aresta + tiers de resolucao,
+    // incluindo as linguagens que o indice nao consegue resolver (tier "none").
+    function renderCoverageLegend() {
+      const counts = new Map();
+      for (const edge of rawEdges) {
+        const origin = edge.origin || "unknown";
+        counts.set(origin, (counts.get(origin) || 0) + 1);
+      }
+      const originRows = Object.entries(linkDashByOrigin)
+        .filter(([origin]) => counts.get(origin))
+        .map(([origin, style]) => `
+          <div class="legend-item">
+            <span><span class="legend-line" style="border-top-style:${style.css}"></span> ${escapeHtml(style.label)}</span>
+            <span class="muted">${counts.get(origin)}</span>
+          </div>
+        `);
+
+      const coverage = graph.resolution_coverage || {};
+      const tierRows = ["scip", "treesitter", "none"]
+        .filter(tier => Array.isArray(coverage[tier]))
+        .map(tier => `
+          <div class="legend-item">
+            <span>${escapeHtml(tier)}</span>
+            <span class="legend-sub">${escapeHtml(coverage[tier].join(", ") || "-")}</span>
+          </div>
+        `);
+      if (typeof coverage.files_unresolved === "number") {
+        tierRows.push(`
+          <div class="legend-item">
+            <span class="muted">arquivos sem resolver</span>
+            <span>${escapeHtml(coverage.files_unresolved)}</span>
+          </div>
+        `);
+      }
+
+      const blocks = [];
+      if (originRows.length) {
+        blocks.push(`<div class="muted">Origem da aresta</div>`, ...originRows);
+      }
+      if (tierRows.length) {
+        blocks.push(`<div class="muted">Cobertura por tier</div>`, ...tierRows);
+      }
+      elements.coverage.innerHTML = blocks.join("");
     }
 
     function renderFilterGroup(container, values, activeSet) {
@@ -760,6 +836,7 @@ _HTML_TEMPLATE = """<!doctype html>
     renderFilterGroup(elements.nodeFilters, nodeKinds, activeNodeKinds);
     renderFilterGroup(elements.edgeFilters, edgeKinds, activeEdgeKinds);
     renderLegend();
+    renderCoverageLegend();
     if (viewer.hubs_only) {
       elements.notice.hidden = false;
       elements.notice.textContent = viewer.notice || "Resumo por hubs ativo para manter o mapa fluido.";

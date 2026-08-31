@@ -90,6 +90,7 @@ class StorageBackend:
         chunks: List[CodeChunk],
         git_head_sha: Optional[str] = None,
         files_meta: Optional[Dict[str, list]] = None,
+        files_declares: Optional[Dict[str, str]] = None,
     ):
         """
         Salva uma lista de chunks de código no LanceDB, gera o índice FTS
@@ -137,6 +138,7 @@ class StorageBackend:
             index_version=CURRENT_INDEX_VERSION,
             files=files,
             files_meta=files_meta or {},
+            files_declares=files_declares or {},
         )
 
         # Salva o arquivo de metadados manifest.json (escrita atômica)
@@ -176,6 +178,7 @@ class StorageBackend:
         git_head_sha: Optional[str] = None,
         files_meta: Optional[Dict[str, list]] = None,
         files_imports: Optional[Dict[str, list]] = None,
+        files_declares: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Recalcula `total_chunks`/`repos_indexed`/`languages_indexed` a partir da
@@ -208,6 +211,7 @@ class StorageBackend:
             files=files,
             files_meta=files_meta or {},
             files_imports=files_imports or {},
+            files_declares=files_declares or {},
         )
 
         _write_manifest_atomic(self.manifest_path, manifest)

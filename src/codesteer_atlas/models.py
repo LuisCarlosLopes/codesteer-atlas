@@ -69,6 +69,12 @@ class IndexManifest(BaseModel):
         default_factory=dict,
         description="Mapa de path POSIX -> imports crus extraídos para o grafo",
     )
+    files_declares: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapa de path POSIX -> namespace/package declarado no arquivo"
+        " (Java, C#, Kotlin, Scala). É o outro lado da aresta em linguagens cujo"
+        " namespace não é o caminho (DECISÃO-003); ausente em índices < 2.2.0",
+    )
 
 
 class SearchResult(BaseModel):
@@ -163,6 +169,12 @@ class IndexStats(BaseModel):
         None,
         description="Status da geração do brief (full | degraded-no-graph | failed)",
     )
+    scip_status: Optional[str] = Field(
+        None,
+        description="Status da fase de ingestão SCIP (disabled | toolchain_missing |"
+        " timeout | parse_failed | ok)",
+    )
+    scip_edges: int = Field(0, description="Total de arestas `calls` ingeridas via SCIP")
     brief_bytes: int = Field(0, description="Tamanho final de brief.json em bytes")
     brief_layers: int = Field(0, description="Total de camadas mantidas no brief")
     brief_entrypoints: int = Field(0, description="Total de entrypoints detectados no brief")
