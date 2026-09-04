@@ -94,7 +94,7 @@ QUERY_STOPWORDS = frozenset(
 # Versão mínima de manifest aceita pelo server; manifests anteriores usam backend
 # de embeddings incompatível (sentence-transformers/torch) e exigem reindexação
 MIN_INDEX_VERSION = "2.0.0"
-CURRENT_INDEX_VERSION = "2.2.0"
+CURRENT_INDEX_VERSION = "2.3.0"
 
 # Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
 ATLASIGNORE_FILENAME = ".atlasignore"
@@ -256,6 +256,20 @@ SCIP_INDEXERS: dict[str, list[str]] = {
     "go": ["scip-go"],
     "rust": ["rust-analyzer", "scip"],
 }
+
+# ---------------------------------------------------------------------------
+# Fase 4 — camada semântica opt-in (desligada por padrão)
+# ---------------------------------------------------------------------------
+
+SEMANTIC_ENV_FLAG = "ATLAS_SEMANTIC"
+SEMANTIC_LOCAL_URL_ENV = "ATLAS_SEMANTIC_LOCAL_URL"
+SEMANTIC_API_URL_ENV = "ATLAS_SEMANTIC_API_URL"
+SEMANTIC_API_KEY_ENV = "ATLAS_SEMANTIC_API_KEY"
+SEMANTIC_MODEL_ENV = "ATLAS_SEMANTIC_MODEL"
+SEMANTIC_TIMEOUT_S = 30.0
+SEMANTIC_FILENAME = "semantic.json"
+SEMANTIC_MAX_TEXT_CHARS = 4000
+SEMANTIC_MAX_SUMMARY_CHARS = 1200
 
 # Tier de resolução de import por linguagem (DECISÃO-005). Cada linguagem de
 # SUPPORTED_EXTENSIONS aparece em EXATAMENTE um tier — `tests/test_resolution_coverage.py`

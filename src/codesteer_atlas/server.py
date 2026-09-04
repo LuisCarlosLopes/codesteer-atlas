@@ -70,7 +70,13 @@ from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
     slugify_heading,
 )
+from codesteer_atlas.origin import OriginResolver  # noqa: E402
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
+from codesteer_atlas.semantic import (  # noqa: E402
+    load_semantic_sidecar,
+    semantic_enabled,
+    semantic_index_state,
+)
 from codesteer_atlas.storage import StorageBackend  # noqa: E402
 from codesteer_atlas.watcher import WATCH_DISABLED, start_watcher_if_enabled  # noqa: E402
 
@@ -416,7 +422,28 @@ def _read_resolution_coverage(graph_path: Path) -> dict:
     return coverage if isinstance(coverage, dict) else unknown
 
 
-def get_status_data() -> dict:
+def _semantic_status(storage: StorageBackend, ctx: "Optional[Context]" = None, error: Optional[Exception] = None) -> dict:
+    enabled = semantic_enabled()
+    origin, egress = OriginResolver(ctx=ctx).describe()
+    sidecar = load_semantic_sidecar(storage.index_dir)
+    if error is not None or not storage.exists():
+        index, reason = "absent", "index_missing" if error is None else "manifest_unreadable"
+    else:
+        try:
+            index, reason = semantic_index_state(storage.index_dir, storage.get_manifest())
+        except Exception:
+            index, reason = "absent", "manifest_unreadable"
+    return {
+        "enabled": enabled,
+        "origin": origin,
+        "egress": egress,
+        "index": index,
+        **({"index_reason": reason} if reason else {}),
+        "last_generation": (sidecar or {}).get("last_generation"),
+    }
+
+
+def get_status_data(ctx: "Optional[Context]" = None) -> dict:
     """Função auxiliar para obter os metadados e status de diagnóstico do índice."""
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     reindexing = is_reindex_locked(INDEX_DIR_PATH)
@@ -442,6 +469,7 @@ def get_status_data() -> dict:
             "graph_viewer_path": None,
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx),
         }
 
     try:
@@ -472,6 +500,7 @@ def get_status_data() -> dict:
             "graph_viewer_path": str(graph_viewer_path.resolve()) if graph_viewer_path.exists() else None,
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx),
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
@@ -484,6 +513,7 @@ def get_status_data() -> dict:
             "graph_viewer_path": None,
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx, e),
         }
 
 
@@ -564,7 +594,10 @@ def atlas_search(
         `cross_encoder_unavailable` (ATLAS_RERANK_MODEL was set but the model failed to
         load — order fell back to lexical rerank), `structural_arm_unavailable`
         (structural=true but graph.json is missing or unreadable — the graph arm was
-        skipped). Treat a degraded result as incomplete: reindex with
+        skipped), `semantic_layer_unavailable` (the opt-in semantic index is not
+        ready) and `semantic_arm_unavailable` (the semantic vector arm failed).
+        The last two keep vector+FTS results available but indicate that semantic
+        recall is incomplete. Treat a degraded result as incomplete: reindex with
         `atlas_index(full=true)` before concluding that something does not exist in the
         codebase. When both original arms fail the call raises instead of returning an
         empty result set.
@@ -824,6 +857,10 @@ def atlas_context(
         intent=intent,
         manifest=storage.get_manifest(),
         brief=load_brief(INDEX_DIR_PATH),
+        semantic_enabled=semantic_enabled(),
+        semantic_ready=semantic_index_state(INDEX_DIR_PATH, storage.get_manifest())[0] == "ready",
+        semantic_sidecar=load_semantic_sidecar(INDEX_DIR_PATH),
+        purpose_lookup=storage.lookup_purpose,
     )
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -882,11 +919,21 @@ def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
             storage.get_manifest(), INDEX_DIR_PATH, _index_workspace_root()
         )
 
+    try:
+        brief_manifest = storage.get_manifest()
+    except Exception:
+        brief_manifest = None
     payload = render_brief(
         brief,
         level,
         current_git_sha=get_git_head_sha(_index_workspace_root()),
         computed_at_query_time=computed_at_query_time,
+        semantic_enabled=semantic_enabled(),
+        semantic_sidecar=load_semantic_sidecar(INDEX_DIR_PATH),
+        semantic_ready=bool(
+            brief_manifest
+            and semantic_index_state(INDEX_DIR_PATH, brief_manifest)[0] == "ready"
+        ),
     )
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -929,7 +976,7 @@ def atlas_status(ctx: "Context | None" = None) -> str:
         keeps itself current while the server runs.
     """
     _resolve_index_dir_via_roots(ctx)
-    data = get_status_data()
+    data = get_status_data(ctx)
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -1100,7 +1147,7 @@ def atlas_index(
 
         return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
-    stats = index_workspace(workspace_path, INDEX_DIR_PATH, paths=paths, full=full)
+    stats = index_workspace(workspace_path, INDEX_DIR_PATH, paths=paths, full=full, ctx=ctx)
 
     response = {
         "workspace": str(workspace_path),
@@ -1129,6 +1176,17 @@ def atlas_index(
         "brief_bytes": stats.brief_bytes,
         "brief_layers": stats.brief_layers,
         "brief_entrypoints": stats.brief_entrypoints,
+        "semantic_status": stats.semantic_status,
+        "semantic_generated": stats.semantic_generated,
+        "semantic_reused": stats.semantic_reused,
+        "semantic_file_generated": stats.semantic_file_generated,
+        "semantic_file_reused": stats.semantic_file_reused,
+        "semantic_layer_generated": stats.semantic_layer_generated,
+        "semantic_layer_reused": stats.semantic_layer_reused,
+        "semantic_origin": stats.semantic_origin,
+        "semantic_egress": stats.semantic_egress,
+        "semantic_origins": getattr(stats, "semantic_origins", []),
+        "semantic_egresses": getattr(stats, "semantic_egresses", []),
     }
     if stats.files_failed:
         response["warning"] = (

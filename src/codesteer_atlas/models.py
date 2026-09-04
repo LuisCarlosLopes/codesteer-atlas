@@ -23,6 +23,11 @@ class CodeChunk(BaseModel):
     content: str = Field(..., description="Conteúdo textual do fragmento de código")
     indexed_at: str = Field(..., description="Timestamp ISO do momento de indexação")
     vector: Optional[List[float]] = Field(None, description="Embedding vetorial (dimensão 384)")
+    purpose: Optional[str] = Field(None, description="Propósito semântico opcional do símbolo")
+    purpose_hash: Optional[str] = Field(None, description="Hash do conteúdo do símbolo")
+    purpose_vector: Optional[List[float]] = Field(
+        None, description="Embedding do propósito semântico (dimensão 384)"
+    )
     references: List[str] = Field(
         default_factory=list, description="Refs de rationale persistidas no chunk"
     )
@@ -95,7 +100,7 @@ class SearchResult(BaseModel):
     match_arms: List[str] = Field(
         default_factory=list,
         description="Braços da busca híbrida que recuperaram este chunk:"
-        " 'vector' (semântico), 'fts' (BM25) e/ou 'graph' (ativação estrutural,"
+        " 'vector' (código), 'fts' (BM25), 'semantic' (propósito) e/ou 'graph' (ativação estrutural,"
         " só quando structural=True). Um resultado presente em mais de um"
         " braço teve consenso entre eles",
     )
@@ -115,7 +120,9 @@ class SearchOutcome(BaseModel):
         default_factory=list,
         description="Códigos de degradação: 'vector_search_unavailable' |"
         " 'fts_unavailable' | 'cross_encoder_unavailable' |"
-        " 'structural_arm_unavailable'",
+        " 'structural_arm_unavailable' | 'semantic_layer_unavailable' |"
+        " 'semantic_arm_unavailable'. Os resultados estruturais continuam disponíveis"
+        " quando um aviso semântico aparece.",
     )
 
 
@@ -178,6 +185,23 @@ class IndexStats(BaseModel):
     brief_bytes: int = Field(0, description="Tamanho final de brief.json em bytes")
     brief_layers: int = Field(0, description="Total de camadas mantidas no brief")
     brief_entrypoints: int = Field(0, description="Total de entrypoints detectados no brief")
+    semantic_status: str = Field(
+        "disabled", description="Estado da geração semântica nesta execução"
+    )
+    semantic_generated: int = Field(0, description="Símbolos que pagaram geração semântica")
+    semantic_reused: int = Field(0, description="Símbolos reutilizados pelo cache semântico")
+    semantic_file_generated: int = Field(0, description="Sumários de arquivo gerados")
+    semantic_file_reused: int = Field(0, description="Sumários de arquivo reutilizados")
+    semantic_layer_generated: int = Field(0, description="Sumários de camada gerados")
+    semantic_layer_reused: int = Field(0, description="Sumários de camada reutilizados")
+    semantic_origin: Optional[str] = Field(None, description="Origem usada na geração semântica")
+    semantic_egress: Optional[str] = Field(None, description="Fronteira de dados da origem")
+    semantic_origins: List[str] = Field(
+        default_factory=list, description="Origens efetivamente usadas na execução, incluindo sumários"
+    )
+    semantic_egresses: List[str] = Field(
+        default_factory=list, description="Egressos efetivamente usados na execução, sem credenciais"
+    )
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",

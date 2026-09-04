@@ -2,9 +2,11 @@ import json
 from types import SimpleNamespace
 
 import lancedb
+import pyarrow as pa
 import pytest
 
-from codesteer_atlas.models import CodeChunk
+from codesteer_atlas.config import CANDIDATES_LIMIT
+from codesteer_atlas.models import CodeChunk, IndexManifest
 from codesteer_atlas.storage import StorageBackend
 
 # Mock do vetor de 384 dimensões preenchido com zeros
@@ -823,16 +825,19 @@ def test_get_sections_by_file_path_empty_for_unknown_file(temp_storage):
 class _FailingArmTable:
     """Envolve a tabela real e faz falhar apenas o braço escolhido da busca híbrida."""
 
-    def __init__(self, table, fail_vector=False, fail_fts=False):
+    def __init__(self, table, fail_vector=False, fail_fts=False, fail_semantic=False):
         self._table = table
         self._fail_vector = fail_vector
         self._fail_fts = fail_fts
+        self._fail_semantic = fail_semantic
 
     def search(self, query=None, query_type=None, **kwargs):
         if query_type == "fts":
             if self._fail_fts:
                 raise RuntimeError("índice FTS corrompido")
             return self._table.search(query, query_type=query_type, **kwargs)
+        if kwargs.get("vector_column_name") == "purpose_vector" and self._fail_semantic:
+            raise RuntimeError("índice semântico corrompido")
         if self._fail_vector:
             raise RuntimeError("índice vetorial corrompido")
         return self._table.search(query, **kwargs)
@@ -860,7 +865,7 @@ VEC_A = [1.0] + [0.0] * 383
 VEC_B = [0.0, 1.0] + [0.0] * 382
 
 
-def _seed_two_chunks(storage):
+def _seed_two_chunks(storage, with_purpose=False):
     chunks = [
         CodeChunk(
             id="c1",
@@ -889,6 +894,10 @@ def _seed_two_chunks(storage):
             vector=VEC_B,
         ),
     ]
+    if with_purpose:
+        chunks[0].purpose = "propósito persistido"
+        chunks[0].purpose_hash = "hash"
+        chunks[0].purpose_vector = VEC_A
     storage.store_chunks(chunks)
 
 
@@ -1162,3 +1171,291 @@ def test_atlas_rerank_zero_desliga_toda_reordenacao_inclusive_ce(temp_storage, m
     assert scores == sorted(scores, reverse=True)
 
 
+def test_purpose_persistido_e_retornado_por_lookup(temp_storage):
+    """Purpose semântico persiste como coluna irmã e é recuperado pelo lookup."""
+    purpose = "Valida credenciais e cria a sessão do usuário."
+    chunk = CodeChunk(
+        id="purpose-1",
+        file_path="src/auth.py",
+        repo="test-project",
+        start_line=1,
+        end_line=4,
+        scope_type="function",
+        scope_name="login",
+        language="python",
+        content="def login():\n    return True",
+        indexed_at="2026-06-05T12:00:00Z",
+        vector=MOCK_VECTOR,
+        purpose=purpose,
+        purpose_hash="purpose-hash",
+        purpose_vector=[0.2] * 384,
+    )
+
+    temp_storage.store_chunks([chunk])
+
+    row = (
+        lancedb.connect(str(temp_storage.db_path))
+        .open_table("chunks")
+        .search()
+        .select(["content", "vector", "purpose", "purpose_hash", "purpose_vector"])
+        .limit(1)
+        .to_arrow()
+        .to_pylist()[0]
+    )
+
+    schema = lancedb.connect(str(temp_storage.db_path)).open_table("chunks").schema
+    assert schema.field("purpose").type == pa.string()
+    assert schema.field("purpose").nullable is True
+    assert schema.field("purpose_hash").type == pa.string()
+    assert schema.field("purpose_hash").nullable is True
+    assert schema.field("purpose_vector").type == pa.list_(pa.float32(), 384)
+    assert schema.field("purpose_vector").nullable is True
+
+    assert row["content"] == chunk.content
+    assert row["vector"] == MOCK_VECTOR
+    assert row["purpose"] == purpose
+    assert row["purpose_hash"] == "purpose-hash"
+    assert row["purpose_vector"] == pytest.approx([0.2] * 384)
+    assert temp_storage.lookup_purpose("src/auth.py", "login") == purpose
+
+
+def _write_legacy_storage(storage, version="2.2.0"):
+    storage.index_dir.mkdir(parents=True, exist_ok=True)
+    db = lancedb.connect(str(storage.db_path))
+    db.create_table(
+        "chunks",
+        data=[
+            {
+                "id": "legacy-1",
+                "file_path": "src/legacy.py",
+                "repo": "legacy",
+                "start_line": 1,
+                "end_line": 2,
+                "scope_type": "function",
+                "scope_name": "legacy",
+                "language": "python",
+                "content": "def legacy(): pass",
+                "indexed_at": "2026-06-05T12:00:00Z",
+                "vector": VEC_A,
+            }
+        ],
+        mode="overwrite",
+    ).create_fts_index("content", replace=True)
+    storage.manifest_path.write_text(
+        json.dumps(
+            {
+                "total_chunks": 1,
+                "repos_indexed": ["legacy"],
+                "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+                "embedding_dim": 384,
+                "embedding_backend": "fastembed",
+                "storage_backend": "lancedb",
+                "last_indexed_at": "2026-06-05T12:00:00Z",
+                "git_head_sha": None,
+                "languages_indexed": ["python"],
+                "index_version": version,
+                "files": {"src/legacy.py": "sha"},
+                "files_meta": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_legacy_22_incremental_off_e_on_permanece_immutavel(temp_storage, monkeypatch):
+    """Índice legado não aceita append, delete ou rewrite em nenhuma camada."""
+    _write_legacy_storage(temp_storage)
+    manifest_before = temp_storage.manifest_path.read_bytes()
+    symbols_before = temp_storage.get_symbols()
+    new_chunk = CodeChunk(
+        id="new",
+        file_path="src/new.py",
+        repo="legacy",
+        start_line=1,
+        end_line=2,
+        scope_type="function",
+        scope_name="new",
+        language="python",
+        content="def new(): pass",
+        indexed_at="2026-06-05T12:00:00Z",
+        vector=VEC_A,
+    )
+
+    for enabled in (False, True):
+        if enabled:
+            monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+        else:
+            monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+
+        with pytest.raises(RuntimeError, match="legado|rechunkear"):
+            temp_storage.append_chunks([new_chunk])
+        with pytest.raises(RuntimeError, match="legado|rechunkear"):
+            temp_storage.delete_by_file_paths(["src/legacy.py"])
+        with pytest.raises(RuntimeError, match="legado|rechunkear"):
+            temp_storage.update_manifest_after_incremental({"src/legacy.py": "new-sha"})
+
+    assert temp_storage.manifest_path.read_bytes() == manifest_before
+    assert temp_storage.get_symbols() == symbols_before
+    assert temp_storage.get_manifest().index_version == "2.2.0"
+
+
+def test_schema_incompativel_e_rejeitado_antes_do_delete(temp_storage):
+    """Uma tabela 2.3.0 mal materializada não pode perder o arquivo tocado."""
+    chunk = CodeChunk(
+        id="bad-schema",
+        file_path="src/app.py",
+        repo="test-project",
+        start_line=1,
+        end_line=2,
+        scope_type="function",
+        scope_name="run",
+        language="python",
+        content="def run(): pass",
+        indexed_at="2026-06-05T12:00:00Z",
+        vector=VEC_A,
+    )
+    temp_storage.index_dir.mkdir(parents=True, exist_ok=True)
+    row = temp_storage._chunk_to_row(chunk)
+    db = lancedb.connect(str(temp_storage.db_path))
+    db.create_table("chunks", data=[row], mode="overwrite").create_fts_index(
+        "content", replace=True
+    )
+    manifest = IndexManifest(
+        total_chunks=1,
+        repos_indexed=["test-project"],
+        embedding_model="all-MiniLM-L6-v2",
+        embedding_dim=384,
+        last_indexed_at="2026-06-05T12:00:00Z",
+        languages_indexed=["python"],
+        index_version="2.3.0",
+        files={"src/app.py": "sha"},
+    )
+    temp_storage.manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+    before = db.open_table("chunks").to_arrow().to_pylist()
+
+    with pytest.raises(RuntimeError, match="schema|reindexar"):
+        temp_storage.delete_by_file_paths(["src/app.py"])
+
+    assert db.open_table("chunks").to_arrow().to_pylist() == before
+
+
+def test_semantic_off_nao_adiciona_arm_nem_warning(temp_storage, monkeypatch):
+    """A camada desligada preserva a busca estrutural mesmo com propósito persistido."""
+    _seed_two_chunks(temp_storage, with_purpose=True)
+    monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+
+    assert "semantic_arm_unavailable" not in outcome.warnings
+    assert "semantic_layer_unavailable" not in outcome.warnings
+    assert all("semantic" not in result.match_arms for result in outcome.results)
+
+
+def test_semantic_ready_funde_query_filtros_limite_e_match_arms(temp_storage, monkeypatch):
+    """Ready consulta os dois espaços com os mesmos filtros e registra consenso real."""
+    shared = {
+        "id": "shared",
+        "file_path": "src/shared.py",
+        "repo": "test-project",
+        "start_line": 1,
+        "end_line": 2,
+        "scope_type": "function",
+        "scope_name": "shared",
+        "language": "python",
+        "content": "def shared(): pass",
+        "indexed_at": "2026-06-05T12:00:00Z",
+        "vector": VEC_A,
+        "references_json": "[]",
+    }
+    semantic_only = {**shared, "id": "semantic-only", "scope_name": "meaning"}
+    calls = []
+
+    class Query:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def metric(self, value):
+            calls.append(("metric", value))
+            return self
+
+        def where(self, clause, prefilter=False):
+            calls.append(("where", clause, prefilter))
+            return self
+
+        def limit(self, value):
+            calls.append(("limit", value))
+            return self
+
+        def to_list(self):
+            return self.rows
+
+    class Table:
+        def search(self, query=None, query_type=None, **kwargs):
+            calls.append(("search", query, query_type, kwargs.get("vector_column_name")))
+            if query_type == "fts":
+                return Query([shared])
+            if kwargs.get("vector_column_name") == "purpose_vector":
+                return Query([shared, semantic_only])
+            return Query([shared])
+
+    class DB:
+        def open_table(self, name):
+            assert name == "chunks"
+            return Table()
+
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    temp_storage.store_chunks([CodeChunk(**{**shared, "id": "shared"})])
+    monkeypatch.setattr("codesteer_atlas.storage.lancedb.connect", lambda *_args, **_kwargs: DB())
+    monkeypatch.setattr("codesteer_atlas.storage.semantic_enabled", lambda: True)
+    monkeypatch.setattr(
+        "codesteer_atlas.storage.semantic_index_state", lambda *_args: ("ready", None)
+    )
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A,
+        query_text="meaning",
+        filters={"language": "python", "path_prefix": "src"},
+        top_k=2,
+    )
+
+    searches = [call for call in calls if call[0] == "search"]
+    assert searches == [
+        ("search", VEC_A, None, "vector"),
+        ("search", "meaning", "fts", None),
+        ("search", VEC_A, None, "purpose_vector"),
+    ]
+    assert [call for call in calls if call[0] == "limit"] == [
+        ("limit", CANDIDATES_LIMIT),
+        ("limit", CANDIDATES_LIMIT),
+        ("limit", CANDIDATES_LIMIT),
+    ]
+    assert len([call for call in calls if call[0] == "where"]) == 3
+    arms = {result.scope_name: result.match_arms for result in outcome.results}
+    assert arms["shared"] == ["vector", "fts", "semantic"]
+    assert arms["meaning"] == ["semantic"]
+    searches = [call for call in calls if call[0] == "search"]
+    assert searches[0][1] == searches[2][1] == VEC_A
+    assert searches[0][3] == "vector"
+    assert searches[2][3] == "purpose_vector"
+    where_clauses = [call for call in calls if call[0] == "where"]
+    assert len({call[1] for call in where_clauses}) == 1
+    assert all(call[2] is True for call in where_clauses)
+
+
+def test_falha_so_do_semantic_preserva_resultados_e_avisa(temp_storage, monkeypatch):
+    """Falha semântica isolada mantém vector+FTS e sinaliza a degradação."""
+    _seed_two_chunks(temp_storage)
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setattr("codesteer_atlas.storage.semantic_enabled", lambda: True)
+    monkeypatch.setattr(
+        "codesteer_atlas.storage.semantic_index_state", lambda *_args: ("ready", None)
+    )
+
+    outcome = _search_with_failing_arm(temp_storage, monkeypatch, fail_semantic=True)
+
+    assert "semantic_arm_unavailable" in outcome.warnings
+    assert outcome.results
+    assert all("semantic" not in result.match_arms for result in outcome.results)

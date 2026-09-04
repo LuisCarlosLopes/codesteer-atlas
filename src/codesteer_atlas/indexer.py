@@ -28,6 +28,14 @@ from codesteer_atlas.graph import (
 )
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
+from codesteer_atlas.origin import OriginResolver
+from codesteer_atlas.semantic import (
+    ProseGenerator,
+    SemanticGeneration,
+    build_sidecar,
+    load_semantic_sidecar,
+    semantic_enabled,
+)
 from codesteer_atlas.storage import StorageBackend
 
 _PHASE_WEIGHTS = {
@@ -276,6 +284,8 @@ def index_workspace(
     paths: Optional[List[str]] = None,
     full: bool = False,
     report_progress: bool = True,
+    *,
+    ctx=None,
 ) -> IndexStats:
     """
     Núcleo reutilizável de indexação (DECISAO-005): varre o workspace (ou as
@@ -321,7 +331,7 @@ def index_workspace(
                 skipped_reason="reindex_in_progress",
             )
 
-        return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress)
+        return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress, ctx=ctx)
 
 
 def _run_scip_phase(
@@ -367,6 +377,8 @@ def _index_workspace_locked(
     paths: Optional[List[str]],
     full: bool,
     report_progress: bool,
+    *,
+    ctx=None,
 ) -> IndexStats:
     """
     Corpo da indexação executado sob `reindex_lock` (DECISAO-001). Mesma lógica
@@ -405,6 +417,15 @@ def _index_workspace_locked(
             existing_files_imports = {}
             existing_files_declares = {}
             existing_manifest = None
+
+    # @MindRisk: um recorte legado não pode misturar rows antigas com schema 2.3.0.
+    if existing_manifest is not None:
+        version = tuple(int(part) if part.isdigit() else 0 for part in existing_manifest.index_version.split("."))
+        if version < (2, 3, 0) and not (full and not paths):
+            raise RuntimeError(
+                f"O índice legado {existing_manifest.index_version} só pode ser convertido "
+                "com full=true sem paths; nenhum delete, append ou manifest foi executado."
+            )
 
     # Varre as subárvores selecionadas
     progress.tick("scan", 0, 1)
@@ -498,6 +519,18 @@ def _index_workspace_locked(
         set(files_to_process.keys()) & set(files_in_scope_from_manifest.keys())
     )
 
+    if existing_manifest is not None and not (full and not paths):
+        # Valida antes de chunking/geração e, principalmente, antes do delete.
+        storage.validate_incremental_schema()
+
+    # O cache é proporcional ao recorte que será substituído; arquivos inalterados
+    # permanecem persistidos e não precisam materializar vetores semânticos.
+    semantic_cache = (
+        storage.get_semantic_cache(sorted(files_to_delete_from_index))
+        if existing_manifest is not None and files_to_delete_from_index
+        else {}
+    )
+
     # Processa (chunking) os arquivos novos/alterados
     all_new_chunks = []
     files_processed = 0
@@ -561,6 +594,19 @@ def _index_workspace_locked(
 
     progress.phase_done("embed")
     phase_durations_s["embed"] = round(time.perf_counter() - phase_started_at, 4)
+
+    semantic_generation = SemanticGeneration(status="disabled")
+    semantic_resolver = OriginResolver(ctx=ctx)
+    if semantic_enabled():
+        semantic_generation = ProseGenerator(semantic_resolver).generate_purposes(
+            all_new_chunks, semantic_cache
+        )
+        unchanged_paths = set(current_files) - set(files_to_process)
+        semantic_generation.reused += sum(
+            1 for key in semantic_cache if key[0] in unchanged_paths
+        )
+        if semantic_generation.reused and semantic_generation.status == "no_origin":
+            semantic_generation.status = "ok"
 
     git_sha = get_git_head_sha(workspace_path)
 
@@ -628,6 +674,21 @@ def _index_workspace_locked(
             files_declares=updated_files_declares,
         )
         manifest = storage.get_manifest()
+
+    # 4.2 e observabilidade são gravados depois da tabela, para que o snapshot
+    # reflita exatamente os propósitos que restaram no índice.
+    previous_sidecar = load_semantic_sidecar(index_path)
+    try:
+        semantic_payload = build_sidecar(
+            index_path,
+            storage.get_semantic_projection(),
+            semantic_generation,
+            semantic_resolver,
+            previous_sidecar,
+        )
+    except Exception as error:
+        print(f"[atlas] Falha ao gerar semantic.json: {error}", file=sys.stderr)
+        semantic_payload = previous_sidecar or {}
 
     progress.tick("persist", 1, 1)
     progress.phase_done("persist")
@@ -751,6 +812,17 @@ def _index_workspace_locked(
         brief_bytes=brief_metrics["brief_bytes"],
         brief_layers=brief_metrics["brief_layers"],
         brief_entrypoints=brief_metrics["brief_entrypoints"],
+        semantic_status=semantic_generation.status,
+        semantic_generated=semantic_generation.generated,
+        semantic_reused=semantic_generation.reused,
+        semantic_file_generated=int((semantic_payload.get("last_generation") or {}).get("semantic_file_generated", 0)),
+        semantic_file_reused=int((semantic_payload.get("last_generation") or {}).get("semantic_file_reused", 0)),
+        semantic_layer_generated=int((semantic_payload.get("last_generation") or {}).get("semantic_layer_generated", 0)),
+        semantic_layer_reused=int((semantic_payload.get("last_generation") or {}).get("semantic_layer_reused", 0)),
+        semantic_origin=semantic_payload.get("origin") or semantic_generation.origin,
+        semantic_egress=semantic_payload.get("egress") or semantic_generation.egress,
+        semantic_origins=list(semantic_payload.get("origins") or semantic_generation.origins),
+        semantic_egresses=list(semantic_payload.get("egresses") or semantic_generation.egresses),
     )
 
 

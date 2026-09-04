@@ -141,6 +141,19 @@ def test_empty_section_returns_quota_to_pool(monkeypatch):
     assert "tests" not in truncated
 
 
+def test_quota_de_secao_trunca_prosa_escalar(monkeypatch):
+    budgets = dict(ctxmod.CONTEXT_BUDGET_BY_SECTION)
+    budgets["symbol"] = 40
+    monkeypatch.setattr(ctxmod, "CONTEXT_BUDGET_BY_SECTION", budgets)
+    truncated = {}
+    filled = apply_section_quotas(
+        ["symbol"], {"symbol": {"label": "run", "purpose": "p" * 200}}, truncated
+    )
+
+    assert len(json.dumps(filled["symbol"], separators=(",", ":"))) <= 40
+    assert truncated["symbol"] == 1
+
+
 def test_missing_target_raises_actionable_error(tmp_path):
     graph, manifest, _run = _base_graph(tmp_path)
     with pytest.raises(ValueError, match="não encontrado"):
@@ -213,3 +226,110 @@ def test_discover_tests_inferred_confidence(tmp_path):
     assert all(hit["confidence"] == "inferred" for hit in hits)
     assert any(hit["via"] == "imports" for hit in hits)
     assert "test_discovery_convention_only" not in warnings
+
+
+def test_understand_usa_lookup_e_summaries_semanticos(tmp_path):
+    """Understand agrega purpose por point lookup e summaries do sidecar."""
+    graph, manifest, run = _base_graph(tmp_path)
+    brief = {"layers": [{"path": "pkg", "role": "source", "files": 2}], "entrypoints": []}
+    sidecar = {
+        "file_summaries": {"pkg/a.py": {"summary": "Implementa a execução principal."}},
+        "layer_summaries": {"pkg": {"summary": "Agrupa o núcleo do pacote."}},
+    }
+    calls = []
+
+    def lookup(file_path, scope_name):
+        calls.append((file_path, scope_name))
+        return "Executa a operação principal."
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="understand",
+        manifest=manifest,
+        brief=brief,
+        semantic_enabled=True,
+        semantic_ready=True,
+        semantic_sidecar=sidecar,
+        purpose_lookup=lookup,
+    )
+
+    assert calls == [("pkg/a.py", "run")]
+    assert payload["sections"]["symbol"]["purpose"] == "Executa a operação principal."
+    assert payload["sections"]["file_summary"] == "Implementa a execução principal."
+    assert payload["sections"]["layer"]["summary"] == "Agrupa o núcleo do pacote."
+
+
+@pytest.mark.parametrize("intent", ["edit", "debug", "review"])
+def test_semantica_nao_altera_outros_intents(tmp_path, intent):
+    """Purpose e summary são opcionais apenas para o intent understand."""
+    graph, manifest, run = _base_graph(tmp_path)
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent=intent,
+        manifest=manifest,
+        brief={"layers": [{"path": "pkg", "role": "source", "files": 2}]},
+        semantic_enabled=True,
+        semantic_ready=True,
+        semantic_sidecar={
+            "file_summaries": {"pkg/a.py": {"summary": "não deve aparecer"}},
+            "layer_summaries": {"pkg": {"summary": "não deve aparecer"}},
+        },
+        purpose_lookup=lambda *_args: "não deve aparecer",
+    )
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "purpose" not in serialized
+    assert "file_summary" not in payload["sections"]
+    assert "summary" not in serialized
+
+
+def test_semantica_off_ou_nao_ready_emite_warning_sem_lookup(tmp_path):
+    """Off não enriquece; ligada sem índice pronto avisa e preserva a estrutura."""
+    graph, manifest, run = _base_graph(tmp_path)
+
+    def lookup(*_args):
+        pytest.fail("lookup não deveria ser chamado")
+
+    for enabled, ready in ((False, True), (True, False)):
+        payload = build_context(
+            graph,
+            target=run["id"],
+            intent="understand",
+            manifest=manifest,
+            brief={"layers": [{"path": "pkg", "role": "source", "files": 2}]},
+            semantic_enabled=enabled,
+            semantic_ready=ready,
+            semantic_sidecar={"file_summaries": {"pkg/a.py": {"summary": "oculto"}}},
+            purpose_lookup=lookup,
+        )
+        assert "purpose" not in json.dumps(payload, ensure_ascii=False)
+        assert ("semantic_layer_unavailable" in payload["warnings"]) is (enabled and not ready)
+
+
+def test_understand_remove_prosa_semantica_antes_da_quota(tmp_path, monkeypatch):
+    """O teto remove purpose/summaries antes de reduzir fatos estruturais."""
+    graph, manifest, run = _base_graph(tmp_path)
+    monkeypatch.setattr(ctxmod, "CONTEXT_RESPONSE_MAX_CHARS", 1500)
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="understand",
+        manifest=manifest,
+        brief={"layers": [{"path": "pkg", "role": "source", "files": 2}]},
+        semantic_enabled=True,
+        semantic_ready=True,
+        semantic_sidecar={
+            "file_summaries": {"pkg/a.py": {"summary": "f" * 1200}},
+            "layer_summaries": {"pkg": {"summary": "l" * 1200}},
+        },
+        purpose_lookup=lambda *_args: "p" * 1200,
+    )
+
+    serialized = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    assert len(serialized) <= 1500
+    assert "truncated_for_budget" in payload["warnings"]
+    assert "purpose" not in json.dumps(payload["sections"]["symbol"], ensure_ascii=False)
+    assert "file_summary" not in payload["sections"]
+    assert payload["sections"]["layer"]["path"] == "pkg"

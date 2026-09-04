@@ -6,6 +6,7 @@ from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional
 
 import lancedb
+import pyarrow as pa
 
 from codesteer_atlas.config import (
     CANDIDATES_LIMIT,
@@ -22,6 +23,7 @@ from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
 from codesteer_atlas.models import CodeChunk, IndexManifest, SearchOutcome, SearchResult
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
+from codesteer_atlas.semantic import semantic_enabled, semantic_index_state
 from codesteer_atlas.structural import node_id_for, spreading_activation
 
 
@@ -63,6 +65,55 @@ def _table_names(db) -> List[str]:
     return list(tables)
 
 
+def _chunks_schema() -> pa.Schema:
+    """Declara o schema 2.3.0, incluindo irmãos semânticos nullable."""
+    return pa.schema(
+        [
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("file_path", pa.string()),
+            pa.field("repo", pa.string()),
+            pa.field("start_line", pa.int64()),
+            pa.field("end_line", pa.int64()),
+            pa.field("scope_type", pa.string()),
+            pa.field("scope_name", pa.string()),
+            pa.field("language", pa.string()),
+            pa.field("content", pa.string()),
+            pa.field("indexed_at", pa.string()),
+            pa.field("vector", pa.list_(pa.float32(), 384)),
+            pa.field("purpose", pa.string()),
+            pa.field("purpose_hash", pa.string()),
+            pa.field("purpose_vector", pa.list_(pa.float32(), 384)),
+            pa.field("references_json", pa.string()),
+        ]
+    )
+
+
+def _assert_chunks_schema(table) -> None:
+    expected = _chunks_schema()
+    actual = table.schema
+    problems = []
+    if actual.names != expected.names:
+        problems.append(f"colunas={actual.names!r}")
+    for expected_field in expected:
+        try:
+            actual_field = actual.field(expected_field.name)
+        except KeyError:
+            continue
+        if actual_field.type != expected_field.type or (
+            expected_field.name in {"purpose", "purpose_hash", "purpose_vector"}
+            and not actual_field.nullable
+        ):
+            problems.append(
+                f"{expected_field.name}={actual_field.type}/{actual_field.nullable}"
+            )
+    if problems:
+        raise RuntimeError(
+            "O schema da tabela chunks não é compatível com o índice 2.3.0 "
+            f"({'; '.join(problems)}). Nenhuma mutação incremental foi executada; "
+            "use full=true sem paths para reindexar integralmente."
+        )
+
+
 class StorageBackend:
     """
     Abstração que encapsula toda a interação com o banco de dados vetorial LanceDB
@@ -79,6 +130,29 @@ class StorageBackend:
         row["references_json"] = encode_references_json(chunk.references)
         row.pop("references", None)
         return row
+
+    def _assert_incremental_current(self) -> None:
+        if not self.manifest_path.exists():
+            return
+        manifest = self.get_manifest()
+        if _version_tuple(manifest.index_version) < _version_tuple(CURRENT_INDEX_VERSION):
+            raise RuntimeError(
+                f"O índice legado {manifest.index_version} não aceita atualização incremental. "
+                "Use full=true sem paths para reindexar e rechunkear integralmente em 2.3.0."
+            )
+
+    def validate_incremental_schema(self) -> None:
+        """Valida o schema atual antes de qualquer delete/append incremental."""
+        self._assert_incremental_current()
+        if not self.exists():
+            return
+        db = lancedb.connect(str(self.db_path))
+        if "chunks" not in _table_names(db):
+            raise RuntimeError(
+                "A tabela chunks não existe para o manifesto atual; "
+                "use full=true sem paths para reconstruir o índice."
+            )
+        _assert_chunks_schema(db.open_table("chunks"))
 
 
     def exists(self) -> bool:
@@ -103,11 +177,15 @@ class StorageBackend:
         db = lancedb.connect(str(self.db_path))
 
         # Prepara a lista de dicionários para inserção
-        data_to_insert = [self._chunk_to_row(chunk) for chunk in chunks]
+        data_to_insert = pa.Table.from_pylist(
+            [self._chunk_to_row(chunk) for chunk in chunks], schema=_chunks_schema()
+        )
 
         # Sobrescreve a tabela se já existir para evitar duplicações no MVP
         table_name = "chunks"
-        table = db.create_table(table_name, data=data_to_insert, mode="overwrite")
+        table = db.create_table(
+            table_name, data=data_to_insert, schema=_chunks_schema(), mode="overwrite"
+        )
 
         # Cria índice Full-Text Search (FTS) na coluna 'content' para buscas BM25
         table.create_fts_index("content", replace=True)
@@ -153,6 +231,8 @@ class StorageBackend:
         if not chunks:
             return
 
+        self._assert_incremental_current()
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
         db = lancedb.connect(str(self.db_path))
 
@@ -160,6 +240,7 @@ class StorageBackend:
 
         if "chunks" in _table_names(db):
             table = db.open_table("chunks")
+            _assert_chunks_schema(table)
             table.add(data_to_insert)
 
             # Recria o índice FTS do zero após cada append incremental.
@@ -169,7 +250,12 @@ class StorageBackend:
             # múltiplos appends incrementais. Custo extra ~1-2s por reindex.
             table.create_fts_index("content", replace=True)
         else:
-            table = db.create_table("chunks", data=data_to_insert, mode="overwrite")
+            table = db.create_table(
+                "chunks",
+                data=pa.Table.from_pylist(data_to_insert, schema=_chunks_schema()),
+                schema=_chunks_schema(),
+                mode="overwrite",
+            )
             table.create_fts_index("content", replace=True)
 
     def update_manifest_after_incremental(
@@ -185,8 +271,10 @@ class StorageBackend:
         tabela atual (após inserções/remoções incrementais) e regrava o
         manifest.json com o novo mapa `files`. Retorna o `total_chunks` atualizado.
         """
+        self._assert_incremental_current()
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
+        _assert_chunks_schema(table)
 
         projection = table.search().select(["repo", "language"]).to_arrow()
         rows = projection.to_pylist()
@@ -329,7 +417,7 @@ class StorageBackend:
         # 1. Executa busca vetorial (cosseno) com prefilter
         vector_results: List[Dict[str, Any]] = []
         try:
-            query = table.search(query_vector).metric("cosine")
+            query = table.search(query_vector, vector_column_name="vector").metric("cosine")
             if where_clause:
                 query = query.where(where_clause, prefilter=True)
             vector_results = query.limit(CANDIDATES_LIMIT).to_list()
@@ -386,6 +474,27 @@ class StorageBackend:
 
         _fuse(vector_results, "vector")
         _fuse(text_results, "fts")
+
+        # @MindDecision: o vetor de propósito é um braço independente; não altera
+        # `content`/`vector` e só é consultado em índice 2.3.0 pronto.
+        if semantic_enabled():
+            manifest = self.get_manifest()
+            semantic_index, _reason = semantic_index_state(self.index_dir, manifest)
+            if semantic_index == "ready":
+                try:
+                    query = table.search(query_vector, vector_column_name="purpose_vector").metric("cosine")
+                    if where_clause:
+                        query = query.where(where_clause, prefilter=True)
+                    semantic_results = query.limit(CANDIDATES_LIMIT).to_list()
+                    _fuse(semantic_results, "semantic")
+                except Exception as error:
+                    warnings.append("semantic_arm_unavailable")
+                    print(
+                        f"[atlas] Braço semântico indisponível ({type(error).__name__}).",
+                        file=sys.stderr,
+                    )
+            else:
+                warnings.append("semantic_layer_unavailable")
 
         if structural:
             self._fuse_structural_arm(rrf_scores, items_by_id, _fuse, warnings)
@@ -510,6 +619,61 @@ class StorageBackend:
             table.search().select(["file_path", "scope_type", "scope_name"]).to_arrow()
         )
         return arrow_table.to_pylist()
+
+    def get_semantic_cache(self, file_paths: Optional[List[str]] = None) -> Dict[tuple, Dict[str, Any]]:
+        """Lê a projeção semântica antes de um delete para permitir reuso."""
+        if not self.exists():
+            return {}
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        columns = ["file_path", "scope_name", "scope_type", "content", "purpose", "purpose_hash", "purpose_vector"]
+        query = table.search()
+        if file_paths:
+            escaped = [path.replace("'", "''") for path in file_paths]
+            query = query.where(
+                f"file_path IN ({', '.join(repr(path) for path in escaped)})", prefilter=True
+            )
+        try:
+            rows = query.select(columns).to_arrow().to_pylist()
+        except Exception:
+            fallback = ["file_path", "scope_name", "scope_type", "content"]
+            rows = query.select(fallback).to_arrow().to_pylist()
+        result: Dict[tuple, Dict[str, Any]] = {}
+        from codesteer_atlas.semantic import content_hash
+
+        for row in rows:
+            if not row.get("purpose"):
+                continue
+            key = (row.get("file_path", ""), row.get("scope_name", ""), content_hash(row.get("content", "")))
+            result[key] = row
+        return result
+
+    def get_semantic_projection(self) -> List[Dict[str, Any]]:
+        if not self.exists():
+            return []
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        columns = ["file_path", "scope_name", "scope_type", "content", "purpose", "purpose_hash"]
+        try:
+            return table.search().select(columns).to_arrow().to_pylist()
+        except Exception:
+            return table.search().select(["file_path", "scope_name", "scope_type", "content"]).to_arrow().to_pylist()
+
+    def lookup_purpose(self, file_path: str, scope_name: str) -> Optional[str]:
+        """Faz um point lookup do propósito semântico, sem carregar vetores."""
+        if not self.exists():
+            return None
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        path = file_path.replace("'", "''")
+        scope = scope_name.replace("'", "''")
+        try:
+            rows = table.search().where(
+                f"file_path = '{path}' AND scope_name = '{scope}'", prefilter=True
+            ).select(["purpose"]).limit(1).to_arrow().to_pylist()
+        except Exception:
+            return None
+        return rows[0].get("purpose") if rows else None
 
     def get_sections_by_file_path(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -657,8 +821,11 @@ class StorageBackend:
         if not file_paths or not self.exists():
             return
 
+        self._assert_incremental_current()
+
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
+        _assert_chunks_schema(table)
 
         escaped_paths = [file_path.replace("'", "''") for file_path in file_paths]
         in_clause = ", ".join(f"'{path}'" for path in escaped_paths)

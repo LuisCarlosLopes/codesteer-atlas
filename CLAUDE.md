@@ -202,9 +202,27 @@ Duas variáveis de ambiente, ambas **desligadas por padrão** (`= "1"` liga):
 | `ATLAS_WATCH` | `watcher.py` observa o workspace e dispara reindexação incremental em subprocesso após o debounce | `atlas_status` → `watch`: `unavailable` (sem o extra `[watch]`), `failed`, `disabled` |
 | `ATLAS_SCIP` | fase `scip` da indexação invoca o indexador externo e ingere `index.scip` | `atlas_index` → `scip_status` + `scip_edges` (`atlas_status` não expõe esses campos) |
 
-`CURRENT_INDEX_VERSION` é `2.2.0` (campo `files_declares` no manifest, usado para resolver
-imports por namespace em Java/C#/Kotlin/Scala). **`MIN_INDEX_VERSION` continua `2.0.0`** — não
-há reindexação forçada.
+`CURRENT_INDEX_VERSION` é `2.3.0` (campos semânticos irmãos e `semantic.json`; imports por
+namespace continuam em `files_declares`). **`MIN_INDEX_VERSION` continua `2.0.0`** — índices
+legados seguem buscáveis, mas só `full=true` sem `paths` faz o rechunk integral para 2.3.0.
+
+### Camada semântica opt-in (F4)
+
+`ATLAS_SEMANTIC=1` habilita propósito por símbolo, cache por
+`(file_path, scope_name, sha256(content))`, vetor `purpose_vector` e sumários
+`semantic.json`. Sem a flag, `content`/`vector`, busca, brief, context e grafo permanecem
+estruturais. O braço `semantic` usa a mesma query e filtros, entra no RRF apenas quando o
+índice está `ready`, e `match_arms` registra somente os braços que recuperaram o chunk.
+
+As origens seguem `sampling` MCP síncrono → `ATLAS_SEMANTIC_LOCAL_URL` →
+`ATLAS_SEMANTIC_API_URL`; não existe host default. `ATLAS_SEMANTIC_API_KEY` fica somente no
+header de API. `ATLAS_SEMANTIC_MODEL` ativa o contrato OpenAI-compatible (`model` +
+`messages`) para APIs como OpenRouter; sem ele, o endpoint recebe o payload genérico legado.
+`atlas_status.semantic` declara origem, egresso, estado do índice e
+`last_generation`; falhas usam warnings e preservam a recuperação estrutural. Full/async,
+CLI e watcher não atravessam `ctx` nem usam sampling. Sumários entram apenas em brief e
+`understand`, cedendo primeiro ao teto de resposta. `graph.json`/`graph.html` não recebem
+overlay semântico.
 
 ### Incremental indexing (DECISAO-005 / [J])
 

@@ -19,6 +19,29 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 - **Rationale em código**: `NOTE`/`WHY`, cites `DEC`/`ADR`/`RFC` e wikilinks nos resultados de busca.
 - **Multi-linguagem**: Python, JS/TS, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
 
+### Camada semântica opcional
+
+Para gerar propósito por símbolo e sumários hierárquicos, habilite explicitamente
+`ATLAS_SEMANTIC=1`. A cadeia usa sampling apenas no caminho MCP síncrono, depois um
+endpoint local configurado por `ATLAS_SEMANTIC_LOCAL_URL` e, por último, uma API cujo URL
+foi declarado em `ATLAS_SEMANTIC_API_URL`. Sem origem, o índice estrutural continua completo.
+
+APIs OpenAI-compatible, incluindo OpenRouter, usam também `ATLAS_SEMANTIC_MODEL`.
+Exemplo: `ATLAS_SEMANTIC_API_URL=https://openrouter.ai/api/v1/chat/completions`,
+`ATLAS_SEMANTIC_API_KEY=sk-or-v1-...` e
+`ATLAS_SEMANTIC_MODEL=openai/gpt-4.1-mini`. Com o modelo definido, o Atlas envia
+`model` + `messages`; sem ele, preserva o payload genérico legado para endpoints customizados.
+
+O índice novo usa formato `2.3.0` e grava `purpose`, `purpose_hash`, `purpose_vector` e o
+sidecar `.code-index/semantic.json`; o vetor estrutural não muda. Índices `2.0.x`–`2.2.x`
+continuam buscáveis como legados. Para convertê-los, use somente `atlas-index --full` sem
+`--paths`; recortes incrementais não fazem migration nem misturam schemas. Consulte
+`atlas_status` para auditar `origin`, `egress`, `index` e `last_generation`.
+
+Uma busca degradada inclui `warnings`: `semantic_layer_unavailable` indica camada ligada
+sem índice pronto e `semantic_arm_unavailable` indica falha do vetor semântico; em ambos
+os casos vector+FTS continuam disponíveis, mas a recuperação semântica está incompleta.
+
 ## Começar (3 passos)
 
 Pré-requisitos: Python 3.11–3.13 e [uv](https://github.com/astral-sh/uv) (fornece o `uvx`).

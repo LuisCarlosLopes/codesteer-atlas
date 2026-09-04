@@ -66,9 +66,23 @@ def _trim_value(value: Any, max_chars: int) -> Tuple[Any, int]:
             items.pop()
             omitted += 1
         return items, omitted
+    if isinstance(value, str):
+        limit = max(0, max_chars - 2)
+        return value[:limit], int(len(value) > limit)
     if isinstance(value, dict):
         trimmed = dict(value)
         omitted = 0
+        for key, inner in sorted(
+            trimmed.items(), key=lambda item: len(item[1]) if isinstance(item[1], str) else 0, reverse=True
+        ):
+            if not isinstance(inner, str) or _serialized_len(trimmed) <= max_chars:
+                continue
+            base = dict(trimmed)
+            base[key] = ""
+            limit = max(0, max_chars - _serialized_len(base) - 2)
+            if len(inner) > limit:
+                trimmed[key] = inner[:limit]
+                omitted += 1
         for _key, inner in list(trimmed.items()):
             if not isinstance(inner, list):
                 continue
@@ -123,6 +137,16 @@ def _enforce_context_budget(payload: dict, max_chars: int) -> None:
 
     sections = payload.get("sections")
     if isinstance(sections, dict):
+        for name in ("symbol", "layer", "brief_layer"):
+            value = sections.get(name)
+            if isinstance(value, dict) and value.pop("purpose", None) is not None:
+                _mark(name)
+            if isinstance(value, dict) and value.pop("summary", None) is not None:
+                _mark(name)
+        if sections.pop("file_summary", None) is not None:
+            _mark("file_summary")
+        if _serialized_len(payload) <= max_chars:
+            return
         for name in list(sections):
             value = sections[name]
             while not _is_empty_section(value) and _serialized_len(payload) > max_chars:
@@ -301,6 +325,20 @@ def _layer_for_file(brief: Optional[dict], file_path: Optional[str]) -> dict:
     }
 
 
+def _summary_for_file(sidecar: Optional[dict], file_path: Optional[str]) -> Optional[str]:
+    if not sidecar or not file_path:
+        return None
+    item = (sidecar.get("file_summaries") or {}).get(file_path)
+    return item.get("summary") if isinstance(item, dict) and item.get("summary") else None
+
+
+def _summary_for_layer(sidecar: Optional[dict], layer_path: Optional[str]) -> Optional[str]:
+    if not sidecar or not layer_path:
+        return None
+    item = (sidecar.get("layer_summaries") or {}).get(layer_path)
+    return item.get("summary") if isinstance(item, dict) and item.get("summary") else None
+
+
 def _call_chain_to_entrypoints(graph: dict, node: dict, brief: Optional[dict]) -> List[dict]:
     entry_paths = set()
     if brief:
@@ -376,6 +414,10 @@ def build_context(
     intent: str,
     manifest,
     brief: Optional[dict] = None,
+    semantic_enabled: bool = False,
+    semantic_ready: bool = False,
+    semantic_sidecar: Optional[dict] = None,
+    purpose_lookup=None,
 ) -> dict:
     intent = (intent or "").strip()
     if intent not in VALID_INTENTS:
@@ -387,6 +429,9 @@ def build_context(
     warnings: List[str] = []
     truncated: Dict[str, int] = {}
     section_names = INTENT_SECTIONS[intent]
+
+    if semantic_enabled and not semantic_ready:
+        warnings.append("semantic_layer_unavailable")
 
     if not _has_calls_edges(graph) and intent in {"edit", "debug", "review"}:
         warnings.append("calls_unavailable")
@@ -427,12 +472,27 @@ def build_context(
             "adrs": _adrs(graph, node),
         }
     else:
+        layer = _layer_for_file(brief, node.get("file_path"))
+        if semantic_enabled and semantic_ready:
+            layer_summary = _summary_for_layer(semantic_sidecar, layer.get("path"))
+            if layer_summary:
+                layer["summary"] = layer_summary
+        symbol = _node_summary(node)
+        if semantic_enabled and semantic_ready and callable(purpose_lookup):
+            purpose = purpose_lookup(node.get("file_path", ""), node.get("label", ""))
+            if purpose:
+                symbol["purpose"] = purpose
         sections = {
-            "symbol": _node_summary(node),
-            "layer": _layer_for_file(brief, node.get("file_path")),
+            "symbol": symbol,
+            "layer": layer,
             "neighbors": neighborhood.get("neighbors") or {},
-            "brief_layer": _layer_for_file(brief, node.get("file_path")),
+            "brief_layer": dict(layer),
         }
+        if semantic_enabled and semantic_ready:
+            file_summary = _summary_for_file(semantic_sidecar, node.get("file_path"))
+            if file_summary:
+                sections["file_summary"] = file_summary
+                section_names = ("symbol", "file_summary", "layer", "neighbors", "brief_layer")
 
     sections = apply_section_quotas(section_names, sections, truncated)
     payload = {

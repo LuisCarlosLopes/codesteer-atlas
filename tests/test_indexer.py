@@ -1,7 +1,9 @@
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pyarrow as pa
 import pytest
 from click.testing import CliRunner
 from filelock import FileLock
@@ -14,6 +16,7 @@ from codesteer_atlas.indexer import (
     load_atlasignore_spec,
     should_ignore,
 )
+from codesteer_atlas.origin import OriginResult
 from codesteer_atlas.storage import StorageBackend
 
 
@@ -89,6 +92,383 @@ def test_indexer_cli_run(tmp_path):
 
         # Garante que o encode em lote foi chamado
         mock_encode.assert_called_once()
+
+
+def test_indexer_off_para_incremental_on_preserva_schema_e_chunks(tmp_path, monkeypatch):
+    """A primeira gravação off aceita propósito na atualização incremental seguinte."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (workspace / "other.py").write_text("def keep():\n    return 2\n", encoding="utf-8")
+    index_dir = tmp_path / "index"
+
+    class SamplingResult:
+        text = "propósito gerado"
+        result = "propósito gerado"
+
+    class FakeContext:
+        def __init__(self):
+            self.calls = []
+
+        def sample(self, **kwargs):
+            self.calls.append(kwargs)
+            return SamplingResult()
+
+    monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+    ):
+        off_stats = index_workspace(workspace, index_dir, report_progress=False)
+
+    table = StorageBackend(index_dir).db_path
+    import lancedb
+
+    schema = lancedb.connect(str(table)).open_table("chunks").schema
+    assert schema.field("purpose").type == pa.string()
+    assert schema.field("purpose").nullable is True
+    assert schema.field("purpose_vector").nullable is True
+    assert off_stats.semantic_status == "disabled"
+
+    (workspace / "app.py").write_text("def run():\n    return 10\n", encoding="utf-8")
+    context = FakeContext()
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    observed_paths = []
+    original_cache = StorageBackend.get_semantic_cache
+
+    def spy_cache(storage, file_paths=None):
+        observed_paths.append(file_paths)
+        return original_cache(storage, file_paths)
+
+    monkeypatch.setattr(StorageBackend, "get_semantic_cache", spy_cache)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-2"),
+    ):
+        on_stats = index_workspace(workspace, index_dir, report_progress=False, ctx=context)
+
+    assert on_stats.semantic_generated >= 1
+    assert context.calls
+    assert observed_paths == [["app.py"]]
+    storage = StorageBackend(index_dir)
+    rows = lancedb.connect(str(storage.db_path)).open_table("chunks").to_arrow().to_pylist()
+    by_file = {row["file_path"]: row for row in rows}
+    assert by_file["app.py"]["purpose"] == "propósito gerado"
+    assert by_file["other.py"]["purpose"] is None
+    sidecar = json.loads((index_dir / "semantic.json").read_text(encoding="utf-8"))
+    assert sidecar["usable_purpose_count"] >= 1
+
+
+def test_indexer_full_on_fecha_t4_e_preserva_artefatos_estruturais(tmp_path, monkeypatch):
+    """O caminho integrado on gera prosa elegível sem contaminar documentos ou grafo."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (workspace / "README.md").write_text("# Guia\n\nUso do projeto.\n", encoding="utf-8")
+    index_dir = tmp_path / "index"
+
+    def generate(_self, _payload):
+        return OriginResult("responsabilidade do símbolo", "local", "host local")
+
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_LOCAL_URL", "http://local.test")
+    monkeypatch.setattr("codesteer_atlas.origin.OriginResolver.generate", generate)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+    ):
+        stats = index_workspace(workspace, index_dir, full=True, report_progress=False)
+
+    import lancedb
+
+    rows = lancedb.connect(str(index_dir / "lancedb")).open_table("chunks").to_arrow().to_pylist()
+    assert stats.semantic_status == "ok"
+    assert stats.semantic_file_generated >= 1
+    assert any(row["purpose"] == "responsabilidade do símbolo" for row in rows)
+    assert all(row["purpose"] is None for row in rows if row["language"] == "markdown")
+    assert (index_dir / "semantic.json").exists()
+    assert (index_dir / "graph.json").exists()
+    assert (index_dir / "graph.html").exists()
+    assert (index_dir / "brief.json").exists()
+
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    brief = json.loads((index_dir / "brief.json").read_text(encoding="utf-8"))
+    graph_html = (index_dir / "graph.html").read_text(encoding="utf-8")
+    for structural_artifact in (graph, brief):
+        serialized = json.dumps(structural_artifact, ensure_ascii=False)
+        assert "responsabilidade do símbolo" not in serialized
+        assert "file_summaries" not in serialized
+        assert "layer_summaries" not in serialized
+    assert graph["nodes"]
+    assert "responsabilidade do símbolo" not in graph_html
+    assert "file_summaries" not in graph_html
+    assert brief["layers"]
+
+
+def test_indexer_matriz_legado_rejeita_mutacao_e_full_integral_converte(
+    tmp_path, monkeypatch
+):
+    """T4/T8: só o full integral converte legado, após três rejeições imutáveis."""
+    import lancedb
+
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "app.py").write_text(
+        "def run():\n    return 1\n", encoding="utf-8"
+    )
+    (workspace / "src" / "sibling.py").write_text(
+        "def keep():\n    return 2\n", encoding="utf-8"
+    )
+    index_dir = tmp_path / "index"
+    monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+    ):
+        index_workspace(workspace, index_dir, report_progress=False)
+
+    manifest_path = index_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["index_version"] = "2.2.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    db = lancedb.connect(str(index_dir / "lancedb"))
+    current_rows = db.open_table("chunks").to_arrow().to_pylist()
+    legacy_rows = [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"purpose", "purpose_hash", "purpose_vector"}
+        }
+        for row in current_rows
+    ]
+    db.drop_table("chunks")
+    db.create_table("chunks", data=legacy_rows).create_fts_index("content", replace=True)
+    (workspace / "src" / "app.py").write_text(
+        "def run():\n    return 100\n", encoding="utf-8"
+    )
+
+    table = lancedb.connect(str(index_dir / "lancedb")).open_table("chunks")
+    rows_before = table.to_arrow().to_pylist()
+    manifest_before = manifest_path.read_bytes()
+    sidecar_before = (index_dir / "semantic.json").read_bytes()
+
+    rejected_modes = [
+        (False, False, None),
+        (True, False, None),
+        (True, True, ["src"]),
+    ]
+    for semantic_on, full, paths in rejected_modes:
+        if semantic_on:
+            monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+        else:
+            monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+        with pytest.raises(RuntimeError, match="legado.*full=true sem paths"):
+            index_workspace(
+                workspace,
+                index_dir,
+                paths=paths,
+                full=full,
+                report_progress=False,
+            )
+        assert manifest_path.read_bytes() == manifest_before
+        assert (index_dir / "semantic.json").read_bytes() == sidecar_before
+        rows_after = (
+            lancedb.connect(str(index_dir / "lancedb"))
+            .open_table("chunks")
+            .to_arrow()
+            .to_pylist()
+        )
+        assert rows_after == rows_before
+
+    def generate(_self, payload):
+        return OriginResult(
+            f"purpose:{payload['scope_type']}:{payload['scope_name']}", "local", "host local"
+        )
+
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_LOCAL_URL", "http://local.test")
+    monkeypatch.setattr("codesteer_atlas.origin.OriginResolver.generate", generate)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-2"),
+    ):
+        converted = index_workspace(
+            workspace, index_dir, full=True, paths=None, report_progress=False
+        )
+
+    converted_manifest = StorageBackend(index_dir).get_manifest()
+    converted_rows = (
+        lancedb.connect(str(index_dir / "lancedb"))
+        .open_table("chunks")
+        .to_arrow()
+        .to_pylist()
+    )
+    assert converted_manifest.index_version == "2.3.0"
+    assert converted.semantic_status == "ok"
+    assert any("return 100" in row["content"] for row in converted_rows)
+    assert all(row["purpose"] for row in converted_rows)
+    assert all(row["purpose_vector"] for row in converted_rows)
+
+
+def test_indexer_incremental_reusa_irmao_pre_delete_e_atualiza_contadores(
+    tmp_path, monkeypatch
+):
+    """Cache é lido antes do delete e preserva o irmão não alterado do mesmo arquivo."""
+    import lancedb
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "app.py"
+    source.write_text(
+        "def changed():\n    return 1\n\ndef stable():\n    return 2\n", encoding="utf-8"
+    )
+    index_dir = tmp_path / "index"
+
+    def generate(_self, payload):
+        if payload["scope_type"] in {"arquivo", "camada"}:
+            text = f"summary:{payload['scope_type']}:{payload['scope_name']}:{payload['content']}"
+        else:
+            text = f"purpose:{payload['scope_name']}:{payload['content']}"
+        return OriginResult(text, "local", "host local")
+
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_LOCAL_URL", "http://local.test")
+    monkeypatch.setattr("codesteer_atlas.origin.OriginResolver.generate", generate)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
+    ):
+        first = index_workspace(workspace, index_dir, full=True, report_progress=False)
+
+    first_rows = (
+        lancedb.connect(str(index_dir / "lancedb"))
+        .open_table("chunks")
+        .to_arrow()
+        .to_pylist()
+    )
+    first_by_name = {row["scope_name"]: row for row in first_rows}
+    assert first.semantic_generated == 2
+
+    source.write_text(
+        "def changed():\n    return 100\n\ndef stable():\n    return 2\n", encoding="utf-8"
+    )
+    observed_cache_paths = []
+    original_cache = StorageBackend.get_semantic_cache
+
+    def spy_cache(storage, file_paths=None):
+        observed_cache_paths.append(file_paths)
+        return original_cache(storage, file_paths)
+
+    monkeypatch.setattr(StorageBackend, "get_semantic_cache", spy_cache)
+    with (
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-2"),
+    ):
+        second = index_workspace(workspace, index_dir, report_progress=False)
+
+    second_rows = (
+        lancedb.connect(str(index_dir / "lancedb"))
+        .open_table("chunks")
+        .to_arrow()
+        .to_pylist()
+    )
+    second_by_name = {row["scope_name"]: row for row in second_rows}
+    assert observed_cache_paths == [["app.py"]]
+    assert second.semantic_generated == 1
+    assert second.semantic_reused == 1
+    assert second_by_name["stable"]["purpose"] == first_by_name["stable"]["purpose"]
+    assert second_by_name["stable"]["purpose_vector"] == first_by_name["stable"]["purpose_vector"]
+    assert second_by_name["changed"]["purpose"] != first_by_name["changed"]["purpose"]
+
+    sidecar = json.loads((index_dir / "semantic.json").read_text(encoding="utf-8"))
+    last = sidecar["last_generation"]
+    assert sidecar["usable_purpose_count"] == 2
+    assert last["status"] == "ok"
+    assert last["semantic_generated"] == 1
+    assert last["semantic_reused"] == 1
+    assert last["semantic_file_generated"] == 1
+    assert last["semantic_layer_generated"] == 1
+    assert last["origins"] == ["local"]
+    assert last["egresses"] == ["host local"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_origin"),
+    [("v05", "failed", "local"), ("offline", "no_origin", None)],
+)
+def test_indexer_v05_e_offline_degradam_sem_host_api(
+    tmp_path, monkeypatch, mode, expected_status, expected_origin
+):
+    """V05 e ausência de origem mantêm T8 e não tentam host/API implícitos."""
+    import lancedb
+
+    workspace = tmp_path / mode / "workspace"
+    workspace.mkdir(parents=True)
+    source = "def run():\n    return 1\n"
+    (workspace / "app.py").write_text(source, encoding="utf-8")
+    index_dir = tmp_path / mode / "index"
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.delenv("ATLAS_SEMANTIC_LOCAL_URL", raising=False)
+    monkeypatch.delenv("ATLAS_SEMANTIC_API_URL", raising=False)
+    monkeypatch.delenv("ATLAS_SEMANTIC_API_KEY", raising=False)
+
+    with patch("codesteer_atlas.origin.OriginResolver._call_http") as http:
+        if mode == "v05":
+            monkeypatch.setenv("ATLAS_SEMANTIC_LOCAL_URL", "http://local.test")
+            monkeypatch.setattr(
+                "codesteer_atlas.origin.OriginResolver.generate",
+                lambda _self, _payload: OriginResult("  \n", "local", "host local"),
+            )
+        with (
+            patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
+            patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha"),
+        ):
+            stats = index_workspace(workspace, index_dir, full=True, report_progress=False)
+
+    http.assert_not_called()
+    sidecar = json.loads((index_dir / "semantic.json").read_text(encoding="utf-8"))
+    assert stats.semantic_status == expected_status
+    assert sidecar["usable_purpose_count"] == 0
+    assert sidecar["last_generation"]["status"] == expected_status
+    assert sidecar["origin"] == expected_origin
+
+    storage = StorageBackend(index_dir)
+    manifest = storage.get_manifest()
+    table = lancedb.connect(str(storage.db_path)).open_table("chunks")
+    rows = table.to_arrow().to_pylist()
+    assert len(rows) == manifest.total_chunks == stats.chunks_persisted == 1
+    assert table.schema.field("purpose").type == pa.string()
+    assert table.schema.field("purpose").nullable is True
+    assert table.schema.field("purpose_hash").nullable is True
+    assert table.schema.field("purpose_vector").type == pa.list_(pa.float32(), 384)
+    assert table.schema.field("purpose_vector").nullable is True
+
+    row = rows[0]
+    assert row["file_path"] == "app.py"
+    assert row["scope_type"] == "function"
+    assert row["scope_name"] == "run"
+    assert row["language"] == "python"
+    assert row["content"] == source.rstrip()
+    assert row["vector"] == pytest.approx([0.1] * 384)
+    assert row["purpose"] is None
+    assert row["purpose_hash"] is None
+    assert row["purpose_vector"] is None
+
+    assert manifest.index_version == "2.3.0"
+    assert manifest.repos_indexed == ["workspace"]
+    assert manifest.languages_indexed == ["python"]
+    assert manifest.embedding_dim == 384
+    assert manifest.embedding_backend == "fastembed"
+    assert manifest.storage_backend == "lancedb"
+    assert manifest.git_head_sha == "sha"
+    assert manifest.files == {
+        "app.py": hashlib.sha256(source.encode("utf-8")).hexdigest()
+    }
+    assert set(manifest.files_meta) == {"app.py"}
+    assert manifest.files_meta["app.py"][1] == len(source.encode("utf-8"))
+    assert (index_dir / "graph.json").exists()
+    assert (index_dir / "graph.html").exists()
+    assert (index_dir / "brief.json").exists()
 
 
 def _patched_encode(texts, batch_size=32, on_progress=None):
@@ -918,7 +1298,7 @@ def test_index_workspace_persiste_files_declares_e_arestas_multi_linguagem(tmp_p
         index_workspace(workspace_dir, index_dir)
 
     manifest = StorageBackend(index_dir=index_dir).get_manifest()
-    assert manifest.index_version == "2.2.0"
+    assert manifest.index_version == "2.3.0"
     assert manifest.files_declares == {
         "App.java": "com.acme.web",
         "Service.java": "com.acme.core",

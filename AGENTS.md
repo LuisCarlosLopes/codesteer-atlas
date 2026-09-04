@@ -45,6 +45,22 @@ O índice **declara o que não sabe** — leia isso antes de confiar no grafo:
 Em **todas** as tarefas, as regras em `.memory-bank/constitution.md` prevalecem.
 <!-- /codesteer:constitution-precedence -->
 
+## Camada semântica F4
+
+`ATLAS_SEMANTIC=1` é o único opt-in e permanece desligado por padrão. Ele gera
+propósito por símbolo e sumários em `semantic.json`; `atlas_search` não recebe
+parâmetro novo e só usa o braço `semantic` em índice 2.3.0 `ready`. O status sempre
+expõe `semantic.enabled`, `origin`, `egress`, `index` e `last_generation`.
+
+A cadeia é `sampling` somente em indexação MCP síncrona, depois endpoint local
+explicitamente configurado e, por fim, API somente com URL explícita. CLI,
+subprocesso e watcher não recebem `ctx`; falhas degradam para a estrutura e nunca
+poluem stdout JSON-RPC. Índices anteriores a 2.3.0 são legados: só `full=true` sem
+`paths` faz reindex/rechunk integral; não há migration nem conversão incremental.
+Para APIs OpenAI-compatible, `ATLAS_SEMANTIC_MODEL` troca o request para `model` +
+`messages`; OpenRouter usa `ATLAS_SEMANTIC_API_URL`, `ATLAS_SEMANTIC_API_KEY` e o
+slug explícito do modelo, sem provider default.
+
 ## Cursor Cloud specific instructions
 
 Pure-Python package managed by `uv` (Python 3.11–3.13). Standard commands live in `CLAUDE.md`; the startup update script already runs `uv sync --group dev`, so deps are ready.

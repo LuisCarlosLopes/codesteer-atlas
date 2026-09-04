@@ -27,6 +27,35 @@ Contrato das ferramentas expostas pelo [[sys-005-mcp-server]]. Transporte
 
 Recurso read-only adicional: `atlas://status` (alias de `atlas_status`).
 
+### Delta F4 — camada semântica opt-in
+
+`ATLAS_SEMANTIC=1` é o único opt-in; não há parâmetro adicional em `atlas_search`.
+O braço `semantic` só aparece em `match_arms` quando `atlas_status.semantic.index` é
+`ready` (índice 2.3.0 com propósito utilizável). A camada desligada omite prosa e
+warnings semânticos.
+
+`atlas_status` sempre inclui `semantic: {enabled, origin, egress, index, index_reason?,
+last_generation?}`. A origem é `sampling` apenas no sync MCP, depois endpoint local
+explicitamente configurado e API somente com URL explícita; o campo `egress` descreve o
+que sai e nunca inclui credenciais.
+
+Quando `ATLAS_SEMANTIC_MODEL` está definido, a origem API usa contrato
+OpenAI-compatible (`model` + `messages`), incluindo OpenRouter; sem a variável, mantém o
+payload genérico legado. URL, chave e modelo continuam explícitos, sem provider default.
+
+Quando a busca degrada, `warnings` pode incluir `semantic_layer_unavailable` (camada
+ligada sem índice pronto) ou `semantic_arm_unavailable` (falha do braço semântico).
+Esses avisos preservam vector+FTS, mas informam que o recall semântico está incompleto.
+
+`atlas_brief` pode incluir `layers[].summary`; `atlas_context` com `understand` pode
+incluir `sections.symbol.purpose`, `sections.file_summary` e `layer.summary`. Esses campos
+são opcionais e cedem primeiro ao orçamento. `atlas_index` síncrono acrescenta
+`semantic_status`, `semantic_generated`, `semantic_reused` e contadores de arquivo/camada.
+
+O formato 2.3.0 é obtido por reindexação/rechunk integral (`full=true`, sem `paths`), sem
+migration de banco. Índices anteriores permanecem legados e nenhuma atualização parcial
+pode fazer delete, append ou relabelar seu manifesto.
+
 ## Endpoints
 
 ### `atlas_search`
@@ -70,6 +99,11 @@ localizar código ou documentos. Não chamar `atlas_status` antes "só para chec
 `content` só presente se `include_content=true`. Resultados markdown podem incluir
 `markdown_references` com `{file_path, anchor, resolved_section, alias?, candidates?}`.
 Resultados de código podem incluir `rationale_refs` com `{kind, key, note_path?, text?, candidates?}`.
+
+Se um braço falhar, `warnings` informa a degradação: `vector_search_unavailable`,
+`fts_unavailable`, `cross_encoder_unavailable`, `structural_arm_unavailable`,
+`semantic_layer_unavailable` ou `semantic_arm_unavailable`. Os dois últimos não removem
+os resultados estruturais vector+FTS; exigem cautela antes de concluir que algo não existe.
 
 ### `atlas_context`
 

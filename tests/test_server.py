@@ -6,6 +6,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -2306,3 +2307,257 @@ def test_atlas_index_sync_expoe_scip_ok_com_arestas(tmp_path):
 
     assert result["scip_status"] == "ok"
     assert result["scip_edges"] == 57
+
+
+def test_atlas_status_semantic_off_ausente_e_legado(tmp_path, monkeypatch):
+    """Status distingue camada desligada/ausente de manifesto legado."""
+    monkeypatch.delenv("ATLAS_SEMANTIC", raising=False)
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        missing = json.loads(atlas_status())
+
+    assert missing["semantic"] == {
+        "enabled": False,
+        "origin": None,
+        "egress": None,
+        "index": "absent",
+        "index_reason": "index_missing",
+        "last_generation": None,
+    }
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        legacy = json.loads(atlas_status())
+
+    assert legacy["semantic"]["enabled"] is False
+    assert legacy["semantic"]["index"] == "legacy"
+    assert legacy["semantic"]["index_reason"] == "index_version_below_2_3_0"
+
+
+def test_atlas_status_semantic_ready_expoe_egress_sem_segredo(tmp_path, monkeypatch):
+    """Status pronto informa egress descritivo sem expor a chave da API."""
+    manifest = MOCK_MANIFEST.model_copy(update={"index_version": "2.3.0"})
+    (tmp_path / "semantic.json").write_text(
+        json.dumps(
+            {
+                "usable_purpose_count": 1,
+                "last_generation": {"status": "ok", "semantic_generated": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    secret = "nao-vazar-esta-chave"
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_URL", "https://api.example.test/generate")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_KEY", secret)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        raw = atlas_status()
+        result = json.loads(raw)
+
+    assert result["semantic"]["enabled"] is True
+    assert result["semantic"]["origin"] == "api"
+    assert result["semantic"]["index"] == "ready"
+    assert "endpoint de API" in result["semantic"]["egress"]
+    assert secret not in raw
+
+
+@pytest.mark.parametrize(
+    ("sidecar_text", "expected_index", "expected_reason"),
+    [
+        (json.dumps({"usable_purpose_count": 0}), "absent", "no_prose"),
+        ("{corrompido", "absent", "sidecar_unreadable"),
+    ],
+)
+def test_atlas_status_semantic_23_sem_prosa_ou_sidecar_corrompido(
+    tmp_path, monkeypatch, sidecar_text, expected_index, expected_reason
+):
+    manifest = MOCK_MANIFEST.model_copy(update={"index_version": "2.3.0"})
+    (tmp_path / "semantic.json").write_text(sidecar_text, encoding="utf-8")
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+
+    assert result["semantic"]["index"] == expected_index
+    assert result["semantic"]["index_reason"] == expected_reason
+
+
+def _server_stats():
+    return SimpleNamespace(
+        files_processed=1,
+        files_failed=0,
+        files_scanned=1,
+        files_eligible=1,
+        files_skipped_unchanged=0,
+        files_removed=0,
+        chunks_persisted=1,
+        chunks_generated=1,
+        duration_s=0.01,
+        git_head_sha="sha",
+        phase_durations_s={},
+        graph_strategy="full",
+        graph_nodes=1,
+        graph_edges=0,
+        graph_bytes=1,
+        graph_html_bytes=1,
+        scip_status="disabled",
+        scip_edges=0,
+        brief_status="full",
+        brief_bytes=1,
+        brief_layers=1,
+        brief_entrypoints=0,
+        semantic_status="disabled",
+        semantic_generated=0,
+        semantic_reused=0,
+        semantic_file_generated=0,
+        semantic_file_reused=0,
+        semantic_layer_generated=0,
+        semantic_layer_reused=0,
+        semantic_origin=None,
+        semantic_egress=None,
+        skipped_reason=None,
+    )
+
+
+def test_atlas_index_sync_propaga_ctx_e_async_nao_chama_nucleo(tmp_path):
+    """Somente o caminho síncrono entrega ctx ao núcleo; full usa subprocesso."""
+    ctx = object()
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.server.index_workspace", return_value=_server_stats()) as indexer,
+    ):
+        sync = json.loads(
+            atlas_index(workspace=str(tmp_path), paths=["src"], full=False, ctx=ctx)
+        )
+
+    assert sync["files_processed"] == 1
+    assert indexer.call_args.kwargs["ctx"] is ctx
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch(
+            "codesteer_atlas.server._spawn_index_subprocess",
+            return_value={"status": "started", "pid": 42, "log_path": "run.log"},
+        ) as spawn,
+        patch("codesteer_atlas.server.index_workspace") as indexer,
+    ):
+        async_result = json.loads(
+            atlas_index(workspace=str(tmp_path), paths=["src"], full=True, ctx=ctx)
+        )
+
+    assert async_result["status"] == "started"
+    indexer.assert_not_called()
+    spawn.assert_called_once_with(tmp_path.resolve(), ["src"], True)
+
+
+def test_cli_e_watcher_delegam_sem_ctx_e_com_assinatura_exata(tmp_path):
+    """Superfícies sem contexto não conseguem serializar ou encaminhar ``ctx``."""
+    from click.testing import CliRunner
+
+    from codesteer_atlas.indexer import cli
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / "index"
+    with patch(
+        "codesteer_atlas.indexer.index_workspace", return_value=_server_stats()
+    ) as cli_indexer:
+        result = CliRunner().invoke(
+            cli,
+            [
+                "--workspace",
+                str(workspace),
+                "--index-dir",
+                str(index_dir),
+                "--paths",
+                "src",
+                "--full",
+                "--quiet",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    cli_indexer.assert_called_once_with(
+        workspace.resolve(),
+        index_dir.resolve(),
+        paths=["src"],
+        full=True,
+        report_progress=False,
+    )
+
+    with patch(
+        "codesteer_atlas.server._spawn_index_subprocess",
+        return_value={"status": "started", "pid": 42, "log_path": "run.log"},
+    ) as watcher_spawn:
+        _watch_spawn_reindex(workspace)
+
+    watcher_spawn.assert_called_once_with(workspace, paths=None, full=False)
+
+
+def test_atlas_index_sync_exercita_ctx_sample_e_mantem_stdout_limpo(tmp_path, monkeypatch, capsys):
+    """A superfície sync chama sampling; o caminho full continua subprocessado."""
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    class FakeContext:
+        def __init__(self):
+            self.calls = []
+
+        def sample(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(text="propósito via sampling", result="auxiliar")
+
+    ctx = FakeContext()
+    monkeypatch.setenv("ATLAS_SEMANTIC", "1")
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path / "index"),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=lambda texts, **_kwargs: [[0.1] * 384 for _ in texts]),
+        patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha"),
+    ):
+        result = json.loads(
+            atlas_index(workspace=str(workspace), paths=["src"], full=False, ctx=ctx)
+        )
+
+    assert ctx.calls
+    assert result["semantic_status"] in {"ok", "partial"}
+    assert result["semantic_origins"] == ["sampling"]
+    assert capsys.readouterr().out == ""
+
+
+def test_atlas_search_semantic_warning_nao_vaza_para_stdout(capsys):
+    """Warning do braço semântico chega no JSON sem contaminar o stdout MCP."""
+    result = _search_with_outcome(
+        SearchOutcome(results=[_DEGRADED_RESULT], warnings=["semantic_arm_unavailable"])
+    )
+    captured = capsys.readouterr()
+
+    assert result["warnings"] == ["semantic_arm_unavailable"]
+    assert captured.out == ""
