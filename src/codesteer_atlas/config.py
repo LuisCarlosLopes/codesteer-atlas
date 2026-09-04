@@ -324,3 +324,42 @@ IMPORT_RESOLUTION_TIERS: dict[str, frozenset[str]] = {
         }
     ),
 }
+
+# ---------------------------------------------------------------------------
+# Fase 5.1 — arqueologia de Git (história local bounded, ancorada por `touches`)
+# ---------------------------------------------------------------------------
+
+# Teto aprovado da janela histórica: o primeiro limite atingido prevalece.
+# Configuração só pode REDUZIR estes valores (V01-V03 do TSD).
+GIT_HISTORY_MAX_COMMITS_PER_FILE = 100
+GIT_HISTORY_MAX_MONTHS = 24
+
+# Artefatos locais da camada histórica. O ponteiro fica ao lado do manifest e
+# nomeia a geração ativa; tabelas de staging usam o mesmo prefixo com outro id.
+GIT_HISTORY_POINTER_FILENAME = "history.json"
+GIT_HISTORY_TABLE_PREFIX = "commits_"
+GIT_HISTORY_VERSION = "1.0"
+
+# Teto de leitura do Git em subprocesso, no padrão de `get_git_head_sha`.
+GIT_HISTORY_TIMEOUT_S = 60
+
+
+def resolve_git_history_window(
+    max_commits: int | None = None, max_months: int | None = None
+) -> tuple[int, int]:
+    """
+    Janela efetiva (commits por arquivo, meses). Recusa override acima do teto
+    aprovado em vez de silenciosamente ampliá-lo [V01-V03].
+    """
+    commits = GIT_HISTORY_MAX_COMMITS_PER_FILE if max_commits is None else int(max_commits)
+    months = GIT_HISTORY_MAX_MONTHS if max_months is None else int(max_months)
+    if commits < 1 or commits > GIT_HISTORY_MAX_COMMITS_PER_FILE:
+        raise ValueError(
+            "A janela histórica aceita de 1 a "
+            f"{GIT_HISTORY_MAX_COMMITS_PER_FILE} commits por arquivo."
+        )
+    if months < 1 or months > GIT_HISTORY_MAX_MONTHS:
+        raise ValueError(
+            f"A janela histórica aceita de 1 a {GIT_HISTORY_MAX_MONTHS} meses."
+        )
+    return commits, months

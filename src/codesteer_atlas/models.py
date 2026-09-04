@@ -82,6 +82,28 @@ class IndexManifest(BaseModel):
     )
 
 
+class CommitRecord(BaseModel):
+    """
+    Registro histórico de um commit local (F5.1). Vive na tabela histórica
+    dedicada, nunca em `chunks`: identidade lógica é `(repo, id)`, com `id`
+    sempre o SHA completo [ADR-009].
+    """
+
+    id: str = Field(..., description="SHA completo do commit")
+    repo: str = Field(..., description="Repositório ao qual o SHA pertence")
+    subject: str = Field(..., description="Assunto da mensagem")
+    body: str = Field("", description="Corpo da mensagem, vazio quando ausente")
+    authored_at: str = Field(..., description="Data de autoria em ISO-8601")
+    committed_at: str = Field(..., description="Data de commit em ISO-8601")
+    files_touched: List[str] = Field(
+        default_factory=list, description="Caminhos POSIX alterados, ordenados e únicos"
+    )
+    is_revert: bool = Field(False, description="Marca determinística de revert")
+    reverted_commit_id: Optional[str] = Field(
+        None, description="SHA declarado como revertido, quando a mensagem o informa"
+    )
+
+
 class SearchResult(BaseModel):
     """
     Representa um resultado retornado na busca híbrida.
@@ -97,6 +119,12 @@ class SearchResult(BaseModel):
     score: float
     repo: str
     references: List[str] = Field(default_factory=list)
+    # @MindDecision: extensão aditiva para a variante histórica (F5.1); em type="commit"
+    # os campos de localização ficam em sentinela e a associação vem de commit.files_touched.
+    type: str = Field("code", description="Tipo do resultado: 'code' | 'commit'")
+    commit: Optional[CommitRecord] = Field(
+        None, description="Registro histórico quando type='commit'"
+    )
     match_arms: List[str] = Field(
         default_factory=list,
         description="Braços da busca híbrida que recuperaram este chunk:"
@@ -121,7 +149,8 @@ class SearchOutcome(BaseModel):
         description="Códigos de degradação: 'vector_search_unavailable' |"
         " 'fts_unavailable' | 'cross_encoder_unavailable' |"
         " 'structural_arm_unavailable' | 'semantic_layer_unavailable' |"
-        " 'semantic_arm_unavailable'. Os resultados estruturais continuam disponíveis"
+        " 'semantic_arm_unavailable' | 'git_history_unavailable'. Os resultados estruturais"
+        " continuam disponíveis"
         " quando um aviso semântico aparece.",
     )
 
@@ -202,6 +231,12 @@ class IndexStats(BaseModel):
     semantic_egresses: List[str] = Field(
         default_factory=list, description="Egressos efetivamente usados na execução, sem credenciais"
     )
+    git_history_status: str = Field(
+        "unavailable",
+        description="Estado da publicação histórica (ok | partial | unavailable | empty)",
+    )
+    git_history_commits: int = Field(0, description="Commits no snapshot histórico ativo")
+    git_history_touches: int = Field(0, description="Relações touches do snapshot ativo")
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",
