@@ -137,6 +137,13 @@ def _enforce_context_budget(payload: dict, max_chars: int) -> None:
 
     sections = payload.get("sections")
     if isinstance(sections, dict):
+        # A história cede primeiro: o teto não pode custar fato estrutural (GA-06)
+        history = sections.get("recent_history")
+        while isinstance(history, list) and history and _serialized_len(payload) > max_chars:
+            history.pop()
+            _mark("recent_history")
+        if _serialized_len(payload) <= max_chars:
+            return
         for name in ("symbol", "layer", "brief_layer"):
             value = sections.get(name)
             if isinstance(value, dict) and value.pop("purpose", None) is not None:
@@ -407,6 +414,64 @@ def _adrs(graph: dict, node: dict) -> List[dict]:
     return items
 
 
+def _recent_history(
+    graph: dict, node: dict, history_lookup, history_state: Optional[dict]
+) -> Tuple[List[dict], List[str]]:
+    """
+    Projeta os commits ligados ao alvo por `touches` (RF04).
+
+    @MindSpec: Output ([{commit, via, via_location?, stale}], warnings)
+    @MindWhy: lookup pontual pelos vizinhos do grafo — o contexto não varre LanceDB
+    nem lê Git; elegibilidade e janela são decididas na indexação [GA-02].
+    """
+    state = str((history_state or {}).get("state") or "absent")
+    if state == "absent" or not callable(history_lookup):
+        return [], ["git_history_unavailable"]
+
+    reverse = graph.get("_reverse_adjacency") or {}
+    nodes_by_id = graph.get("_nodes_by_id") or {}
+    evidence: Dict[str, dict] = {}
+    for seed_id in _seed_ids(graph, node):
+        for neighbor_id, kind, edge in reverse.get(seed_id, []):
+            if kind != "touches" or neighbor_id in evidence:
+                continue
+            target = nodes_by_id.get(seed_id) or {}
+            evidence[neighbor_id] = _via_location(target, edge) or {}
+
+    keys = []
+    for commit_id in evidence:
+        parts = commit_id.split(":", 2)
+        if len(parts) == 3:
+            keys.append((parts[1], parts[2]))
+
+    items: List[dict] = []
+    for record, row_stale in history_lookup(keys):
+        commit_id = f"commit:{record.repo}:{record.id}"
+        item = {
+            "commit": record.model_dump(),
+            "via": "touches",
+            "stale": bool(row_stale) or state == "unavailable",
+        }
+        location = evidence.get(commit_id)
+        if location:
+            item["via_location"] = location
+        items.append(item)
+
+    items.sort(key=lambda item: item["commit"]["id"])
+    items.sort(key=lambda item: item["commit"]["committed_at"], reverse=True)
+
+    warnings: List[str] = []
+    if state == "unavailable":
+        warnings.append("git_history_unavailable")
+    elif state == "partial":
+        warnings.append("git_history_partial")
+    elif not items:
+        warnings.append("git_history_empty")
+    if items and any(item["stale"] for item in items):
+        warnings.append("git_history_stale")
+    return items, warnings
+
+
 def build_context(
     graph: dict,
     *,
@@ -418,6 +483,8 @@ def build_context(
     semantic_ready: bool = False,
     semantic_sidecar: Optional[dict] = None,
     purpose_lookup=None,
+    history_lookup=None,
+    history_state: Optional[dict] = None,
 ) -> dict:
     intent = (intent or "").strip()
     if intent not in VALID_INTENTS:
@@ -455,13 +522,16 @@ def build_context(
             "rationale": neighborhood.get("rationale") or [],
         }
     elif intent == "debug":
-        warnings.append("git_history_unavailable")
+        recent_history, history_warnings = _recent_history(
+            graph, node, history_lookup, history_state
+        )
+        warnings.extend(history_warnings)
         warnings.append("error_path_unavailable")
         sections = {
             "symbol": _node_summary(node),
             "call_chain_to_entrypoints": _call_chain_to_entrypoints(graph, node, brief),
             "error_handling": [],
-            "recent_history": [],
+            "recent_history": recent_history,
         }
     elif intent == "review":
         warnings.append("diff_unavailable")
