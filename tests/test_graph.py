@@ -1096,3 +1096,112 @@ def test_apply_scip_result_nao_persiste_indices_de_consulta_nem_altera_hubs(tmp_
     assert degrees["sym:src/a.py#caller"] == 1
     assert degrees["sym:src/b.py#target"] == 1
     assert degrees["file:src/a.py"] == 1  # só o `imports`
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F5.1 — projeção histórica: nós commit e arestas touches
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _commit_row(sha="a" * 40, subject="feat: ajusta run", touches=None):
+    return {
+        "id": sha,
+        "repo": "test-project",
+        "subject": subject,
+        "touches": touches
+        if touches is not None
+        else [
+            {"file_path": "pkg/a.py", "scope_name": "run"},
+            {"file_path": "pkg/b.py", "scope_name": "call_run"},
+        ],
+    }
+
+
+def _graph_com_historico(temp_storage, rows):
+    from codesteer_atlas.graph import apply_history
+
+    manifest = _make_base_graph_index(temp_storage)
+    build_and_write(temp_storage, manifest, temp_storage.index_dir)
+    graph_path, _metadata = apply_history(temp_storage.index_dir, rows)
+    _clear_graph_cache()
+    return json.loads(graph_path.read_text(encoding="utf-8"))
+
+
+def test_commit_multiarquivo_gera_um_unico_no(temp_storage):
+    """CA02: um commit que alterou vários arquivos tem um nó lógico só."""
+    graph = _graph_com_historico(temp_storage, [_commit_row()])
+
+    commits = [node for node in graph["nodes"] if node["kind"] == "commit"]
+    assert len(commits) == 1
+    assert commits[0]["id"] == "commit:test-project:" + "a" * 40
+    assert commits[0]["file_path"] is None and commits[0]["lines"] is None
+
+
+def test_touches_unica_por_simbolo_com_intervalo_atual(temp_storage):
+    """CA03/CA15: várias alterações no mesmo símbolo não duplicam a aresta."""
+    duplicado = _commit_row(
+        touches=[
+            {"file_path": "pkg/a.py", "scope_name": "run"},
+            {"file_path": "pkg/a.py", "scope_name": "run"},
+            {"file_path": "pkg/a.py", "scope_name": "inexistente"},
+        ]
+    )
+    graph = _graph_com_historico(temp_storage, [duplicado])
+
+    touches = [edge for edge in graph["edges"] if edge["kind"] == "touches"]
+    assert len(touches) == 1
+    assert touches[0]["target"] == "sym:pkg/a.py#run"
+    assert touches[0]["location"] == {"file_path": "pkg/a.py", "lines": [1, 8]}
+
+
+def test_explain_agrupa_commits_e_path_atravessa_touches(temp_storage):
+    """CA05: vizinhança e caminho reconhecem a relação histórica."""
+    _graph_com_historico(temp_storage, [_commit_row()])
+    graph = load_graph(temp_storage.index_dir)
+
+    vizinhanca = explain(graph, "sym:pkg/a.py#run")
+    assert [item["id"] for item in vizinhanca["neighbors"]["commit"]] == [
+        "commit:test-project:" + "a" * 40
+    ]
+    assert vizinhanca["neighbors"]["commit"][0]["edge_kind"] == "touches"
+
+    caminho = bfs_path(graph, "sym:pkg/a.py#run", "commit:test-project:" + "a" * 40)
+    assert caminho["found"] is True
+    assert caminho["path"][0]["edge_kind_to_next"] == "touches"
+
+
+def test_affected_e_hubs_ignoram_a_camada_historica(temp_storage):
+    """CA19/GA-05: história é consultável, mas não é dependência de código."""
+    _graph_com_historico(temp_storage, [_commit_row()])
+    graph = load_graph(temp_storage.index_dir)
+
+    impacto = affected(graph, "sym:pkg/a.py#run")
+    assert all(item["kind"] != "commit" for item in impacto["items"])
+    assert all(item["via"] in {"calls", "imports"} for item in impacto["items"])
+
+    assert all(item["kind"] != "commit" for item in hubs(graph, top_n=25))
+    assert all(
+        item["id"] != "commit:test-project:" + "a" * 40
+        for item in graph["metrics"]["top_hubs"]
+    )
+
+def test_touches_nao_altera_o_grau_do_simbolo(temp_storage):
+    """GA-05: `touches` fica fora do grau, que alimenta hubs e brief."""
+    manifest = _make_base_graph_index(temp_storage)
+    graph_path = build_and_write(temp_storage, manifest, temp_storage.index_dir)
+    _clear_graph_cache()
+    antes = json.loads(graph_path.read_text(encoding="utf-8"))
+    grau_antes = next(
+        node["degree"] for node in antes["nodes"] if node["id"] == "sym:pkg/a.py#run"
+    )
+
+    from codesteer_atlas.graph import apply_history
+
+    graph_path, _metadata = apply_history(temp_storage.index_dir, [_commit_row()])
+    _clear_graph_cache()
+    depois = json.loads(graph_path.read_text(encoding="utf-8"))
+    grau_depois = next(
+        node["degree"] for node in depois["nodes"] if node["id"] == "sym:pkg/a.py#run"
+    )
+
+    assert grau_depois == grau_antes

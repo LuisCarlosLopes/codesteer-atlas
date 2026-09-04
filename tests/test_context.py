@@ -333,3 +333,293 @@ def test_understand_remove_prosa_semantica_antes_da_quota(tmp_path, monkeypatch)
     assert "purpose" not in json.dumps(payload["sections"]["symbol"], ensure_ascii=False)
     assert "file_summary" not in payload["sections"]
     assert payload["sections"]["layer"]["path"] == "pkg"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F5.1 — recent_history no intent debug
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _commit_node(sha, subject="feat: ajusta run"):
+    return {
+        "id": f"commit:demo:{sha}",
+        "kind": "commit",
+        "label": subject,
+        "file_path": None,
+        "lines": None,
+        "degree": 0,
+    }
+
+
+def _commit_record(sha, committed_at="2026-08-30T12:05:00+00:00", **overrides):
+    from codesteer_atlas.models import CommitRecord
+
+    payload = {
+        "id": sha,
+        "repo": "demo",
+        "subject": "feat: ajusta run",
+        "body": "Detalhe da mudança.",
+        "authored_at": committed_at,
+        "committed_at": committed_at,
+        "files_touched": ["pkg/a.py"],
+        "is_revert": False,
+        "reverted_commit_id": None,
+    }
+    payload.update(overrides)
+    return CommitRecord(**payload)
+
+
+def _history_graph(tmp_path, shas, state="ok", stale_shas=()):
+    """Grafo com `touches` do alvo `run` e o lookup pontual correspondente."""
+    extra_nodes = [_commit_node(sha) for sha in shas]
+    extra_edges = [
+        {
+            "source": f"commit:demo:{sha}",
+            "target": "sym:pkg/a.py#run",
+            "kind": "touches",
+            "location": {"file_path": "pkg/a.py", "lines": [1, 8]},
+        }
+        for sha in shas
+    ]
+    graph, manifest, run = _base_graph(
+        tmp_path, extra_nodes=extra_nodes, extra_edges=extra_edges
+    )
+
+    def _lookup(keys):
+        wanted = {sha for _repo, sha in keys}
+        return [
+            (
+                _commit_record(sha, committed_at=f"2026-08-{20 + index:02d}T12:00:00+00:00"),
+                sha in stale_shas,
+            )
+            for index, sha in enumerate(shas)
+            if sha in wanted
+        ]
+
+    return graph, manifest, run, _lookup, {"state": state}
+
+
+def test_recent_history_so_aparece_no_intent_debug(tmp_path):
+    """CA04/GA-06: os demais intents não recebem dado de commit algum."""
+    graph, manifest, run, lookup, state = _history_graph(tmp_path, ["a" * 40])
+
+    debug = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=lookup,
+        history_state=state,
+    )
+    assert debug["sections"]["recent_history"][0]["commit"]["id"] == "a" * 40
+    assert debug["sections"]["recent_history"][0]["via"] == "touches"
+    assert debug["sections"]["recent_history"][0]["via_location"] == {
+        "file_path": "pkg/a.py",
+        "lines": [1, 8],
+    }
+    assert "git_history_unavailable" not in debug["warnings"]
+
+    for intent in ("edit", "review", "understand"):
+        payload = build_context(
+            graph,
+            target=run["id"],
+            intent=intent,
+            manifest=manifest,
+            history_lookup=lookup,
+            history_state=state,
+        )
+        assert "recent_history" not in payload["sections"]
+        assert "commit" not in json.dumps(payload["sections"])
+
+
+def test_recent_history_ordena_por_data_desc_e_sha_asc(tmp_path):
+    """CA04: ordenação determinística, com SHA crescente no empate de data."""
+    shas = ["c" * 40, "a" * 40, "b" * 40]
+    extra_nodes = [_commit_node(sha) for sha in shas]
+    extra_edges = [
+        {
+            "source": f"commit:demo:{sha}",
+            "target": "sym:pkg/a.py#run",
+            "kind": "touches",
+            "location": {"file_path": "pkg/a.py", "lines": [1, 8]},
+        }
+        for sha in shas
+    ]
+    graph, manifest, run = _base_graph(
+        tmp_path, extra_nodes=extra_nodes, extra_edges=extra_edges
+    )
+    datas = {
+        "a" * 40: "2026-08-30T12:00:00+00:00",
+        "b" * 40: "2026-08-30T12:00:00+00:00",
+        "c" * 40: "2026-08-31T12:00:00+00:00",
+    }
+
+    def _lookup(keys):
+        return [(_commit_record(sha, committed_at=datas[sha]), False) for _repo, sha in keys]
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=_lookup,
+        history_state={"state": "ok"},
+    )
+
+    assert [item["commit"]["id"] for item in payload["sections"]["recent_history"]] == [
+        "c" * 40,
+        "a" * 40,
+        "b" * 40,
+    ]
+
+
+def test_debug_declara_git_history_empty_quando_alvo_nao_tem_ancora(tmp_path):
+    """CA11/CA17: camada legível sem commit ancorado no alvo não é falha."""
+    graph, manifest, run = _base_graph(tmp_path)
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=lambda keys: [],
+        history_state={"state": "ok"},
+    )
+
+    assert payload["sections"]["recent_history"] == []
+    assert "git_history_empty" in payload["warnings"]
+    assert "git_history_unavailable" not in payload["warnings"]
+
+
+def test_debug_sem_camada_historica_declara_indisponivel(tmp_path):
+    """CA09: sem conjunto anterior, lista vazia e só `git_history_unavailable`."""
+    graph, manifest, run = _base_graph(tmp_path)
+
+    payload = build_context(graph, target=run["id"], intent="debug", manifest=manifest)
+
+    assert payload["sections"]["recent_history"] == []
+    assert "git_history_unavailable" in payload["warnings"]
+    assert "git_history_stale" not in payload["warnings"]
+
+
+def test_debug_falha_total_retorna_conjunto_anterior_stale(tmp_path):
+    """CA09: com conjunto anterior, os itens voltam marcados como stale."""
+    graph, manifest, run, lookup, _state = _history_graph(tmp_path, ["a" * 40])
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=lookup,
+        history_state={"state": "unavailable"},
+    )
+
+    assert payload["sections"]["recent_history"][0]["stale"] is True
+    assert "git_history_unavailable" in payload["warnings"]
+    assert "git_history_stale" in payload["warnings"]
+
+
+def test_debug_falha_parcial_mistura_confirmado_e_preservado(tmp_path):
+    """CA10: confirmado com stale=false, preservado com stale=true e ambos declarados."""
+    graph, manifest, run, lookup, _state = _history_graph(
+        tmp_path, ["a" * 40, "b" * 40], stale_shas={"b" * 40}
+    )
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=lookup,
+        history_state={"state": "partial"},
+    )
+
+    stale_por_sha = {
+        item["commit"]["id"]: item["stale"] for item in payload["sections"]["recent_history"]
+    }
+    assert stale_por_sha == {"a" * 40: False, "b" * 40: True}
+    assert "git_history_partial" in payload["warnings"]
+    assert "git_history_stale" in payload["warnings"]
+
+
+def test_debug_target_invalido_mantem_o_erro_atual(tmp_path):
+    """CA08: falha de resolução do alvo não é substituída pela seção histórica."""
+    graph, manifest, _run, lookup, state = _history_graph(tmp_path, ["a" * 40])
+
+    for alvo in ("", "não-existe"):
+        with pytest.raises(ValueError):
+            build_context(
+                graph,
+                target=alvo,
+                intent="debug",
+                manifest=manifest,
+                history_lookup=lookup,
+                history_state=state,
+            )
+
+
+def test_teto_corta_recent_history_antes_dos_fatos_estruturais(tmp_path, monkeypatch):
+    """CA12: sob o teto global, a história cede primeiro e o corte é declarado."""
+    monkeypatch.setattr("codesteer_atlas.context.CONTEXT_RESPONSE_MAX_CHARS", 1200)
+    shas = [f"{index:040d}" for index in range(12)]
+    graph, manifest, run, lookup, state = _history_graph(tmp_path, shas)
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=lookup,
+        history_state=state,
+    )
+
+    assert payload["sections"]["symbol"]["id"] == run["id"]
+    assert len(payload["sections"]["recent_history"]) < len(shas)
+    assert payload["truncated"]["recent_history"] >= 1
+    assert "truncated_for_budget" in payload["warnings"]
+    assert len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False)) <= 1200
+
+
+def test_recent_history_expoe_revert_marcado(tmp_path):
+    """CA06/CA16: a marcação de revert chega ao debug com e sem SHA declarado."""
+    shas = ["a" * 40, "b" * 40]
+    graph, manifest, run, _lookup, state = _history_graph(tmp_path, shas)
+
+    def _lookup(keys):
+        return [
+            (
+                _commit_record(
+                    "a" * 40,
+                    subject='Revert "feat: ajusta run"',
+                    is_revert=True,
+                    reverted_commit_id="0123456",
+                ),
+                False,
+            ),
+            (
+                _commit_record(
+                    "b" * 40,
+                    subject='Revert "feat: outro"',
+                    is_revert=True,
+                    reverted_commit_id=None,
+                ),
+                False,
+            ),
+        ]
+
+    payload = build_context(
+        graph,
+        target=run["id"],
+        intent="debug",
+        manifest=manifest,
+        history_lookup=_lookup,
+        history_state=state,
+    )
+    reverts = {
+        item["commit"]["id"]: item["commit"]["reverted_commit_id"]
+        for item in payload["sections"]["recent_history"]
+    }
+
+    assert reverts == {"a" * 40: "0123456", "b" * 40: None}
+    assert all(item["commit"]["is_revert"] for item in payload["sections"]["recent_history"])

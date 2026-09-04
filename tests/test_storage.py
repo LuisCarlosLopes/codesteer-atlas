@@ -1468,3 +1468,159 @@ def test_falha_so_do_semantic_preserva_resultados_e_avisa(temp_storage, monkeypa
     assert "semantic_arm_unavailable" in outcome.warnings
     assert outcome.results
     assert all("semantic" not in result.match_arms for result in outcome.results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F5.1 — camada histórica: tabela dedicada, snapshot ativo e recuperação tipada
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _commit_record(sha="a" * 40, subject="Corrige resolução de imports", **overrides):
+    record = {
+        "id": sha,
+        "repo": "test-project",
+        "subject": subject,
+        "body": "Preserva a resolução relativa em pacotes aninhados.",
+        "authored_at": "2026-08-30T12:00:00+00:00",
+        "committed_at": "2026-08-30T12:05:00+00:00",
+        "files_touched": ["src/main.py", "src/utils.py"],
+        "touches": [
+            {"file_path": "src/main.py", "scope_name": "main"},
+            {"file_path": "src/main.py", "scope_name": "main"},
+        ],
+        "is_revert": False,
+        "reverted_commit_id": None,
+        "vector": MOCK_VECTOR,
+    }
+    record.update(overrides)
+    return record
+
+
+def test_history_nao_toca_a_tabela_chunks(temp_storage):
+    """GA-01: commit vive em tabela própria; o schema de chunks segue intacto."""
+    import lancedb
+
+    from codesteer_atlas.storage import _table_names
+
+    _seed_two_chunks(temp_storage)
+    schema_antes = lancedb.connect(str(temp_storage.db_path)).open_table("chunks").schema
+
+    _publish_history(temp_storage, [_commit_record()])
+
+    db = lancedb.connect(str(temp_storage.db_path))
+    assert db.open_table("chunks").schema == schema_antes
+    assert db.open_table("chunks").count_rows() == 2
+    assert any(name.startswith("commits_") for name in _table_names(db))
+
+
+def test_history_staging_invisivel_ate_a_publicacao(temp_storage):
+    """ADR-010: geração não publicada não aparece em estado, lookup nem projeção."""
+    _seed_two_chunks(temp_storage)
+    snapshot_id = temp_storage.stage_history([_commit_record()])
+
+    assert temp_storage.get_history_state()["state"] == "absent"
+    assert temp_storage.lookup_commits([("test-project", "a" * 40)]) == []
+    assert temp_storage.get_history_projection() == []
+
+    temp_storage.publish_history(snapshot_id)
+
+    assert temp_storage.get_history_state()["state"] == "ok"
+    (record, stale) = temp_storage.lookup_commits([("test-project", "a" * 40)])[0]
+    assert record.id == "a" * 40
+    assert record.files_touched == ["src/main.py", "src/utils.py"]
+    assert stale is False
+
+
+def test_history_falha_antes_de_ativar_preserva_o_snapshot_anterior(temp_storage):
+    """GA-08: uma geração candidata não publicada não substitui a ativa."""
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record()])
+    ativo = temp_storage.read_history_pointer()
+
+    temp_storage.stage_history([_commit_record(sha="b" * 40, subject="outro")])
+
+    assert temp_storage.read_history_pointer() == ativo
+    assert [row["id"] for row in temp_storage.get_history_projection()] == ["a" * 40]
+
+    # GC roda depois da publicação e nunca remove a geração ativa
+    temp_storage.gc_history()
+    assert temp_storage.get_history_state()["state"] == "ok"
+
+
+def test_search_hybrid_sem_camada_historica_avisa_e_preserva_o_codigo(temp_storage):
+    """GA-009-07: ausência da camada é declarada, sem alterar o resultado de código."""
+    _seed_two_chunks(temp_storage)
+
+    degradado = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+    _publish_history(temp_storage)
+    saudavel = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=5
+    )
+
+    assert degradado.warnings == ["git_history_unavailable"]
+    assert saudavel.warnings == []
+    assert [result.file_path for result in degradado.results] == [
+        result.file_path for result in saudavel.results
+    ]
+
+
+def test_search_hybrid_devolve_commit_tipado_sem_braco_graph(temp_storage):
+    """RF06: resultado histórico é tipado, único por commit e nunca ganha `graph`."""
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record()])
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR,
+        query_text="resolução de imports",
+        filters={},
+        top_k=10,
+    )
+    commits = [result for result in outcome.results if result.type == "commit"]
+
+    assert len(commits) == 1
+    assert commits[0].language == "git"
+    assert commits[0].commit.id == "a" * 40
+    assert commits[0].file_path == "" and commits[0].start_line == 0
+    assert "graph" not in commits[0].match_arms
+    assert commits[0].match_arms
+
+
+def test_search_hybrid_commit_casa_path_prefix_por_arquivo_tocado(temp_storage):
+    """Um commit casa `path_prefix` quando algum arquivo tocado está sob o prefixo."""
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record()])
+
+    dentro = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR,
+        query_text="resolução de imports",
+        filters={"path_prefix": "src"},
+        top_k=10,
+    )
+    fora = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR,
+        query_text="resolução de imports",
+        filters={"path_prefix": "docs"},
+        top_k=10,
+    )
+
+    assert any(result.type == "commit" for result in dentro.results)
+    assert not any(result.type == "commit" for result in fora.results)
+
+
+def test_commit_sem_ancoragem_continua_recuperavel(temp_storage):
+    """CA17: sem interseção com símbolo atual o commit não some da busca."""
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record(touches=[])])
+
+    outcome = temp_storage.search_hybrid(
+        query_vector=MOCK_VECTOR,
+        query_text="resolução de imports",
+        filters={},
+        top_k=10,
+    )
+
+    commits = [result for result in outcome.results if result.type == "commit"]
+    assert [result.commit.id for result in commits] == ["a" * 40]
+    assert temp_storage.get_history_state()["touches"] == 0

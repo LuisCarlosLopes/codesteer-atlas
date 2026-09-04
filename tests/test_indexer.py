@@ -1605,3 +1605,210 @@ def test_rebuild_incremental_do_arquivo_alterado_derruba_suas_arestas_calls(
     # A declaração sobrevive ao rebuild: o índice não volta a se dizer sem SCIP
     assert graph["scip"]["status"] == "ok"
     assert graph["scip"]["head_sha"] == "sha-1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F5.1 — arqueologia de Git (janela, revert, ancoragem e degradação)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _git(workspace: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", *args],
+        cwd=str(workspace),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _git_workspace(tmp_path: Path) -> Path:
+    """Workspace real com dois commits: um cria os símbolos, outro reverte um deles."""
+    workspace = tmp_path / "gitws"
+    (workspace / "src").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(workspace))
+    _git(workspace, "config", "user.email", "dev@example.com")
+    _git(workspace, "config", "user.name", "Dev")
+
+    source = workspace / "src" / "a.py"
+    source.write_text("def run():\n    return 1\n\n\ndef helper():\n    return 2\n", encoding="utf-8")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-qm", "feat: adiciona run e helper")
+
+    source.write_text("def run():\n    return 42\n\n\ndef helper():\n    return 2\n", encoding="utf-8")
+    _git(workspace, "add", "-A")
+    _git(
+        workspace,
+        "commit",
+        "-qm",
+        'Revert "feat: adiciona run e helper"',
+        "-m",
+        "This reverts commit 0123456789abcdef0123456789abcdef01234567.",
+    )
+    return workspace
+
+
+def _index_git_workspace(workspace: Path, index_dir: Path):
+    with patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode):
+        return index_workspace(workspace, index_dir, report_progress=False)
+
+
+def test_history_indexa_commit_elegivel_e_ancora_nos_simbolos_atuais(tmp_path):
+    """CA01/CA03: mensagem completa recuperável e `touches` no símbolo intersectado."""
+    workspace = _git_workspace(tmp_path)
+    index_dir = tmp_path / "index"
+
+    stats = _index_git_workspace(workspace, index_dir)
+
+    assert stats.git_history_status == "ok"
+    assert stats.git_history_commits == 2
+    storage = StorageBackend(index_dir)
+    assert storage.get_history_state()["state"] == "ok"
+
+    records = {
+        record.subject: (record, stale)
+        for record, stale in storage.lookup_commits(
+            [(row["repo"], row["id"]) for row in storage.get_history_projection()]
+        )
+    }
+    criado = records["feat: adiciona run e helper"][0]
+    assert criado.files_touched == ["src/a.py"]
+    assert criado.is_revert is False
+
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    touches = [edge for edge in graph["edges"] if edge["kind"] == "touches"]
+    assert {edge["target"] for edge in touches} >= {"sym:src/a.py#run"}
+    assert all(edge["location"]["file_path"] == "src/a.py" for edge in touches)
+
+
+def test_history_marca_revert_canonico_com_e_sem_sha(tmp_path):
+    """CA06/CA16: revert só pelo formato canônico; SHA apenas quando declarado."""
+    from codesteer_atlas.indexer import _revert_marks
+
+    assert _revert_marks('Revert "feat: x"', "This reverts commit abc1234.") == (
+        True,
+        "abc1234",
+    )
+    assert _revert_marks('Revert "feat: x"', "") == (True, None)
+    assert _revert_marks("feat: x", "menciona revert mas não declara") == (False, None)
+
+
+def test_history_recusa_janela_acima_do_teto_aprovado():
+    """CA07: configuração acima do teto é inválida, nunca ampliada em silêncio."""
+    from codesteer_atlas.config import resolve_git_history_window
+
+    assert resolve_git_history_window() == (100, 24)
+    assert resolve_git_history_window(10, 3) == (10, 3)
+    with pytest.raises(ValueError):
+        resolve_git_history_window(max_commits=101)
+    with pytest.raises(ValueError):
+        resolve_git_history_window(max_months=25)
+
+
+def test_history_janela_inclui_limite_temporal_e_exclui_o_centesimo_primeiro():
+    """CA14: corte temporal inclusivo; o 101º commit do arquivo fica de fora."""
+    from datetime import datetime, timedelta, timezone
+
+    from codesteer_atlas.indexer import _select_history_window
+
+    cutoff = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    entries = [
+        {
+            "sha": f"{index:040d}",
+            "committed_dt": cutoff + timedelta(days=200 - index),
+            "files": ["src/a.py"],
+        }
+        for index in range(101)
+    ]
+    entries.append({"sha": "b" * 40, "committed_dt": cutoff, "files": ["src/a.py"]})
+    entries.append(
+        {"sha": "c" * 40, "committed_dt": cutoff - timedelta(seconds=1), "files": ["src/a.py"]}
+    )
+
+    selected = _select_history_window(entries, {"src/a.py"}, cutoff, max_commits=100)
+    shas = [entry["sha"] for entry in selected]
+
+    assert len(shas) == 100
+    assert f"{100:040d}" not in shas  # 101º do arquivo
+    assert "b" * 40 not in shas  # já fora da janela de quantidade
+    assert "c" * 40 not in shas  # anterior ao instante-limite
+
+
+def test_history_reindex_sem_mudanca_preserva_cardinalidade(tmp_path):
+    """CA18: repetir a indexação não duplica commits nem relações."""
+    workspace = _git_workspace(tmp_path)
+    index_dir = tmp_path / "index"
+
+    first = _index_git_workspace(workspace, index_dir)
+    second = _index_git_workspace(workspace, index_dir)
+
+    assert (first.git_history_commits, first.git_history_touches) == (
+        second.git_history_commits,
+        second.git_history_touches,
+    )
+    storage = StorageBackend(index_dir)
+    projection = storage.get_history_projection()
+    assert len({(row["repo"], row["id"]) for row in projection}) == len(projection)
+
+
+def test_history_sem_git_conclui_estrutural_e_nao_fabrica_stale(tmp_path):
+    """CA09 (sem conjunto anterior): estrutural conclui e nada stale é inventado."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    index_dir = tmp_path / "index"
+
+    stats = _index_git_workspace(workspace, index_dir)
+
+    assert stats.chunks_persisted >= 1
+    assert stats.git_history_status == "unavailable"
+    storage = StorageBackend(index_dir)
+    assert storage.get_history_state()["state"] == "absent"
+    assert storage.lookup_commits([("x", "y")]) == []
+
+
+def test_history_falha_total_apos_snapshot_preserva_o_ativo(tmp_path):
+    """A2/CA09: falha total depois de existir histórico preserva o conjunto anterior."""
+    workspace = _git_workspace(tmp_path)
+    index_dir = tmp_path / "index"
+    _index_git_workspace(workspace, index_dir)
+    storage = StorageBackend(index_dir)
+    antes = storage.get_history_projection()
+
+    with patch("codesteer_atlas.indexer._run_git", return_value=None):
+        stats = _index_git_workspace(workspace, index_dir)
+
+    assert stats.git_history_status == "unavailable"
+    assert stats.chunks_persisted >= 1
+    assert storage.get_history_state()["state"] == "unavailable"
+    assert storage.get_history_projection() == antes
+    graph = json.loads((index_dir / "graph.json").read_text(encoding="utf-8"))
+    assert [node for node in graph["nodes"] if node["kind"] == "commit"]
+
+
+def test_history_falha_parcial_preserva_evidencia_como_stale(tmp_path):
+    """A2/CA10: hunk não confirmado vira stale e a evidência anterior é preservada."""
+    workspace = _git_workspace(tmp_path)
+    index_dir = tmp_path / "index"
+    _index_git_workspace(workspace, index_dir)
+    storage = StorageBackend(index_dir)
+    antes = {row["id"]: row["touches_json"] for row in storage.get_history_projection()}
+
+    from codesteer_atlas.indexer import _run_git as real_run_git
+
+    def _falha_no_show(args, workspace_path):
+        if args and args[0] == "show":
+            return None
+        return real_run_git(args, workspace_path)
+
+    with patch("codesteer_atlas.indexer._run_git", side_effect=_falha_no_show):
+        stats = _index_git_workspace(workspace, index_dir)
+
+    assert stats.git_history_status == "partial"
+    assert storage.get_history_state()["state"] == "partial"
+    depois = storage.get_history_projection()
+    assert all(row["stale"] for row in depois)
+    assert {row["id"]: row["touches_json"] for row in depois} == antes

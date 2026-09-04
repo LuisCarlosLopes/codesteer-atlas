@@ -555,7 +555,12 @@ def build_context(
         sections = {
             "symbol": symbol,
             "layer": layer,
-            "neighbors": neighborhood.get("neighbors") or {},
+            # Vizinhança sem a camada histórica: só `debug` projeta commit (GA-06)
+            "neighbors": {
+                kind: items
+                for kind, items in (neighborhood.get("neighbors") or {}).items()
+                if kind != "commit"
+            },
             "brief_layer": dict(layer),
         }
         if semantic_enabled and semantic_ready:

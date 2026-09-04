@@ -2564,3 +2564,114 @@ def test_atlas_search_semantic_warning_nao_vaza_para_stdout(capsys):
 
     assert result["warnings"] == ["semantic_arm_unavailable"]
     assert captured.out == ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F5.1 — superfície MCP da camada histórica
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _commit_result(sha="a" * 40):
+    from codesteer_atlas.models import CommitRecord
+
+    return SearchResult(
+        file_path="",
+        start_line=0,
+        end_line=0,
+        scope_type="",
+        scope_name="",
+        language="git",
+        content="feat: ajusta run\n\nDetalhe da mudança.",
+        score=0.02,
+        repo="my-project",
+        type="commit",
+        match_arms=["vector", "fts"],
+        commit=CommitRecord(
+            id=sha,
+            repo="my-project",
+            subject="feat: ajusta run",
+            body="Detalhe da mudança.",
+            authored_at="2026-08-30T12:00:00+00:00",
+            committed_at="2026-08-30T12:05:00+00:00",
+            files_touched=["src/app.py"],
+            is_revert=False,
+            reverted_commit_id=None,
+        ),
+    )
+
+
+def _search_server_patches(outcome):
+    return (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch("codesteer_atlas.storage.StorageBackend.search_hybrid", return_value=outcome),
+    )
+
+
+def test_atlas_search_serializa_commit_sem_linhas_de_codigo():
+    """RF06: resultado histórico é tipado e não finge ser uma localização de símbolo."""
+    outcome = SearchOutcome(results=[_commit_result()])
+    exists, manifest, encode, search = _search_server_patches(outcome)
+
+    with exists, manifest, encode, search:
+        result = json.loads(atlas_search(query="ajusta run", include_content=True))
+
+    item = result["results"][0]
+    assert item["type"] == "commit"
+    assert item["language"] == "git"
+    assert item["commit"]["id"] == "a" * 40
+    assert item["commit"]["files_touched"] == ["src/app.py"]
+    assert "file_path" not in item and "lines" not in item and "symbol" not in item
+    assert item["content"].startswith("feat: ajusta run")
+    assert "graph" not in item["match_arms"]
+
+
+def test_atlas_search_commit_sem_include_content_omite_a_mensagem():
+    """`include_content` continua governando o conteúdo, inclusive o histórico."""
+    outcome = SearchOutcome(results=[_commit_result()])
+    exists, manifest, encode, search = _search_server_patches(outcome)
+
+    with exists, manifest, encode, search:
+        result = json.loads(atlas_search(query="ajusta run"))
+
+    assert "content" not in result["results"][0]
+    assert result["results"][0]["commit"]["subject"] == "feat: ajusta run"
+
+
+def test_atlas_search_declara_git_history_unavailable():
+    """Princípio VI: a degradação da camada histórica chega ao chamador."""
+    outcome = SearchOutcome(results=[], warnings=["git_history_unavailable"])
+    exists, manifest, encode, search = _search_server_patches(outcome)
+
+    with exists, manifest, encode, search:
+        result = json.loads(atlas_search(query="ajusta run"))
+
+    assert result["warnings"] == ["git_history_unavailable"]
+
+
+def test_atlas_context_debug_entrega_lookup_e_estado_historico(tmp_path):
+    """O servidor só serializa: quem projeta `recent_history` é o context."""
+    capturado = {}
+
+    def _fake_build_context(graph, **kwargs):
+        capturado.update(kwargs)
+        return {"target": {"id": "sym:src/app.py#run"}, "intent": "debug", "sections": {}}
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_history_state",
+            return_value={"state": "ok", "commits": 3},
+        ),
+        patch("codesteer_atlas.server.load_graph", return_value={"nodes": [], "edges": []}),
+        patch("codesteer_atlas.server.load_brief", return_value=None),
+        patch("codesteer_atlas.server.load_semantic_sidecar", return_value=None),
+        patch("codesteer_atlas.server.build_context", side_effect=_fake_build_context),
+    ):
+        json.loads(atlas_context(target="run", intent="debug"))
+
+    assert capturado["history_state"] == {"state": "ok", "commits": 3}
+    assert capturado["history_lookup"].__name__ == "lookup_commits"
