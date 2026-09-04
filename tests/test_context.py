@@ -369,10 +369,17 @@ def _commit_record(sha, committed_at="2026-08-30T12:05:00+00:00", **overrides):
     return CommitRecord(**payload)
 
 
-def _history_graph(tmp_path, shas, state="ok", stale_shas=()):
+def _history_warnings(payload):
+    """Conjunto EXATO de avisos da camada histórica declarados no pacote."""
+    return sorted(w for w in payload["warnings"] if w.startswith("git_history_"))
+
+
+def _history_graph(
+    tmp_path, shas, state="ok", stale_shas=(), extra_files=None, extra_nodes=None, extra_edges=None
+):
     """Grafo com `touches` do alvo `run` e o lookup pontual correspondente."""
-    extra_nodes = [_commit_node(sha) for sha in shas]
-    extra_edges = [
+    nodes = [_commit_node(sha) for sha in shas] + list(extra_nodes or [])
+    edges = [
         {
             "source": f"commit:demo:{sha}",
             "target": "sym:pkg/a.py#run",
@@ -380,9 +387,9 @@ def _history_graph(tmp_path, shas, state="ok", stale_shas=()):
             "location": {"file_path": "pkg/a.py", "lines": [1, 8]},
         }
         for sha in shas
-    ]
+    ] + list(extra_edges or [])
     graph, manifest, run = _base_graph(
-        tmp_path, extra_nodes=extra_nodes, extra_edges=extra_edges
+        tmp_path, extra_files=extra_files, extra_nodes=nodes, extra_edges=edges
     )
 
     def _lookup(keys):
@@ -487,8 +494,7 @@ def test_debug_declara_git_history_empty_quando_alvo_nao_tem_ancora(tmp_path):
     )
 
     assert payload["sections"]["recent_history"] == []
-    assert "git_history_empty" in payload["warnings"]
-    assert "git_history_unavailable" not in payload["warnings"]
+    assert _history_warnings(payload) == ["git_history_empty"]
 
 
 def test_debug_sem_camada_historica_declara_indisponivel(tmp_path):
@@ -498,8 +504,8 @@ def test_debug_sem_camada_historica_declara_indisponivel(tmp_path):
     payload = build_context(graph, target=run["id"], intent="debug", manifest=manifest)
 
     assert payload["sections"]["recent_history"] == []
-    assert "git_history_unavailable" in payload["warnings"]
-    assert "git_history_stale" not in payload["warnings"]
+    # Igualdade de conjunto: é o que torna os quatro estados mutuamente exclusivos
+    assert _history_warnings(payload) == ["git_history_unavailable"]
 
 
 def test_debug_falha_total_retorna_conjunto_anterior_stale(tmp_path):
@@ -516,8 +522,7 @@ def test_debug_falha_total_retorna_conjunto_anterior_stale(tmp_path):
     )
 
     assert payload["sections"]["recent_history"][0]["stale"] is True
-    assert "git_history_unavailable" in payload["warnings"]
-    assert "git_history_stale" in payload["warnings"]
+    assert _history_warnings(payload) == ["git_history_stale", "git_history_unavailable"]
 
 
 def test_debug_falha_parcial_mistura_confirmado_e_preservado(tmp_path):
@@ -539,8 +544,9 @@ def test_debug_falha_parcial_mistura_confirmado_e_preservado(tmp_path):
         item["commit"]["id"]: item["stale"] for item in payload["sections"]["recent_history"]
     }
     assert stale_por_sha == {"a" * 40: False, "b" * 40: True}
-    assert "git_history_partial" in payload["warnings"]
-    assert "git_history_stale" in payload["warnings"]
+    # `partial` não pode ser conflacionado com `unavailable`: a diferença entre
+    # CA09 e CA10 é exatamente o conjunto, não a presença de um warning
+    assert _history_warnings(payload) == ["git_history_partial", "git_history_stale"]
 
 
 def test_debug_target_invalido_mantem_o_erro_atual(tmp_path):
@@ -560,24 +566,47 @@ def test_debug_target_invalido_mantem_o_erro_atual(tmp_path):
 
 
 def test_teto_corta_recent_history_antes_dos_fatos_estruturais(tmp_path, monkeypatch):
-    """CA12: sob o teto global, a história cede primeiro e o corte é declarado."""
+    """
+    CA12/GA-06: sob o teto global, a história cede ANTES de qualquer fato
+    estrutural. A fixture povoa `call_chain_to_entrypoints` de propósito — sem
+    fato estrutural nenhum a precedência seria inobservável.
+    """
     monkeypatch.setattr("codesteer_atlas.context.CONTEXT_RESPONSE_MAX_CHARS", 1200)
     shas = [f"{index:040d}" for index in range(12)]
-    graph, manifest, run, lookup, state = _history_graph(tmp_path, shas)
+    graph, manifest, run, lookup, state = _history_graph(
+        tmp_path,
+        shas,
+        extra_files=["pkg/entry.py"],
+        extra_nodes=[_file_node("pkg/entry.py", degree=1)],
+        extra_edges=[
+            {"source": "file:pkg/entry.py", "target": "file:pkg/a.py", "kind": "imports"}
+        ],
+    )
+    brief = {"entrypoints": [{"file_path": "pkg/entry.py"}]}
 
     payload = build_context(
         graph,
         target=run["id"],
         intent="debug",
         manifest=manifest,
+        brief=brief,
         history_lookup=lookup,
         history_state=state,
     )
 
-    assert payload["sections"]["symbol"]["id"] == run["id"]
+    # Pré-condição: há fato estrutural a ser poupado
+    cadeia = payload["sections"]["call_chain_to_entrypoints"]
+    assert len(cadeia) == 2
+    assert [item["id"] for item in cadeia] == ["file:pkg/entry.py", "file:pkg/a.py"]
+
+    # A história cedeu…
     assert len(payload["sections"]["recent_history"]) < len(shas)
     assert payload["truncated"]["recent_history"] >= 1
     assert "truncated_for_budget" in payload["warnings"]
+    # …e nenhum fato estrutural cedeu junto — é isto que M10 viola
+    assert payload["sections"]["symbol"]["id"] == run["id"]
+    assert "symbol" not in payload["truncated"]
+    assert "call_chain_to_entrypoints" not in payload["truncated"]
     assert len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False)) <= 1200
 
 

@@ -165,12 +165,16 @@ def _run_git(args: List[str], workspace_path: Path) -> Optional[str]:
     )
     try:
         result = subprocess.run(
-            ["git", *args],
+            # `core.quotePath=false` é local à invocação: sem ele o git escapa caminho
+            # não-ASCII em octal e o literal nunca casa `manifest_files`/`symbols_by_file`,
+            # perdendo o commit em silêncio. `encoding` fixo evita mojibake no locale ANSI.
+            ["git", "-c", "core.quotePath=false", *args],
             cwd=str(workspace_path),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             errors="replace",
             check=True,
             timeout=GIT_HISTORY_TIMEOUT_S,
@@ -1047,7 +1051,13 @@ def _index_workspace_locked(
         else:
             snapshot_id = stage_git_history(storage, git_history["records"])
             history_rows = git_history["records"]
-        apply_history(index_path, history_rows)
+        # Curto-circuito: sem projeção nova E sem snapshot ativo, `apply_history`
+        # seria uma reescrita byte-idêntica de graph.json + graph.html (~1,7 MB
+        # neste repo) — custo que anulava parte do ganho do caminho incremental
+        # para quem não usa a camada. `read_history_pointer()` é a guarda barata:
+        # ponteiro presente significa camada a substituir ou a remover do grafo.
+        if history_rows or storage.read_history_pointer() is not None:
+            _graph_path, graph_metrics = apply_history(index_path, history_rows)
         # Ponteiro só depois do grafo: as duas superfícies referem o mesmo snapshot
         if snapshot_id is not None:
             storage.publish_history(

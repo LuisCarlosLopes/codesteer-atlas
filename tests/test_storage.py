@@ -1626,18 +1626,114 @@ def test_commit_sem_ancoragem_continua_recuperavel(temp_storage):
     assert temp_storage.get_history_state()["touches"] == 0
 
 
-def test_commit_so_ocupa_vaga_restante_do_top_k(temp_storage):
-    """CA13: a ordem do código é a mesma com e sem camada histórica publicada."""
-    _seed_two_chunks(temp_storage)
-    sem_historia = temp_storage.search_hybrid(
-        query_vector=VEC_A, query_text="main", filters={}, top_k=1
+def _seed_many_chunks(storage, total=11):
+    """
+    `total` chunks com similaridade decrescente à `VEC_A`; os dois últimos são
+    ortogonais, ficam fora dos `STRUCTURAL_SEED_TOP_N` e só podem ser ativados
+    por vizinhança — que é o que torna a barreira da GA-05 observável.
+    """
+    chunks = []
+    for index in range(total):
+        ortogonal = index >= total - 1
+        vector = [0.0, 1.0] + [0.0] * 382 if ortogonal else [1.0, 0.01 * index] + [0.0] * 382
+        chunks.append(
+            CodeChunk(
+                id=f"c{index}",
+                file_path=f"src/m{index}.py",
+                repo="test-project",
+                start_line=1,
+                end_line=5,
+                scope_type="function",
+                scope_name=f"sym{index}",
+                language="python",
+                content=f"def sym{index}(): return {index}",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=vector,
+            )
+        )
+    storage.store_chunks(chunks)
+    return chunks
+
+
+def test_braco_estrutural_nao_semeia_nem_atravessa_a_camada_historica(
+    temp_storage, monkeypatch
+):
+    """
+    GA-05: com histórico publicado e projetado no grafo, o commit não pode servir
+    de ponte no `spreading_activation`. `sym10` não é semente e não tem nenhuma
+    aresta de código — só o `touches` o alcançaria.
+    """
+    import json
+
+    chunks = _seed_many_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record(vector=VEC_A)])
+    monkeypatch.delenv("ATLAS_RERANK_MODEL", raising=False)
+
+    commit_node = "commit:test-project:" + "a" * 40
+    nodes = [
+        {
+            "id": f"sym:{chunk.file_path}#{chunk.scope_name}",
+            "kind": "symbol",
+            "label": chunk.scope_name,
+            "file_path": chunk.file_path,
+            "degree": 1,
+        }
+        for chunk in chunks
+    ]
+    nodes.append(
+        {"id": commit_node, "kind": "commit", "label": "Corrige resolução de imports",
+         "file_path": None, "degree": 0}
     )
-    _publish_history(temp_storage, [_commit_record(subject="main")])
-    com_historia = temp_storage.search_hybrid(
-        query_vector=VEC_A, query_text="main", filters={}, top_k=1
+    # O commit é a ÚNICA ligação entre `sym0` (semente) e `sym10` (fora das sementes)
+    edges = [
+        {"source": commit_node, "target": "sym:src/m0.py#sym0", "kind": "touches"},
+        {"source": commit_node, "target": "sym:src/m10.py#sym10", "kind": "touches"},
+    ]
+    (temp_storage.index_dir / "graph.json").write_text(
+        json.dumps({"nodes": nodes, "edges": edges}), encoding="utf-8"
     )
 
-    assert [result.scope_name for result in com_historia.results] == [
-        result.scope_name for result in sem_historia.results
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="sym0", filters={}, top_k=12, structural=True
+    )
+    arms = {r.scope_name: r.match_arms for r in outcome.results if r.type == "code"}
+
+    # Positivo: a semente é ativada, então o braço `graph` está de fato ligado
+    assert "graph" in arms["sym0"]
+    # O que M5 quebra: sem o filtro, o commit faz a ponte e ativa `sym10`
+    assert "graph" not in arms["sym10"]
+    assert all(
+        "graph" not in r.match_arms for r in outcome.results if r.type == "commit"
+    )
+
+
+def test_commit_com_score_acima_do_codigo_nao_desloca_o_top_k(temp_storage):
+    """
+    CA13: o fallback de slots — não o acaso da fixture — mantém o commit fora das
+    vagas de código. A query casa a mensagem do commit nos dois braços históricos
+    e só o braço vetorial do código, então o commit VENCE no score; a união por
+    score o poria em primeiro, o fallback o põe na vaga restante.
+    """
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record(vector=VEC_A)])
+
+    query = {"query_vector": VEC_A, "query_text": "resolução de imports", "filters": {}}
+    cheio = temp_storage.search_hybrid(**query, top_k=2)
+    com_vaga = temp_storage.search_hybrid(**query, top_k=3)
+
+    # Pré-condição da fixture: sem ela o teste volta a ser tautológico
+    scores = {tipo: [r.score for r in com_vaga.results if r.type == tipo] for tipo in ("code", "commit")}
+    assert max(scores["commit"]) > max(scores["code"])
+
+    # Metade 1 do contrato: a ordem do código é idêntica à de antes da F5.1
+    assert [(r.type, r.scope_name) for r in cheio.results] == [
+        ("code", "main"),
+        ("code", "helper"),
     ]
-    assert all(result.type == "code" for result in com_historia.results)
+    # Metade 2: o commit entra apenas na vaga que sobra, no fim
+    assert [(r.type, r.scope_name) for r in com_vaga.results[:2]] == [
+        ("code", "main"),
+        ("code", "helper"),
+    ]
+    assert com_vaga.results[2].type == "commit"
+    assert com_vaga.results[2].commit.id == "a" * 40

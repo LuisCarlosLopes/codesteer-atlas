@@ -801,6 +801,14 @@ def atlas_graph(
 
     Returns:
         JSON string for the selected mode.
+
+        When the workspace has an indexed Git history, the graph also holds
+        `commit` nodes linked to the symbols they changed by `touches` edges.
+        `explain` groups those commits under `neighbors.commit` (with
+        `edge_kind="touches"`) and `path` may traverse a `touches` edge, so a
+        symbol can be reached from a commit and vice versa. `affected` and `hubs`
+        ignore both: a commit is history, not a code dependency, and `touches`
+        never contributes to node degree.
     """
     _resolve_index_dir_via_roots(ctx)
 

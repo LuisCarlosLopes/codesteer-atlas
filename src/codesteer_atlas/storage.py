@@ -1216,7 +1216,13 @@ class StorageBackend:
             prefix = PurePath(str(filters["path_prefix"]).replace("\\", "/")).as_posix()
 
         results: List[SearchResult] = []
-        for key in sorted(scores, key=lambda item: (-scores[item], item))[:top_k]:
+        # Filtrar ANTES de cortar em `top_k`: `files_json` só existe na linha já
+        # materializada, então o prefixo não vira `where()` como no braço de código
+        # (DECISAO-003) — mas a semântica de `top_k` ("os N melhores ENTRE os que
+        # casam") exige a mesma ordem de aplicação.
+        for key in sorted(scores, key=lambda item: (-scores[item], item)):
+            if len(results) >= top_k:
+                break
             row = rows_by_key[key]
             record = _commit_from_row(row)
             # Um commit casa `path_prefix` quando ao menos um arquivo tocado está sob ele

@@ -1684,6 +1684,43 @@ def test_history_indexa_commit_elegivel_e_ancora_nos_simbolos_atuais(tmp_path):
     assert all(edge["location"]["file_path"] == "src/a.py" for edge in touches)
 
 
+def test_history_revert_do_workspace_chega_marcado_e_com_corpo_ao_registro(tmp_path):
+    """
+    CA01/CA06/CA16 ponta a ponta: o revert canônico criado pelo `git commit` real
+    percorre extração → `_revert_marks` → persistência → busca. Cobre o corpo da
+    mensagem, que os testes de unidade sempre forneceram eles mesmos.
+    """
+    workspace = _git_workspace(tmp_path)
+    index_dir = tmp_path / "index"
+
+    _index_git_workspace(workspace, index_dir)
+
+    storage = StorageBackend(index_dir)
+    records = {
+        record.subject: record
+        for record, _stale in storage.lookup_commits(
+            [(row["repo"], row["id"]) for row in storage.get_history_projection()]
+        )
+    }
+    revertido = records['Revert "feat: adiciona run e helper"']
+
+    assert revertido.is_revert is True
+    assert revertido.reverted_commit_id == "0123456789abcdef0123456789abcdef01234567"
+    # O corpo produzido pelo `git commit`, não fabricado pela fixture
+    assert revertido.body.startswith("This reverts commit 0123456789abcdef")
+    assert records["feat: adiciona run e helper"].is_revert is False
+
+    # A mensagem COMPLETA é o que fica recuperável: o corpo precisa chegar ao `content`
+    outcome = storage.search_hybrid(
+        query_vector=[0.0] * 384,
+        query_text="This reverts commit",
+        filters={},
+        top_k=10,
+    )
+    commits = [result for result in outcome.results if result.type == "commit"]
+    assert any("This reverts commit 0123456789abcdef" in result.content for result in commits)
+
+
 def test_history_marca_revert_canonico_com_e_sem_sha(tmp_path):
     """CA06/CA16: revert só pelo formato canônico; SHA apenas quando declarado."""
     from codesteer_atlas.indexer import _revert_marks
@@ -1708,8 +1745,29 @@ def test_history_recusa_janela_acima_do_teto_aprovado():
         resolve_git_history_window(max_months=25)
 
 
-def test_history_janela_inclui_limite_temporal_e_exclui_o_centesimo_primeiro():
-    """CA14: corte temporal inclusivo; o 101º commit do arquivo fica de fora."""
+def test_history_janela_inclui_o_commit_no_instante_limite():
+    """
+    CA14 (metade inclusiva): com quota folgada, a ÚNICA variável que decide a
+    entrada do commit em `cutoff` é a comparação `<` vs `<=` do corte temporal.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from codesteer_atlas.indexer import _select_history_window
+
+    cutoff = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    entries = [
+        {"sha": "a" * 40, "committed_dt": cutoff + timedelta(days=1), "files": ["src/a.py"]},
+        {"sha": "b" * 40, "committed_dt": cutoff, "files": ["src/a.py"]},
+        {"sha": "c" * 40, "committed_dt": cutoff - timedelta(seconds=1), "files": ["src/a.py"]},
+    ]
+
+    selected = _select_history_window(entries, {"src/a.py"}, cutoff, max_commits=100)
+
+    assert [entry["sha"] for entry in selected] == ["a" * 40, "b" * 40]
+
+
+def test_history_janela_exclui_o_centesimo_primeiro_do_arquivo():
+    """CA14 (metade de quantidade): o 101º commit do arquivo fica de fora."""
     from datetime import datetime, timedelta, timezone
 
     from codesteer_atlas.indexer import _select_history_window
@@ -1733,8 +1791,10 @@ def test_history_janela_inclui_limite_temporal_e_exclui_o_centesimo_primeiro():
 
     assert len(shas) == 100
     assert f"{100:040d}" not in shas  # 101º do arquivo
-    assert "b" * 40 not in shas  # já fora da janela de quantidade
-    assert "c" * 40 not in shas  # anterior ao instante-limite
+    # Os dois seguintes caem por QUOTA (os 100 slots já foram consumidos); o eixo
+    # temporal inclusivo é provado no teste irmão, com quota folgada.
+    assert "b" * 40 not in shas
+    assert "c" * 40 not in shas
 
 
 def test_history_reindex_sem_mudanca_preserva_cardinalidade(tmp_path):
