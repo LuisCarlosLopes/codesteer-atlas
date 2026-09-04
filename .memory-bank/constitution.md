@@ -100,12 +100,27 @@ O código Python deve seguir as convenções de estilo e conformidade do reposit
 uv run ruff check
 ```
 
+## Autonomia
+
+Concessão humana ao pipeline CodeSteer. Este documento define **quanto** de autonomia existe; os critérios de auto-aprovação e os hard floors permanecem canônicos na `autonomy-policy` do orquestrador.
+
+- autonomy_default: auto-safe
+- autonomy_max: auto-safe
+
+`auto-full` não está habilitado. Pedido do usuário nunca eleva acima de `autonomy_max`. Hard floors (operação irreversível, superfície de segurança, complexidade L/XL, loops esgotados) continuam parando no humano em qualquer nível.
+
 ## Governance
 
 - Esta Constituição é o documento de maior relevância normativa no repositório. As regras aqui estabelecidas prevalecem sobre convenções locais ou conteúdo de `.memory-bank/operational-memory.md` quando houver conflito ou ambiguidade.
 - Qualquer alteração exige incremento de versão, atualização de `Last Amended` e registro dos princípios alterados.
 
 ### Registro de Emendas
+
+**2.1.0 (2026-09-04)** — Concede autonomia `auto-safe` aos gates HITL. Princípios I–VI inalterados.
+
+| Campo | Mudança |
+|---|---|
+| — | Nova seção **Autonomia**: `autonomy_default` e `autonomy_max` = `auto-safe`. Hard floors permanecem HITL. |
 
 **2.0.0 (2026-08-30)** — Emenda maior. Remove o teto arquitetural que impedia o Atlas de evoluir além de busca puramente estrutural.
 
@@ -120,4 +135,4 @@ uv run ruff check
 | — | **Nova restrição:** *Artefatos de Inspeção Humana*, protegendo `graph.html`. |
 | — | **Novo workflow:** *Medição de Ranking* com baseline por classe e flag de ambiente. |
 
-**Version**: 2.0.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-08-30
+**Version**: 2.1.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-09-04
