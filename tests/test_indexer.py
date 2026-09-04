@@ -563,6 +563,9 @@ def test_index_workspace_reports_metrics_and_incremental_graph_strategy(tmp_path
         "embed",
         "persist",
         "graph",
+        # A fase de histórico Git (F5.1) roda sempre e declara sua duração; sem Git
+        # legível ela apenas degrada, sem tocar no índice estrutural.
+        "history",
         "brief",
     }
     assert first.graph_nodes > 0
@@ -1514,7 +1517,9 @@ def test_fase_scip_sem_toolchain_reporta_toolchain_missing_e_conclui(tmp_path, m
     with (
         patch("codesteer_atlas.embeddings.EmbeddingEngine.encode", side_effect=_patched_encode),
         patch("codesteer_atlas.indexer.get_git_head_sha", return_value="sha-1"),
-        patch("codesteer_atlas.scip_ingest.subprocess.run") as run_mock,
+        # Alvo no próprio scip_ingest: `subprocess` é um módulo compartilhado e
+        # a leitura de histórico Git (F5.1) também o usa.
+        patch("codesteer_atlas.scip_ingest.run_indexer") as run_mock,
     ):
         stats = index_workspace(workspace_dir, index_dir, report_progress=False)
 

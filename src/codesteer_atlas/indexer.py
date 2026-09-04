@@ -1,9 +1,13 @@
+import calendar
 import hashlib
+import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 import pathspec
@@ -13,11 +17,13 @@ from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.config import (
     ATLASIGNORE_FILENAME,
     DEFAULT_INDEX_DIR,
+    GIT_HISTORY_TIMEOUT_S,
     GRAPH_FILENAME,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
     SCIP_ENV_FLAG,
     SUPPORTED_EXTENSIONS,
+    resolve_git_history_window,
 )
 from codesteer_atlas.embeddings import EmbeddingEngine
 from codesteer_atlas.graph import (
@@ -131,6 +137,269 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
             file=sys.stderr,
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Fase 5.1 — leitura bounded da história local de Git
+# @MindContext: mensagens de commit alcançáveis pelo HEAD, ancoradas nos símbolos atuais
+# @MindDecision: Git só por subprocesso (padrão de `get_git_head_sha`); nada de SDK,
+# rede ou persistência de diff/blob/PR/blame — o hunk é evidência, não dado guardado
+# @MindTest: tests/test_indexer.py
+# ---------------------------------------------------------------------------
+
+_HISTORY_RECORD_SEP = "\x1e"
+_HISTORY_UNIT_SEP = "\x1f"
+_HISTORY_LOG_FORMAT = "%x1e%H%x1f%aI%x1f%cI%x1f%s%x1f%b%x1f"
+_REVERT_SUBJECT_PREFIX = 'Revert "'
+_REVERT_BODY_RE = re.compile(r"This reverts commit ([0-9a-fA-F]{7,40})\.")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _run_git(args: List[str], workspace_path: Path) -> Optional[str]:
+    """Executa `git` em subprocesso no mesmo padrão seguro de `get_git_head_sha`."""
+    import subprocess
+
+    creationflags = (
+        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # type: ignore[attr-defined]
+    )
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(workspace_path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            check=True,
+            timeout=GIT_HISTORY_TIMEOUT_S,
+            creationflags=creationflags,
+        )
+        return result.stdout
+    except Exception as error:
+        print(
+            f"[atlas] Leitura de histórico Git indisponível ({type(error).__name__}).",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _history_cutoff(now: datetime, months: int) -> datetime:
+    """Instante-limite da janela temporal; a comparação é inclusiva neste instante."""
+    month_index = now.month - 1 - months
+    year = now.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(now.day, calendar.monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day)
+
+
+def _parse_history_log(raw: str) -> List[dict]:
+    """Converte a saída de `git log --name-only` em registros ordenados por data desc."""
+    entries: List[dict] = []
+    for block in raw.split(_HISTORY_RECORD_SEP):
+        if not block.strip():
+            continue
+        parts = block.split(_HISTORY_UNIT_SEP)
+        if len(parts) < 6:
+            continue
+        sha = parts[0].strip()
+        if not sha:
+            continue
+        try:
+            committed_dt = datetime.fromisoformat(parts[2].strip())
+        except ValueError:
+            continue
+        files = sorted({line.strip() for line in parts[5].splitlines() if line.strip()})
+        entries.append(
+            {
+                "sha": sha,
+                "authored_at": parts[1].strip(),
+                "committed_at": parts[2].strip(),
+                "committed_dt": committed_dt,
+                "subject": parts[3],
+                "body": parts[4].strip("\n"),
+                "files": files,
+            }
+        )
+    return entries
+
+
+def _revert_marks(subject: str, body: str) -> tuple[bool, Optional[str]]:
+    """Marcação determinística de revert; SHA só quando a mensagem o declara [RF07]."""
+    match = _REVERT_BODY_RE.search(body or "")
+    is_revert = subject.startswith(_REVERT_SUBJECT_PREFIX) or match is not None
+    if not is_revert:
+        return False, None
+    return True, match.group(1) if match else None
+
+
+def _select_history_window(
+    entries: List[dict], manifest_files: set, cutoff: datetime, max_commits: int
+) -> List[dict]:
+    """
+    Aplica a janela aprovada: por arquivo indexado, os `max_commits` mais recentes
+    que também estejam dentro do limite temporal (inclusivo no instante-limite).
+    """
+    counts: Dict[str, int] = {}
+    selected: List[dict] = []
+    for entry in entries:
+        if entry["committed_dt"] < cutoff:
+            continue
+        kept = []
+        for path in entry["files"]:
+            if path not in manifest_files:
+                continue
+            if counts.get(path, 0) >= max_commits:
+                continue
+            counts[path] = counts.get(path, 0) + 1
+            kept.append(path)
+        if kept:
+            selected.append({**entry, "indexed_files": kept})
+    return selected
+
+
+def _symbols_by_file(storage) -> Dict[str, List[tuple]]:
+    """Intervalos atuais de símbolo (não-markdown) usados na interseção de hunks."""
+    symbols: Dict[str, List[tuple]] = {}
+    for row in storage.get_graph_projection():
+        if row.get("language") == "markdown":
+            continue
+        symbols.setdefault(row["file_path"], []).append(
+            (row["scope_name"], int(row["start_line"]), int(row["end_line"]))
+        )
+    return symbols
+
+
+def _parse_touched_ranges(raw: str) -> Dict[str, List[tuple]]:
+    """Extrai (arquivo → intervalos pós-imagem) dos cabeçalhos de hunk, sem guardar diff."""
+    ranges: Dict[str, List[tuple]] = {}
+    current: Optional[str] = None
+    for line in raw.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            current = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
+            continue
+        if current is None or not line.startswith("@@"):
+            continue
+        match = _HUNK_RE.match(line)
+        if not match:
+            continue
+        start = int(match.group(1))
+        count = int(match.group(2)) if match.group(2) is not None else 1
+        ranges.setdefault(current, []).append((start, start + max(count, 1) - 1))
+    return ranges
+
+
+def _commit_touches(
+    workspace_path: Path, sha: str, files: List[str], symbols_by_file: Dict[str, List[tuple]]
+) -> tuple[List[dict], bool]:
+    """
+    Ancoragem do commit: interseção entre os hunks atribuíveis e o intervalo ATUAL
+    de cada símbolo. Devolve `(touches, confirmado)`; `confirmado=False` quando a
+    leitura do commit falhou e a evidência anterior deve ser preservada [GA-010-06].
+    """
+    raw = _run_git(
+        ["show", "--no-color", "--unified=0", "--no-renames", "--format=%x1e", sha, "--", *files],
+        workspace_path,
+    )
+    if raw is None:
+        return [], False
+
+    touches = set()
+    for path, ranges in _parse_touched_ranges(raw).items():
+        for scope_name, start, end in symbols_by_file.get(path, []):
+            if any(not (end < hunk_start or start > hunk_end) for hunk_start, hunk_end in ranges):
+                touches.add((path, scope_name))
+    return [{"file_path": path, "scope_name": scope} for path, scope in sorted(touches)], True
+
+
+def collect_git_history(
+    workspace_path: Path,
+    repo_name: str,
+    manifest,
+    storage,
+    now: Optional[datetime] = None,
+) -> dict:
+    """
+    Lê a janela aprovada do histórico alcançável pelo HEAD e devolve
+    `{"status", "records"}`. `status="unavailable"` significa que nada foi lido e
+    o snapshot ativo deve ser preservado — a indexação estrutural não é afetada [RF09].
+    """
+    max_commits, max_months = resolve_git_history_window()
+    now = now or datetime.now(timezone.utc)
+    cutoff = _history_cutoff(now, max_months)
+
+    raw = _run_git(
+        [
+            "log",
+            "--no-color",
+            f"--since={(cutoff - timedelta(seconds=1)).isoformat()}",
+            f"--format={_HISTORY_LOG_FORMAT}",
+            "--name-only",
+        ],
+        workspace_path,
+    )
+    if raw is None:
+        return {"status": "unavailable", "records": []}
+
+    manifest_files = set(manifest.files.keys())
+    selected = _select_history_window(_parse_history_log(raw), manifest_files, cutoff, max_commits)
+    symbols_by_file = _symbols_by_file(storage)
+    previous = {
+        row["id"]: row
+        for row in storage.get_history_projection()
+        if row.get("repo") == repo_name
+    }
+
+    records: List[dict] = []
+    partial = False
+    for entry in selected:
+        touches, confirmed = _commit_touches(
+            workspace_path, entry["sha"], entry["indexed_files"], symbols_by_file
+        )
+        stale = False
+        if not confirmed:
+            partial = True
+            stale = True
+            preserved = previous.get(entry["sha"])
+            if preserved:
+                touches = json.loads(preserved.get("touches_json") or "[]")
+        is_revert, reverted = _revert_marks(entry["subject"], entry["body"])
+        records.append(
+            {
+                "id": entry["sha"],
+                "repo": repo_name,
+                "subject": entry["subject"],
+                "body": entry["body"],
+                "authored_at": entry["authored_at"],
+                "committed_at": entry["committed_at"],
+                "files_touched": entry["indexed_files"],
+                "touches": touches,
+                "is_revert": is_revert,
+                "reverted_commit_id": reverted,
+                "stale": stale,
+            }
+        )
+
+    if partial:
+        status = "partial"
+    elif records:
+        status = "ok"
+    else:
+        status = "empty"
+    return {"status": status, "records": records}
+
+
+def stage_git_history(storage, records: List[dict]) -> Optional[str]:
+    """Embute as mensagens e materializa a geração candidata (ainda não ativa)."""
+    if records:
+        vectors = EmbeddingEngine().encode(
+            [f"{record['subject']}\n{record['body']}".strip() for record in records],
+            batch_size=32,
+        )
+        for record, vector in zip(records, vectors, strict=True):
+            record["vector"] = vector
+    return storage.stage_history(records)
 
 
 def load_atlasignore_spec(workspace_path: Path) -> Optional[pathspec.PathSpec]:
@@ -761,6 +1030,34 @@ def _index_workspace_locked(
             file=sys.stderr,
         )
 
+    # Fase `history` (F5.1): roda DEPOIS do grafo e, como a fase SCIP, fica fora de
+    # `_PHASE_WEIGHTS` — os pesos existentes somam 1.0 e a camada é opcional.
+    # @MindRisk: falha aqui não pode derrubar o estrutural nem apagar o snapshot ativo
+    phase_started_at = time.perf_counter()
+    git_history = {"status": "unavailable", "records": []}
+    try:
+        git_history = collect_git_history(workspace_path, repo_name, manifest, storage)
+        if git_history["status"] == "unavailable":
+            storage.mark_history_state("unavailable")
+        else:
+            snapshot_id = stage_git_history(storage, git_history["records"])
+            storage.publish_history(
+                snapshot_id,
+                state="partial" if git_history["status"] == "partial" else "ok",
+            )
+            storage.gc_history()
+    except Exception as error:
+        print(f"[atlas] Falha na fase de histórico Git: {error}", file=sys.stderr)
+        git_history = {"status": "unavailable", "records": []}
+        storage.mark_history_state("unavailable")
+    phase_durations_s["history"] = round(time.perf_counter() - phase_started_at, 4)
+    history_state = storage.get_history_state()
+    print(
+        f"[atlas] Fase de histórico Git: {git_history['status']} "
+        f"({history_state.get('commits', 0)} commits, {history_state.get('touches', 0)} touches).",
+        file=sys.stderr,
+    )
+
     # O brief é sempre reconstruído por inteiro: seu valor está no ranking GLOBAL
     # (top-N camadas/hubs/entrypoints), que uma atualização parcial não preservaria
     progress.tick("brief", 0, 1)
@@ -808,6 +1105,9 @@ def _index_workspace_locked(
         graph_html_bytes=graph_metrics["graph_html_bytes"],
         scip_status=scip_status,
         scip_edges=scip_edges,
+        git_history_status=git_history["status"],
+        git_history_commits=int(history_state.get("commits", 0)),
+        git_history_touches=int(history_state.get("touches", 0)),
         brief_status=brief_status,
         brief_bytes=brief_metrics["brief_bytes"],
         brief_layers=brief_metrics["brief_layers"],
