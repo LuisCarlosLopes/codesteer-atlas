@@ -953,9 +953,18 @@ def test_search_hybrid_raises_when_both_arms_fail(temp_storage, monkeypatch):
         )
 
 
+def _publish_history(storage, records=()):
+    """Publica um snapshot histórico ativo (vazio por padrão) para a busca."""
+    snapshot_id = storage.stage_history(list(records))
+    return storage.publish_history(snapshot_id)
+
+
 def test_search_hybrid_healthy_index_has_no_warnings(temp_storage):
     """Busca saudável não deve emitir nenhum aviso de degradação."""
     _seed_two_chunks(temp_storage)
+    # Índice saudável hoje inclui a camada histórica publicada; sua ausência é
+    # degradação declarada (git_history_unavailable), coberta em teste próprio.
+    _publish_history(temp_storage)
 
     outcome = temp_storage.search_hybrid(
         query_vector=VEC_A, query_text="main", filters={}, top_k=5

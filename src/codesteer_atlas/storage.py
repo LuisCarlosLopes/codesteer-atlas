@@ -197,6 +197,27 @@ def _commit_from_row(row: Dict[str, Any]) -> CommitRecord:
     )
 
 
+
+def _without_history(graph: dict, node_kind: str, edge_kind: str) -> dict:
+    """
+    Cópia do grafo sem a camada histórica, para a expansão estrutural.
+
+    @MindRisk: sem isto um commit vira ponte entre símbolos sem relação de código
+    e a ativação estrutural passa a ranquear por coincidência de história [GA-05].
+    """
+    nodes = [node for node in graph.get("nodes", []) if node.get("kind") != node_kind]
+    edges = [edge for edge in graph.get("edges", []) if edge.get("kind") != edge_kind]
+    filtered = {"nodes": nodes, "edges": edges}
+    filtered["_nodes_by_id"] = {node["id"]: node for node in nodes}
+    adjacency: Dict[str, List] = {}
+    for edge in edges:
+        adjacency.setdefault(edge["source"], []).append((edge["target"], edge["kind"]))
+        adjacency.setdefault(edge["target"], []).append((edge["source"], edge["kind"]))
+    filtered["_adjacency"] = adjacency
+    return filtered
+
+
+
 class StorageBackend:
     """
     Abstração que encapsula toda a interação com o banco de dados vetorial LanceDB
@@ -617,7 +638,8 @@ class StorageBackend:
         if _rerank_enabled():
             pool = self._rerank_pool(pool, query_text, warnings)
 
-        return SearchOutcome(results=pool[:top_k], warnings=warnings)
+        history = self._search_history_arm(query_vector, query_text, filters, top_k, warnings)
+        return SearchOutcome(results=self._merge_typed(pool, history, top_k), warnings=warnings)
 
     def _fuse_structural_arm(
         self,
@@ -630,9 +652,9 @@ class StorageBackend:
         # @MindRisk: junção chunk↔nó só em memória; chunk fora do pool nunca é materializado
         """Acrescenta o braço `graph` à fusão; grafo ausente vira aviso e no-op."""
         try:
-            from codesteer_atlas.graph import load_graph
+            from codesteer_atlas.graph import HISTORY_EDGE_KIND, HISTORY_NODE_KIND, load_graph
 
-            graph = load_graph(self.index_dir)
+            graph = _without_history(load_graph(self.index_dir), HISTORY_NODE_KIND, HISTORY_EDGE_KIND)
         except Exception as e:
             warnings.append("structural_arm_unavailable")
             print(
@@ -1125,3 +1147,114 @@ class StorageBackend:
             record = _commit_from_row(row)
             found.append((record, bool(row.get("stale"))))
         return found
+
+    def _search_history_arm(
+        self,
+        query_vector: List[float],
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+        warnings: List[str],
+    ) -> List[SearchResult]:
+        """
+        Sub-recuperação histórica tipada (F5.1): RRF próprio sobre a mensagem do
+        commit, com a mesma constante de fusão do pipeline de código.
+
+        @MindDecision: pipeline separado para o commit não virar semente nem vizinho
+        do braço `graph` — ele nunca ganha `match_arms=["graph"]` [ADR-009].
+        """
+        if filters.get("language") and filters["language"] != "git":
+            return []
+
+        try:
+            table = self._active_history_table()
+        except Exception as error:
+            print(f"[atlas] Camada histórica ilegível ({type(error).__name__}).", file=sys.stderr)
+            table = None
+        if table is None:
+            warnings.append("git_history_unavailable")
+            return []
+
+        where_clause = None
+        if filters.get("repo"):
+            repo = str(filters["repo"]).replace("'", "''")
+            where_clause = f"repo = '{repo}'"
+
+        def _run(query) -> List[Dict[str, Any]]:
+            if where_clause:
+                query = query.where(where_clause, prefilter=True)
+            return query.limit(CANDIDATES_LIMIT).to_list()
+
+        vector_rows: List[Dict[str, Any]] = []
+        text_rows: List[Dict[str, Any]] = []
+        failures = 0
+        try:
+            vector_rows = _run(table.search(query_vector, vector_column_name="vector").metric("cosine"))
+        except Exception:
+            failures += 1
+        try:
+            text_rows = _run(table.search(query_text, query_type="fts"))
+        except Exception:
+            failures += 1
+
+        if failures == 2:
+            warnings.append("git_history_unavailable")
+            return []
+
+        scores: Dict[str, float] = {}
+        rows_by_key: Dict[str, Dict[str, Any]] = {}
+        arms: Dict[str, List[str]] = {}
+        for rows, arm in ((vector_rows, "vector"), (text_rows, "fts")):
+            for rank, row in enumerate(rows):
+                key = f"{row['repo']}:{row['id']}"
+                rows_by_key.setdefault(key, row)
+                arms.setdefault(key, []).append(arm)
+                scores[key] = scores.get(key, 0.0) + (1.0 / (rank + RRF_K))
+
+        prefix = None
+        if filters.get("path_prefix"):
+            prefix = PurePath(str(filters["path_prefix"]).replace("\\", "/")).as_posix()
+
+        results: List[SearchResult] = []
+        for key in sorted(scores, key=lambda item: (-scores[item], item))[:top_k]:
+            row = rows_by_key[key]
+            record = _commit_from_row(row)
+            # Um commit casa `path_prefix` quando ao menos um arquivo tocado está sob ele
+            if prefix and not any(path.startswith(prefix) for path in record.files_touched):
+                continue
+            results.append(
+                SearchResult(
+                    # Sentinelas: um commit não tem localização de símbolo; a associação
+                    # a arquivos é `commit.files_touched` [A4 do IPD]
+                    file_path="",
+                    start_line=0,
+                    end_line=0,
+                    scope_type="",
+                    scope_name="",
+                    language="git",
+                    content=row.get("message"),
+                    score=float(scores[key]),
+                    repo=record.repo,
+                    type="commit",
+                    commit=record,
+                    match_arms=arms.get(key, []),
+                )
+            )
+        return results
+
+    def _merge_typed(
+        self, code: List[SearchResult], history: List[SearchResult], top_k: int
+    ) -> List[SearchResult]:
+        """
+        União tipada por score. Empate resolve a favor do código e depois por chave
+        determinística; a ordem relativa do código é preservada quando os scores
+        empatam, para não desfazer a reordenação medida (DECISAO-007).
+        """
+        if not history:
+            return code[:top_k]
+        ranked = [
+            (-result.score, 1 if result.type == "commit" else 0, position, result)
+            for position, result in enumerate(code + history)
+        ]
+        ranked.sort(key=lambda item: item[:3])
+        return [item[3] for item in ranked][:top_k]
