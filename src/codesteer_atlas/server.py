@@ -577,6 +577,11 @@ def atlas_search(
         `match_arms`, and `content` only when include_content=true),
         `total_chunks_searched`, and `query_time_ms`.
 
+        A commit message result has `type="commit"`, `language="git"`, a `commit`
+        object (id, repo, subject, body, dates, files_touched, is_revert,
+        reverted_commit_id) and no code lines — it is matched to files through
+        `commit.files_touched`.
+
         `match_arms` names which arms of the hybrid search retrieved the chunk:
         `vector` (semantic), `fts` (BM25), and `graph` (structural, only when
         structural=true). A hit found by both vector and fts had consensus between them;
@@ -594,7 +599,9 @@ def atlas_search(
         `cross_encoder_unavailable` (ATLAS_RERANK_MODEL was set but the model failed to
         load — order fell back to lexical rerank), `structural_arm_unavailable`
         (structural=true but graph.json is missing or unreadable — the graph arm was
-        skipped), `semantic_layer_unavailable` (the opt-in semantic index is not
+        skipped), `git_history_unavailable` (the local Git history layer is missing or
+        unreadable — code results are unaffected),
+        `semantic_layer_unavailable` (the opt-in semantic index is not
         ready) and `semantic_arm_unavailable` (the semantic vector arm failed).
         The last two keep vector+FTS results available but indicate that semantic
         recall is incomplete. Treat a degraded result as incomplete: reindex with
@@ -660,6 +667,21 @@ def atlas_search(
 
     serialized_results = []
     for r in results:
+        # Resultado histórico (F5.1): sem linhas de código; a associação a arquivos
+        # é `commit.files_touched` e a mensagem só vai quando include_content=true
+        if r.type == "commit" and r.commit is not None:
+            commit_item = {
+                "type": "commit",
+                "language": r.language,
+                "score": r.score,
+                "repo": r.repo,
+                "match_arms": r.match_arms,
+                "commit": r.commit.model_dump(),
+            }
+            if include_content:
+                commit_item["content"] = r.content
+            serialized_results.append(commit_item)
+            continue
         item = {
             "file_path": r.file_path,
             "lines": [r.start_line, r.end_line],
@@ -835,6 +857,12 @@ def atlas_context(
     Returns:
         JSON string with `target`, `intent`, `sections`, optional `truncated`,
         `warnings` and `budget`.
+
+        Only `intent="debug"` carries `sections.recent_history`: commits linked to the
+        target by `touches`, newest first, each with `commit`, `via`, optional
+        `via_location` and `stale`. Its degradation is declared in `warnings` as
+        `git_history_unavailable`, `git_history_partial`, `git_history_stale` or
+        `git_history_empty`.
     """
     # @MindSpec: Input target+intent | Output JSON ≤ CONTEXT_RESPONSE_MAX_CHARS | Error ValueError / índice ausente
     _resolve_index_dir_via_roots(ctx)
@@ -861,6 +889,8 @@ def atlas_context(
         semantic_ready=semantic_index_state(INDEX_DIR_PATH, storage.get_manifest())[0] == "ready",
         semantic_sidecar=load_semantic_sidecar(INDEX_DIR_PATH),
         purpose_lookup=storage.lookup_purpose,
+        history_lookup=storage.lookup_commits,
+        history_state=storage.get_history_state(),
     )
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -1172,6 +1202,11 @@ def atlas_index(
         # sem interromper a indexação — omiti-la aqui seria degradação silenciosa.
         "scip_status": stats.scip_status,
         "scip_edges": stats.scip_edges,
+        # Princípio VI: a fase histórica degrada (unavailable/partial/empty) sem
+        # interromper a indexação estrutural
+        "git_history_status": stats.git_history_status,
+        "git_history_commits": stats.git_history_commits,
+        "git_history_touches": stats.git_history_touches,
         "brief_status": stats.brief_status,
         "brief_bytes": stats.brief_bytes,
         "brief_layers": stats.brief_layers,
