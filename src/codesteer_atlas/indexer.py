@@ -27,6 +27,7 @@ from codesteer_atlas.config import (
 )
 from codesteer_atlas.embeddings import EmbeddingEngine
 from codesteer_atlas.graph import (
+    apply_history,
     apply_scip_result,
     build_and_write,
     build_and_write_incremental,
@@ -1037,10 +1038,18 @@ def _index_workspace_locked(
     git_history = {"status": "unavailable", "records": []}
     try:
         git_history = collect_git_history(workspace_path, repo_name, manifest, storage)
+        snapshot_id = None
         if git_history["status"] == "unavailable":
             storage.mark_history_state("unavailable")
+            # Sem leitura nova, o grafo reprojeta o snapshot ATIVO: nada é fabricado
+            # e a camada anterior não se perde no rebuild [GA-010-05].
+            history_rows = storage.get_history_projection()
         else:
             snapshot_id = stage_git_history(storage, git_history["records"])
+            history_rows = git_history["records"]
+        apply_history(index_path, history_rows)
+        # Ponteiro só depois do grafo: as duas superfícies referem o mesmo snapshot
+        if snapshot_id is not None:
             storage.publish_history(
                 snapshot_id,
                 state="partial" if git_history["status"] == "partial" else "ok",

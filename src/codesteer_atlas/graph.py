@@ -794,6 +794,18 @@ def _add_contribution_from_rows(
                 _add_edge(source_id, target_id, "imports", origin=IMPORT_ORIGIN_TREESITTER)
 
 
+HISTORY_NODE_KIND = "commit"
+HISTORY_EDGE_KIND = "touches"
+# Arestas fora do grau: `contains` é estrutura interna do arquivo e `touches` é
+# história — nenhuma das duas é dependência entre símbolos.
+_NON_DEGREE_EDGE_KINDS = frozenset({"contains", HISTORY_EDGE_KIND})
+
+
+def commit_node_id(repo: str, sha: str) -> str:
+    """Chave de nó do commit; inclui o repo para SHAs iguais não colidirem [GA-03]."""
+    return f"{HISTORY_NODE_KIND}:{repo}:{sha}"
+
+
 def _finalize_graph(
     graph: dict,
     languages: Optional[Iterable[str]] = None,
@@ -804,7 +816,9 @@ def _finalize_graph(
 
     degree_by_id = {node_id: 0 for node_id in nodes}
     for edge in edges:
-        if edge["kind"] == "contains":
+        # `touches` é relação histórica consultável, não dependência de código:
+        # contá-la no grau moveria hubs, brief e a expansão estrutural [GA-05]
+        if edge["kind"] in _NON_DEGREE_EDGE_KINDS:
             continue
         degree_by_id[edge["source"]] = degree_by_id.get(edge["source"], 0) + 1
         degree_by_id[edge["target"]] = degree_by_id.get(edge["target"], 0) + 1
@@ -815,7 +829,9 @@ def _finalize_graph(
         (
             {"id": node_id, "degree": degree}
             for node_id, degree in degree_by_id.items()
-            if node_id in nodes and not is_noise_hub(nodes[node_id])
+            if node_id in nodes
+            and nodes[node_id].get("kind") != HISTORY_NODE_KIND
+            and not is_noise_hub(nodes[node_id])
         ),
         key=lambda item: (-item["degree"], item["id"]),
     )[:GRAPH_TOP_HUBS_LIMIT]
@@ -1091,6 +1107,62 @@ def apply_scip_result(
             "edges": int(previous.get("edges", 0)),
         }
 
+    return _persist_graph(_finalize_graph(graph), index_path)
+
+
+def apply_history(index_path: Path, commit_rows: Iterable[dict]) -> tuple[Path, dict]:
+    """
+    Reprojeta a camada histórica sobre o `graph.json` já persistido (mesmo padrão
+    de `apply_scip_result`): substitui TODOS os nós `commit` e arestas `touches`
+    pela visão informada, sem tocar nas relações estruturais.
+
+    A `location` da aresta é o intervalo ATUAL do símbolo — é o ponto verificável
+    contra o índice corrente; símbolo ausente hoje simplesmente não recebe aresta.
+    """
+    graph = {key: value for key, value in load_graph(index_path).items() if not key.startswith("_")}
+    nodes = [
+        node for node in graph.get("nodes", []) if node.get("kind") != HISTORY_NODE_KIND
+    ]
+    edges = [
+        edge for edge in graph.get("edges", []) if edge.get("kind") != HISTORY_EDGE_KIND
+    ]
+    nodes_by_id = {node["id"]: node for node in nodes}
+
+    for row in commit_rows:
+        node_id = commit_node_id(row["repo"], row["id"])
+        nodes.append(
+            {
+                "id": node_id,
+                "kind": HISTORY_NODE_KIND,
+                "label": row.get("subject") or "",
+                "file_path": None,
+                "lines": None,
+            }
+        )
+        touches = row.get("touches")
+        if touches is None:
+            touches = json.loads(row.get("touches_json") or "[]")
+        seen: set[str] = set()
+        for item in touches:
+            symbol_id = f"sym:{item['file_path']}#{item['scope_name']}"
+            target = nodes_by_id.get(symbol_id)
+            if target is None or symbol_id in seen:
+                continue
+            seen.add(symbol_id)
+            edges.append(
+                {
+                    "source": node_id,
+                    "target": symbol_id,
+                    "kind": HISTORY_EDGE_KIND,
+                    "location": {
+                        "file_path": target.get("file_path"),
+                        "lines": target.get("lines"),
+                    },
+                }
+            )
+
+    graph["nodes"] = nodes
+    graph["edges"] = edges
     return _persist_graph(_finalize_graph(graph), index_path)
 
 
