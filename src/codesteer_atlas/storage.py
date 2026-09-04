@@ -1246,15 +1246,16 @@ class StorageBackend:
         self, code: List[SearchResult], history: List[SearchResult], top_k: int
     ) -> List[SearchResult]:
         """
-        União tipada por score. Empate resolve a favor do código e depois por chave
-        determinística; a ordem relativa do código é preservada quando os scores
-        empatam, para não desfazer a reordenação medida (DECISAO-007).
+        União tipada: a ordem do código é a mesma de antes da F5.1 e os commits
+        entram apenas nas vagas restantes de `top_k`, por score decrescente.
+
+        @MindDecision: a união por score foi medida no golden set e regrediu TODAS
+        as classes (MRR total 0.4230 → 0.2077) — o pool histórico é pequeno, então
+        seus scores RRF nascem altos e deslocam código. Fica o fallback previsto no
+        plano: nenhuma classe regride e a história ainda é recuperável (GA-12).
         """
-        if not history:
-            return code[:top_k]
-        ranked = [
-            (-result.score, 1 if result.type == "commit" else 0, position, result)
-            for position, result in enumerate(code + history)
-        ]
-        ranked.sort(key=lambda item: item[:3])
-        return [item[3] for item in ranked][:top_k]
+        results = code[:top_k]
+        if not history or len(results) >= top_k:
+            return results
+        ordered = sorted(history, key=lambda result: (-result.score, result.commit.id))
+        return results + ordered[: top_k - len(results)]

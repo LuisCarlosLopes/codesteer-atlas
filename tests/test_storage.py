@@ -1624,3 +1624,20 @@ def test_commit_sem_ancoragem_continua_recuperavel(temp_storage):
     commits = [result for result in outcome.results if result.type == "commit"]
     assert [result.commit.id for result in commits] == ["a" * 40]
     assert temp_storage.get_history_state()["touches"] == 0
+
+
+def test_commit_so_ocupa_vaga_restante_do_top_k(temp_storage):
+    """CA13: a ordem do código é a mesma com e sem camada histórica publicada."""
+    _seed_two_chunks(temp_storage)
+    sem_historia = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=1
+    )
+    _publish_history(temp_storage, [_commit_record(subject="main")])
+    com_historia = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="main", filters={}, top_k=1
+    )
+
+    assert [result.scope_name for result in com_historia.results] == [
+        result.scope_name for result in sem_historia.results
+    ]
+    assert all(result.type == "code" for result in com_historia.results)
