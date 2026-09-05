@@ -491,7 +491,7 @@ def _write_benchmark_tokenizer(path: Path) -> Path:
 def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 200) -> Dict[str, Any]:
     """
     Compara o custo de `response_budget.finalize_response` + evento de
-    observabilidade em três estados (desligado / estimativa / tokenizer local),
+    observabilidade em quatro estados (desligado / embarcado / estimativa / custom),
     separando a primeira chamada (carga fria) do estado quente, sobre um
     payload fixo de ~24 KiB (search) e um payload mínimo/vazio — sem depender
     de índice real (§4.4 do plano observabilidade-tokens-consultas).
@@ -501,6 +501,7 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
     o custo de serialização/contagem e o custo de I/O da escrita; ambos ficam
     sob o mesmo número, e o relatório declara isso explicitamente.
     """
+    import copy
     import shutil
     import tempfile
 
@@ -541,7 +542,7 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
             results[name] = {}
 
             def _finalize_only(base_payload=base_payload):
-                payload = dict(base_payload)
+                payload = copy.deepcopy(base_payload)
                 rb.finalize_response(
                     payload,
                     budget,
@@ -555,7 +556,7 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
             results[name]["observability_off"] = _time_calls(_finalize_only, iterations)
 
             def _finalize_with_event(base_payload=base_payload):
-                payload = dict(base_payload)
+                payload = copy.deepcopy(base_payload)
                 text, measurement = rb.finalize_response(
                     payload,
                     budget,
@@ -569,6 +570,11 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
 
             os.environ["ATLAS_OBSERVABILITY"] = "1"
             os.environ.pop("ATLAS_TOKENIZER_PATH", None)
+            obs.reset_token_counter_for_tests()
+            obs.reset_observability_state_for_tests()
+            results[name]["observability_bundled"] = _time_calls(_finalize_with_event, iterations)
+
+            os.environ["ATLAS_TOKENIZER_PATH"] = str(Path(tmp_dir) / "missing.json")
             obs.reset_token_counter_for_tests()
             obs.reset_observability_state_for_tests()
             results[name]["observability_estimate"] = _time_calls(_finalize_with_event, iterations)
@@ -588,7 +594,7 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     results["note"] = (
-        "observability_estimate/observability_tokenizer incluem a persistência "
+        "observability_bundled/observability_estimate/observability_tokenizer incluem a persistência "
         "do evento (I/O da escrita do JSONL) junto da serialização/contagem — "
         "não há isolamento cirúrgico entre os dois custos nesta versão do "
         "benchmark; primeira carga (cold_ms) medida separada do estado quente."
@@ -629,7 +635,7 @@ def main() -> int:
         help=(
             "Roda só o benchmark de overhead (payloads sintéticos fixos, sem "
             "precisar de índice): observabilidade desligada vs. estimativa vs. "
-            "tokenizer local, carga fria separada do estado quente."
+            "tokenizer embarcado/custom, carga fria separada do estado quente."
         ),
     )
     args = parser.parse_args()

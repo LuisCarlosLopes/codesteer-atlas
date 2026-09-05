@@ -5,7 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from codesteer_atlas.models import CodeChunk
-from codesteer_atlas.origin import OriginChoice, OriginResolver, OriginResult, _response_text
+from codesteer_atlas.origin import (
+    OriginChoice,
+    OriginResolver,
+    OriginResult,
+    _await_if_needed,
+    _response_text,
+)
 from codesteer_atlas.semantic import (
     ProseGenerator,
     SemanticGeneration,
@@ -37,6 +43,16 @@ def _chunk(content="def run(): pass", path="src/app.py", name="run"):
 def test_normalize_purpose_cobre_envelope_e_v05():
     assert normalize_purpose({"what": "faz", "invariants": ["x", "y"]}) == "faz — x; y"
     assert normalize_purpose("  \n") == ""
+
+
+def test_origin_awaitable_custom_fora_de_worker_anyio():
+    class AwaitableResult:
+        def __await__(self):
+            async def result():
+                return "propósito"
+            return result().__await__()
+
+    assert _await_if_needed(AwaitableResult()) == "propósito"
 
 
 def test_origin_resolver_prioriza_sampling_e_descreve_egress():

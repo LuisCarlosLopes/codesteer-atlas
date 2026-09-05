@@ -12,8 +12,8 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):
   mede a string JSON final devolvida por `atlas_search`, `atlas_context`,
   `atlas_brief` e `atlas_graph` — caracteres/bytes exatos e tokens (exatos via
-  tokenizer local opcional em `ATLAS_TOKENIZER_PATH`, ou estimativa
-  `ceil(chars/4)` sempre identificada como tal). Evento v1 em memória (último
+  tokenizer local embarcado ou `ATLAS_TOKENIZER_PATH`, com estimativa
+  `ceil(chars/4)` apenas se indisponível, identificada como tal). Evento v1 em memória (último
   por tool) e JSONL local com retenção limitada
   (`.code-index/observability/events.jsonl`, ≤3 MiB com rotação). Bloco
   `atlas_status.observability` só aparece quando o flag está ligado.
@@ -30,9 +30,20 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   altera a medição histórica. `--benchmark` mede o overhead de observabilidade
   (desligada / estimativa / tokenizer local) sobre payloads sintéticos fixos.
 - Dependência direta `tokenizers>=0.22.2,<0.23` (já transitiva via fastembed).
+- **Tokenizer padrão embarcado**: SmolLM2-135M (Apache-2.0, revisão e SHA-256
+  fixos) incluído no pacote, carregado de forma preguiçosa, sem download em
+  runtime. `ATLAS_OBSERVABILITY=1` basta para registrar contagem exata segundo
+  essa referência; `ATLAS_TOKENIZER_PATH` substitui o padrão. Eventos identificam
+  origem (`bundled`/`custom`), nome, revisão e hash, sem registrar paths.
+  Os limites de tokens das respostas passam a valer por padrão mesmo com o
+  registro desligado; falha no recurso/override degrada para estimativa e
+  limite por bytes. A contagem não representa faturamento do modelo cliente.
 
 ### Fixed
 
+- Corrigidos os 13 erros de tipagem reportados pelo mypy nos contratos de
+  links Markdown, grafo, histórico e status. O fallback de sampling fora de
+  workers AnyIO agora aceita objetos awaitable além de corrotinas nativas.
 - Wikilinks Obsidian com caminho de vault (`[[meta/glossary#termo]]`) passam a
   resolver a partir dos arquivos indexados (sufixo a partir da raiz da vault),
   em vez de concatenar no diretório da nota de origem. `#heading` vira aresta

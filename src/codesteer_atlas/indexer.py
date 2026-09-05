@@ -1039,7 +1039,7 @@ def _index_workspace_locked(
     # `_PHASE_WEIGHTS` — os pesos existentes somam 1.0 e a camada é opcional.
     # @MindRisk: falha aqui não pode derrubar o estrutural nem apagar o snapshot ativo
     phase_started_at = time.perf_counter()
-    git_history = {"status": "unavailable", "records": []}
+    git_history: dict = {"status": "unavailable", "records": []}
     try:
         git_history = collect_git_history(workspace_path, repo_name, manifest, storage)
         snapshot_id = None

@@ -1381,7 +1381,7 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
 
 
 def hubs(graph: dict, top_n: int) -> List[dict]:
-    result = []
+    result: List[dict] = []
     for item in graph.get("metrics", {}).get("top_hubs", []):
         if len(result) >= top_n:
             break

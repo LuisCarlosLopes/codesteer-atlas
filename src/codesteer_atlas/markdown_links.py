@@ -8,7 +8,7 @@ no conteúdo do chunk, sem necessidade de reindex ou alteração de schema.
 import posixpath
 import re
 import unicodedata
-from typing import Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Union
 
 # @MindContext: Regex de link markdown padrão [texto](destino), reaproveitando
 # o estilo de regex de cabeçalhos visto em chunker.py::_chunk_markdown.
@@ -239,7 +239,9 @@ def slugify_heading(text: str) -> str:
     return collapsed
 
 
-def resolve_heading_section(anchor: str, sections: List[object]) -> Optional[str]:
+def resolve_heading_section(
+    anchor: str, sections: Sequence[Union[str, Dict[str, Any]]]
+) -> Optional[str]:
     """
     Devolve o `scope_name` da seção cujo slug casa com `anchor`, ou None.
 

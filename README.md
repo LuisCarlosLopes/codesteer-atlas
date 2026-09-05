@@ -49,53 +49,67 @@ os casos vector+FTS continuam disponíveis, mas a recuperação semântica está
 
 ### Observabilidade de tokens por consulta (opcional)
 
-`ATLAS_OBSERVABILITY=1` liga a medição local da string JSON final devolvida por
-`atlas_search`, `atlas_context`, `atlas_brief` e `atlas_graph` — chars/bytes exatos e
-tokens (exatos com tokenizer configurado, ou estimativa `ceil(chars/4)` sempre
-identificada como tal). **Isto mede o texto retornado pela tool, não o prompt inteiro do
-cliente MCP, geração do modelo ou faturamento** — não confunda as duas coisas.
+`ATLAS_OBSERVABILITY=1` liga o registro local da string JSON final devolvida por
+`atlas_search`, `atlas_context`, `atlas_brief` e `atlas_graph`: chars/bytes e tokens
+exatos segundo o **tokenizer padrão do Atlas**, já incluído no pacote.
+**Isto mede o texto retornado pela tool, não o prompt inteiro do cliente MCP,
+geração do modelo ou faturamento.**
 
-Desligado (padrão): nenhum arquivo é criado, nenhum estado fica em memória, e o bloco
-`observability` some de `atlas_status`. Ligado: cada tool grava o último evento em memória
-(`atlas_status.observability.last_by_tool`) e tenta persistir em
-`.code-index/observability/events.jsonl` (rotação em até 3 arquivos de 1 MiB, ~3 MiB no
-total). Contenção do lock ou falha de E/S descarta a persistência **daquele** evento (nunca
-a consulta), incrementa `dropped_events` e avisa uma vez por transição em stderr.
+O padrão é o tokenizer de **HuggingFaceTB/SmolLM2-135M**, Apache-2.0, revisão
+`93efa2f097d58c2a74874c7e644dbc9b0cee75a2`. O arquivo (~2,1 MB) vem no wheel/sdist,
+com licença, origem e SHA-256 fixos em [assets](src/codesteer_atlas/assets/README.md).
+Não há download na primeira consulta nem acesso à rede para contar tokens.
+O carregamento acontece apenas quando a primeira medição precisar dele.
 
-O teto de resposta (chars/bytes; tokens exatos quando há tokenizer) é aplicado
-**independente** do flag acima — search corta resultados inteiros da cauda até caber;
-context/brief/graph reaproveitam suas prioridades de corte existentes. Toda resposta ganha
-um bloco `budget` (`mode`, `max_chars`, `max_bytes`, `max_tokens`, `tokenizer_sha256`,
-`used_chars`); `mode="byte_bpe_upper_bound"` é o teto conservador quando não há tokenizer
-exato configurado — **nunca leia isso como garantia de tokens exatos**.
+Para ativar, acrescente ao ambiente do servidor MCP e reinicie-o:
 
-**Por padrão (sem `ATLAS_TOKENIZER_PATH` configurado), `max_tokens` vem sempre `null` no
-bloco `budget` e em `atlas_status` — isso é esperado, não um bug, em qualquer sistema
-operacional (Windows, macOS, Linux).** O teto de tokens exato só existe quando há um
-tokenizer local carregado com sucesso; sem ele, `mode="byte_bpe_upper_bound"` e
-`max_tokens=null` são o sinal correto de "sem garantia de teto exato aqui". Se você
-configurou `ATLAS_TOKENIZER_PATH` e `max_tokens` continua `null`, o processo sempre
-escreve o motivo em stderr com o prefixo `[atlas]` (arquivo ausente, falha de leitura, lib
-`tokenizers` ausente, ou falha ao carregar o arquivo) — isso, sim, indica um problema real
-a investigar.
+```json
+"env": {
+  "ATLAS_OBSERVABILITY": "1"
+}
+```
 
-Contagem exata é opcional e local: aponte `ATLAS_TOKENIZER_PATH` para um `tokenizer.json`
-compatível com a lib [`tokenizers`](https://huggingface.co/docs/tokenizers). Carregado de
-forma preguiçosa (só na primeira consulta que precisar dele), identificado por
-`tokenizer_sha256` (SHA-256 do arquivo) — **não é necessariamente o tokenizer do seu
-cliente MCP**, apenas uma medição reproduzível para o arquivo configurado. Arquivo ausente,
-inválido, ou a lib `tokenizers` não instalada: degrada para estimativa
-(`tokenizer_status: "unavailable"`, warning `tokenizer_unavailable`) sem tentar de novo
-até reiniciar o processo. Trocar o arquivo também exige reiniciar o servidor.
+Desligado (padrão): nenhum arquivo de eventos ou histórico em memória é criado,
+e o bloco `observability` fica ausente de `atlas_status`. O contador continua
+sendo usado pelos limites de resposta. Ligado: cada tool grava o último evento
+em memória (`atlas_status.observability.last_by_tool`) e tenta persistir em
+`.code-index/observability/events.jsonl` (rotação em até 3 arquivos de 1 MiB,
+~3 MiB no total). Contenção do lock ou falha de E/S descarta a persistência
+**daquele** evento (nunca a consulta), incrementa `dropped_events` e avisa uma
+vez por transição em stderr.
+
+Para substituir o padrão, configure também `ATLAS_TOKENIZER_PATH` com o caminho
+para um `tokenizer.json` compatível com a lib
+[`tokenizers`](https://huggingface.co/docs/tokenizers). Variável ausente ou vazia
+seleciona o embarcado. Os eventos identificam `tokenizer_source` (`bundled` ou
+`custom`), `tokenizer_name`, `tokenizer_revision` e `tokenizer_sha256`. No override,
+nome é `custom`, revisão é `null` e o hash identifica o arquivo sem expor o path.
+**O tokenizer escolhido não é necessariamente o do cliente MCP**: mantenha a
+mesma revisão para comparar medições reproduzíveis.
+
+Arquivo ausente/inválido, recurso embarcado com hash incorreto ou biblioteca
+indisponível: degrada para estimativa `ceil(chars/4)`, com
+`tokenizer_status: "unavailable"`, e informa o motivo em stderr (`[atlas]`).
+Um override inválido não é substituído silenciosamente pelo embarcado.
+A falha é memorizada; reinicie o servidor após corrigir ou trocar o arquivo.
+
+O teto de resposta é aplicado **independentemente** da observabilidade.
+Search corta resultados inteiros da cauda; context/brief/graph mantêm suas
+prioridades de corte. O bloco `budget` declara `mode`, `max_chars`, `max_bytes`,
+`max_tokens`, `tokenizer_sha256` e `used_chars`. Com o padrão carregado,
+`mode="tokenizer_exact"` e os tetos de tokens passam a valer sem configuração
+manual. Isso pode cortar respostas que antes cabiam apenas em chars/bytes.
+Se o contador estiver indisponível, o limite passa a chars/bytes:
+`mode="byte_bpe_upper_bound"`, `max_tokens=null`, sem garantia de tokens exatos.
 
 Exemplo de evento (JSONL, um por linha, sanitizado — nunca contém query, paths retornados,
 código-fonte ou texto de exceção):
 
 ```json
-{"schema_version":"1.0","event_id":"…","timestamp":"2026-09-05T12:00:00.000Z","tool":"atlas_search","outcome":"success","scope":"tool_json_text","duration_ms":8.42,"response_chars":3120,"response_bytes":3120,"response_tokens":null,"estimated_tokens":780,"count_method":"chars_div_4","tokenizer_sha256":null,"tokenizer_status":"not_configured","truncated":false,"warnings":[],"top_k":5,"include_content":false,"results_returned":5,"results_omitted":0}
+{"schema_version":"1.0","event_id":"…","timestamp":"2026-09-05T12:00:00.000Z","tool":"atlas_search","outcome":"success","scope":"tool_json_text","duration_ms":8.42,"response_chars":14,"response_bytes":14,"response_tokens":5,"estimated_tokens":null,"count_method":"tokenizer","tokenizer_sha256":"9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c","tokenizer_status":"ok","tokenizer_source":"bundled","tokenizer_name":"HuggingFaceTB/SmolLM2-135M","tokenizer_revision":"93efa2f097d58c2a74874c7e644dbc9b0cee75a2","truncated":false,"warnings":[]}
 ```
 
-Com tokenizer configurado, `response_tokens` vira um inteiro, `estimated_tokens` fica
+Com o tokenizer embarcado ou custom disponível, `response_tokens` é um inteiro, `estimated_tokens` fica
 `null`, `count_method` vira `"tokenizer"` e `tokenizer_status` vira `"ok"`. Em erro da tool
 (ex.: `top_k` inválido), `outcome` vira `"error"`, as medidas de resposta ficam `null` e
 `error_class` traz só o **nome da classe** da exceção (nunca a mensagem, que poderia
@@ -108,7 +122,7 @@ escrita do evento em disco nem o transporte MCP, e é uma métrica **separada** 
 Avaliação de qualidade pós-orçamento: `uv run python scripts/eval_search.py --delivery`
 mede MRR/recall da resposta **realmente entregue** (metadados e conteúdo) sobre os mesmos
 candidatos do ranking, sem alterar a medição de ranking histórica. `--benchmark` roda o
-custo de overhead (observabilidade desligada / estimativa / tokenizer local) sobre payloads
+custo de overhead (observabilidade desligada / embarcado / estimativa degradada / custom) sobre payloads
 sintéticos fixos, sem precisar de índice.
 
 ## Começar (3 passos)

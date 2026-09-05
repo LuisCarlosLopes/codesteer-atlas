@@ -41,15 +41,16 @@ class OriginResult:
 def _await_if_needed(value: Any) -> Any:
     if not inspect.isawaitable(value):
         return value
+
+    async def _wait() -> Any:
+        return await value
+
     try:
         import anyio
 
-        async def _wait() -> Any:
-            return await value
-
         return anyio.from_thread.run(_wait)
     except Exception:
-        return asyncio.run(value)
+        return asyncio.run(_wait())
 
 
 def _response_text(value: Any) -> str:

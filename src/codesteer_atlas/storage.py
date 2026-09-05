@@ -223,7 +223,7 @@ def _without_history(graph: dict, node_kind: str, edge_kind: str) -> dict:
     """
     nodes = [node for node in graph.get("nodes", []) if node.get("kind") != node_kind]
     edges = [edge for edge in graph.get("edges", []) if edge.get("kind") != edge_kind]
-    filtered = {"nodes": nodes, "edges": edges}
+    filtered: Dict[str, Any] = {"nodes": nodes, "edges": edges}
     filtered["_nodes_by_id"] = {node["id"]: node for node in nodes}
     adjacency: Dict[str, List] = {}
     for edge in edges:
@@ -705,10 +705,10 @@ class StorageBackend:
 
         graph_results: List[Dict[str, Any]] = []
         for node_id in ranked_node_ids:
-            chunk_id = chunk_id_by_node.get(node_id)
-            if chunk_id is None:
+            candidate_id = chunk_id_by_node.get(node_id)
+            if candidate_id is None:
                 continue
-            graph_results.append(items_by_id[chunk_id])
+            graph_results.append(items_by_id[candidate_id])
 
         fuse(graph_results, "graph")
 
@@ -1289,5 +1289,9 @@ class StorageBackend:
         results = code[:top_k]
         if not history or len(results) >= top_k:
             return results
-        ordered = sorted(history, key=lambda result: (-result.score, result.commit.id))
+        def history_key(result: SearchResult) -> tuple[float, str]:
+            assert result.commit is not None
+            return -result.score, result.commit.id
+
+        ordered = sorted(history, key=history_key)
         return results + ordered[: top_k - len(results)]

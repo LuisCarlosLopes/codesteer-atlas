@@ -2996,6 +2996,8 @@ def test_atlas_search_records_success_event_when_enabled(tmp_path, monkeypatch):
     from codesteer_atlas import observability as obs
 
     monkeypatch.setenv("ATLAS_OBSERVABILITY", "1")
+    monkeypatch.delenv("ATLAS_TOKENIZER_PATH", raising=False)
+    obs.reset_token_counter_for_tests()
     obs.reset_observability_state_for_tests()
     mock_results = [_mock_result("def run(): pass", "run")]
 
@@ -3017,6 +3019,14 @@ def test_atlas_search_records_success_event_when_enabled(tmp_path, monkeypatch):
     assert event["response_chars"] == len(result_json)
     assert event["top_k"] == 5
     assert event["results_returned"] == 1
+    assert event["response_tokens"] == obs.count_tokens(result_json).tokens
+    assert event["estimated_tokens"] is None
+    assert event["tokenizer_source"] == "bundled"
+    assert event["tokenizer_name"] == obs.BUNDLED_TOKENIZER_NAME
+    assert event["tokenizer_revision"] == obs.BUNDLED_TOKENIZER_REVISION
+    assert event["tokenizer_sha256"] == obs.BUNDLED_TOKENIZER_SHA256
+    persisted = json.loads((tmp_path / "observability" / "events.jsonl").read_text())
+    assert persisted == event
     obs.reset_observability_state_for_tests()
 
 

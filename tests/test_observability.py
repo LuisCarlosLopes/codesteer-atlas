@@ -5,6 +5,8 @@ Testes do contador de tokens, contrato de evento e sink local de observabilidade
 """
 
 import json
+import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -13,6 +15,9 @@ import pytest
 
 from codesteer_atlas import observability as obs
 from codesteer_atlas.config import (
+    BUNDLED_TOKENIZER_NAME,
+    BUNDLED_TOKENIZER_REVISION,
+    BUNDLED_TOKENIZER_SHA256,
     OBSERVABILITY_DIRNAME,
     OBSERVABILITY_EVENTS_FILENAME,
     OBSERVABILITY_MAX_BACKUPS,
@@ -49,28 +54,78 @@ def _write_tiny_tokenizer(path: Path, *, with_padding_truncation: bool = False) 
 
 
 # ---------------------------------------------------------------------------
-# V1/V3 — sem tokenizer configurado: estimativa identificada, sem rede
+# Tokenizer embarcado: padrão local, identidade fixa, carregamento lazy
 # ---------------------------------------------------------------------------
 
 
-def test_count_tokens_without_tokenizer_estimates_and_identifies(monkeypatch):
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_count_tokens_without_override_uses_bundled_tokenizer(monkeypatch, enabled):
     monkeypatch.delenv(TOKENIZER_PATH_ENV_FLAG, raising=False)
-    obs.reset_token_counter_for_tests()
+    monkeypatch.setenv("ATLAS_OBSERVABILITY", enabled)
+    result = obs.count_tokens("Olá mundo! def run(): pass")
 
-    result = obs.count_tokens("abcdefgh")  # 8 chars -> ceil(8/4) = 2
+    assert result.tokens == 9
+    assert result.estimated_tokens is None
+    assert result.count_method == "tokenizer"
+    assert result.tokenizer_status == "ok"
+    assert result.tokenizer_source == "bundled"
+    assert result.tokenizer_name == BUNDLED_TOKENIZER_NAME
+    assert result.tokenizer_revision == BUNDLED_TOKENIZER_REVISION
+    assert result.tokenizer_sha256 == BUNDLED_TOKENIZER_SHA256
 
-    assert result.tokens is None
-    assert result.estimated_tokens == 2
-    assert result.count_method == "chars_div_4"
-    assert result.tokenizer_status == "not_configured"
-    assert result.tokenizer_sha256 is None
 
-
-def test_count_tokens_empty_string_estimates_zero(monkeypatch):
-    monkeypatch.delenv(TOKENIZER_PATH_ENV_FLAG, raising=False)
+def test_count_tokens_empty_string_counts_zero(monkeypatch):
+    monkeypatch.setenv(TOKENIZER_PATH_ENV_FLAG, "")
     obs.reset_token_counter_for_tests()
     result = obs.count_tokens("")
-    assert result.estimated_tokens == 0
+    assert result.tokens == 0
+    assert result.estimated_tokens is None
+
+
+def test_bundled_tokenizer_import_lazy_and_count_offline_from_another_cwd(tmp_path):
+    source = str(Path(obs.__file__).resolve().parents[1])
+    script = f"""
+import sys, socket
+sys.path.insert(0, {source!r})
+from codesteer_atlas import observability as obs
+assert 'tokenizers' not in sys.modules
+assert obs._counter_instance is None
+def forbidden(*args, **kwargs):
+    raise AssertionError('network forbidden')
+socket.socket = forbidden
+result = obs.count_tokens('Olá mundo! def run(): pass')
+assert result.tokens == 9, result
+assert result.tokenizer_source == 'bundled'
+"""
+    env = {k: v for k, v in os.environ.items() if k != TOKENIZER_PATH_ENV_FLAG}
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script], cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_bundled_resource_missing_or_corrupt_degrades_and_caches(tmp_path, monkeypatch, corrupt):
+    monkeypatch.delenv(TOKENIZER_PATH_ENV_FLAG, raising=False)
+    if corrupt:
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "assets" / "tokenizer.json").write_text("{}", encoding="utf-8")
+    calls = []
+
+    def resource(package):
+        calls.append(package)
+        return tmp_path
+
+    monkeypatch.setattr(obs, "files", resource)
+    for _ in range(2):
+        result = obs.count_tokens("abcdefgh")
+        assert result.tokens is None
+        assert result.estimated_tokens == 2
+        assert result.tokenizer_status == "unavailable"
+        assert result.tokenizer_source == "bundled"
+    assert calls == ["codesteer_atlas"]
 
 
 def test_module_import_does_not_touch_tokenizers(monkeypatch):
@@ -98,6 +153,9 @@ def test_count_tokens_with_tokenizer_exact_and_unicode(tmp_path, monkeypatch):
     assert result.tokenizer_status == "ok"
     assert result.tokenizer_sha256 is not None
     assert len(result.tokenizer_sha256) == 64
+    assert result.tokenizer_source == "custom"
+    assert result.tokenizer_name == "custom"
+    assert result.tokenizer_revision is None
 
     # pt-BR/emoji/CJK: não falha, mesmo que vire [UNK] no vocabulário minúsculo.
     result_unicode = obs.count_tokens("café 日本語 🎉")
@@ -155,6 +213,7 @@ def test_tokenizer_missing_file_degrades(tmp_path, monkeypatch):
     assert result.estimated_tokens is not None
     assert result.count_method == "chars_div_4"
     assert result.tokenizer_status == "unavailable"
+    assert result.tokenizer_source == "custom"
 
 
 def test_tokenizer_invalid_json_degrades(tmp_path, monkeypatch):
@@ -243,6 +302,9 @@ def test_build_event_success_has_required_fields():
         "count_method",
         "tokenizer_sha256",
         "tokenizer_status",
+        "tokenizer_source",
+        "tokenizer_name",
+        "tokenizer_revision",
         "truncated",
         "warnings",
     ):

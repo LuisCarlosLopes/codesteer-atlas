@@ -450,6 +450,7 @@ def _semantic_status(storage: StorageBackend, ctx: "Optional[Context]" = None, e
     enabled = semantic_enabled()
     origin, egress = OriginResolver(ctx=ctx).describe()
     sidecar = load_semantic_sidecar(storage.index_dir)
+    reason: Optional[str]
     if error is not None or not storage.exists():
         index, reason = "absent", "index_missing" if error is None else "manifest_unreadable"
     else:
@@ -838,7 +839,7 @@ def assemble_search_payload(
                         resolved_section = resolve_heading_section(
                             target.anchor, sections_cache[target.file_path]
                         )
-                    markdown_ref = {
+                    markdown_ref: dict = {
                         "file_path": target.file_path,
                         "anchor": target.anchor,
                         "resolved_section": resolved_section,

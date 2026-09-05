@@ -72,11 +72,39 @@ def test_finalize_response_no_cut_needed_adds_budget_block(monkeypatch):
     )
     parsed = json.loads(text)
     assert parsed["items"] == ["a", "b", "c"]
-    assert parsed["budget"]["mode"] == "byte_bpe_upper_bound"
+    assert parsed["budget"]["mode"] == "tokenizer_exact"
     assert parsed["budget"]["max_chars"] == 5000
-    assert parsed["budget"]["max_tokens"] is None  # sem tokenizer, teto de tokens não se aplica
+    assert parsed["budget"]["max_tokens"] == 1000
+    assert measurement.tokenizer_source == "bundled"
     assert parsed["budget"]["used_chars"] == len(text)
     assert measurement.chars == len(text)
+
+
+def test_bundled_tokenizer_cuts_unicode_response_to_exact_budget(monkeypatch):
+    monkeypatch.delenv(TOKENIZER_PATH_ENV_FLAG, raising=False)
+    payload = {"items": ["ação 🎉 日本語 " * 20 for _ in range(20)]}
+    budget = rb.ResponseBudget("test", max_chars=100000, max_bytes=100000, max_tokens=400)
+    text, measurement = rb.finalize_response(
+        payload, budget, cut_once=_cut_from_list("items"), minimal_envelope=_minimal_envelope,
+    )
+    parsed = json.loads(text)
+    assert 0 < len(parsed["items"]) < 20
+    assert parsed["budget"]["mode"] == "tokenizer_exact"
+    assert measurement.tokens <= 400
+    assert measurement.tokens == obs.count_tokens(text).tokens
+
+
+def test_unavailable_tokenizer_keeps_byte_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv(TOKENIZER_PATH_ENV_FLAG, str(tmp_path / "missing.json"))
+    budget = rb.ResponseBudget("test", max_chars=1000, max_bytes=1000, max_tokens=400)
+    text, measurement = rb.finalize_response(
+        {"items": ["🎉" * 50] * 20}, budget,
+        cut_once=_cut_from_list("items"), minimal_envelope=_minimal_envelope,
+    )
+    parsed = json.loads(text)
+    assert parsed["budget"]["mode"] == "byte_bpe_upper_bound"
+    assert parsed["budget"]["max_tokens"] is None
+    assert measurement.bytes <= 1000
 
 
 def test_finalize_response_cuts_tail_until_it_fits(monkeypatch):

@@ -348,13 +348,15 @@ GIT_HISTORY_TIMEOUT_S = 60
 # ---------------------------------------------------------------------------
 # Observabilidade de tokens por consulta (opt-in) — plano
 # observabilidade-tokens-consultas. Ausência de ATLAS_OBSERVABILITY não cria
-# arquivo nem estado; ausência de ATLAS_TOKENIZER_PATH nunca carrega modelo
-# nem toca rede. Os dois flags são independentes: o orçamento de tokens usa o
-# tokenizer configurado mesmo com observabilidade desligada (§4.1 do IPD).
+# arquivo de eventos nem histórico; o contador usa o tokenizer embarcado ou
+# ATLAS_TOKENIZER_PATH, sempre local e lazy, mesmo com observabilidade desligada.
 # ---------------------------------------------------------------------------
 
 OBSERVABILITY_ENV_FLAG = "ATLAS_OBSERVABILITY"
 TOKENIZER_PATH_ENV_FLAG = "ATLAS_TOKENIZER_PATH"
+BUNDLED_TOKENIZER_NAME = "HuggingFaceTB/SmolLM2-135M"
+BUNDLED_TOKENIZER_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
+BUNDLED_TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
 
 OBSERVABILITY_EVENT_SCHEMA_VERSION = "1.0"
 OBSERVABILITY_TOOLS = ("atlas_search", "atlas_context", "atlas_brief", "atlas_graph")
@@ -368,7 +370,7 @@ OBSERVABILITY_MAX_BACKUPS = 2
 # O sink nunca bloqueia a consulta: contenção descarta a persistência daquele evento.
 OBSERVABILITY_LOCK_TIMEOUT_S = 0
 
-# ceil(chars/4) quando não há tokenizer configurado ou ele está indisponível.
+# ceil(chars/4) quando o tokenizer está indisponível.
 TOKEN_ESTIMATE_DIVISOR = 4
 
 # Orçamentos de resposta por tool (§4.1). context/graph/brief reaproveitam os

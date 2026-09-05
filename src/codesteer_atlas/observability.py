@@ -3,14 +3,14 @@ Observabilidade local de tokens por consulta (opt-in via `ATLAS_OBSERVABILITY=1`
 
 Mede a string JSON final devolvida pelas quatro tools de recuperação
 (`atlas_search`, `atlas_context`, `atlas_brief`, `atlas_graph`): caracteres/bytes
-exatos e tokens (exatos via tokenizer local opcional em `ATLAS_TOKENIZER_PATH`,
+exatos e tokens (exatos via tokenizer embarcado ou `ATLAS_TOKENIZER_PATH`,
 ou estimativa `ceil(chars/4)` sempre identificada como tal). Nunca mede
 código-fonte, texto de query ou paths — apenas o tamanho/forma da resposta já
 serializada (escopo `tool_json_text`, D1 da arquitetura).
 
 O contador de tokens (`count_tokens`) é INDEPENDENTE do flag de observabilidade:
-o orçamento de resposta (`response_budget.py`) usa o tokenizer configurado em
-`ATLAS_TOKENIZER_PATH` mesmo com `ATLAS_OBSERVABILITY` desligado. Só o registro
+o orçamento de resposta (`response_budget.py`) usa o tokenizer local
+mesmo com `ATLAS_OBSERVABILITY` desligado. Só o registro
 de eventos (memória + JSONL + bloco em `atlas_status`) é que liga/desliga com
 `ATLAS_OBSERVABILITY`.
 """
@@ -26,12 +26,16 @@ import threading
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from filelock import FileLock, Timeout
 
 from codesteer_atlas.config import (
+    BUNDLED_TOKENIZER_NAME,
+    BUNDLED_TOKENIZER_REVISION,
+    BUNDLED_TOKENIZER_SHA256,
     OBSERVABILITY_DIRNAME,
     OBSERVABILITY_ENV_FLAG,
     OBSERVABILITY_EVENT_SCHEMA_VERSION,
@@ -54,17 +58,20 @@ class TokenCount:
     tokens: Optional[int]
     estimated_tokens: Optional[int]
     count_method: str  # "tokenizer" | "chars_div_4"
-    tokenizer_status: str  # "ok" | "not_configured" | "unavailable"
+    tokenizer_status: str  # "ok" | "unavailable"
     tokenizer_sha256: Optional[str]
+    tokenizer_source: Optional[str] = None
+    tokenizer_name: Optional[str] = None
+    tokenizer_revision: Optional[str] = None
 
 
 class TokenCounter:
     """
     Contador local de tokens para a string final de uma tool.
 
-    Carrega o tokenizer (`tokenizers.Tokenizer.from_file`) apenas na primeira
-    chamada que efetivamente precise dele — nunca no import do módulo — e só
-    quando `ATLAS_TOKENIZER_PATH` aponta para um arquivo. Cache por processo:
+    Carrega o tokenizer apenas na primeira chamada que precise dele — nunca
+    no import. `ATLAS_TOKENIZER_PATH` substitui o recurso embarcado, sem rede.
+    Cache por processo:
     trocar o arquivo exige reiniciar o servidor (documentado no README).
     Configuração inválida (arquivo ausente, ilegível, ou lib `tokenizers`
     ausente) é memorizada como indisponível até reinício, evitando nova
@@ -89,7 +96,7 @@ class TokenCounter:
         with self._lock:
             self._unavailable = True
 
-    def _ensure_loaded(self, path: str) -> None:
+    def _ensure_loaded(self, path: Optional[str]) -> None:
         if self._loaded_path == path and (self._tokenizer is not None or self._unavailable):
             return
         with self._lock:
@@ -100,21 +107,20 @@ class TokenCounter:
             self._sha256 = None
             self._unavailable = False
 
-            file_path = Path(path)
-            if not file_path.is_file():
-                print(
-                    f"[atlas] ATLAS_TOKENIZER_PATH não encontrado: {file_path}",
-                    file=sys.stderr,
-                )
-                self._unavailable = True
-                return
             try:
+                file_path = (
+                    Path(path) if path else files("codesteer_atlas").joinpath("assets/tokenizer.json")
+                )
                 data = file_path.read_bytes()
             except OSError as e:
-                print(f"[atlas] Falha ao ler tokenizer '{file_path}': {e}", file=sys.stderr)
+                print(f"[atlas] Falha ao ler tokenizer '{path or 'embarcado'}': {e}", file=sys.stderr)
                 self._unavailable = True
                 return
             self._sha256 = hashlib.sha256(data).hexdigest()
+            if path is None and self._sha256 != BUNDLED_TOKENIZER_SHA256:
+                print("[atlas] Tokenizer embarcado: SHA-256 inesperado.", file=sys.stderr)
+                self._unavailable = True
+                return
 
             try:
                 from tokenizers import Tokenizer  # import pesado só aqui (lazy)
@@ -123,7 +129,7 @@ class TokenCounter:
                 self._unavailable = True
                 return
             try:
-                tokenizer = Tokenizer.from_file(str(file_path))
+                tokenizer = Tokenizer.from_str(data.decode("utf-8"))
                 tokenizer.no_padding()
                 tokenizer.no_truncation()
             except Exception as e:
@@ -137,21 +143,27 @@ class TokenCounter:
         estimated = math.ceil(chars / TOKEN_ESTIMATE_DIVISOR) if chars else 0
 
         path = self._configured_path()
-        if not path:
-            return TokenCount(None, estimated, "chars_div_4", "not_configured", None)
-
         self._ensure_loaded(path)
+        result = TokenCount(
+            None, estimated, "chars_div_4", "unavailable", self._sha256,
+            tokenizer_source="custom" if path else "bundled",
+            tokenizer_name="custom" if path else BUNDLED_TOKENIZER_NAME,
+            tokenizer_revision=None if path else BUNDLED_TOKENIZER_REVISION,
+        )
         if self._unavailable or self._tokenizer is None:
-            return TokenCount(None, estimated, "chars_div_4", "unavailable", self._sha256)
+            return result
 
         try:
             encoding = self._tokenizer.encode(text, add_special_tokens=False)
-            return TokenCount(len(encoding.ids), None, "tokenizer", "ok", self._sha256)
+            return replace(
+                result, tokens=len(encoding.ids), estimated_tokens=None,
+                count_method="tokenizer", tokenizer_status="ok",
+            )
         except Exception as e:
             print(f"[atlas] Falha ao contar tokens com tokenizer local: {e}", file=sys.stderr)
             with self._lock:
                 self._unavailable = True
-            return TokenCount(None, estimated, "chars_div_4", "unavailable", self._sha256)
+            return result
 
 
 _counter_lock = threading.Lock()
@@ -191,6 +203,9 @@ class ResponseMeasurement:
     count_method: str
     tokenizer_status: str
     tokenizer_sha256: Optional[str]
+    tokenizer_source: Optional[str] = None
+    tokenizer_name: Optional[str] = None
+    tokenizer_revision: Optional[str] = None
 
 
 def measure_response(text: str) -> ResponseMeasurement:
@@ -203,6 +218,9 @@ def measure_response(text: str) -> ResponseMeasurement:
         count_method=count.count_method,
         tokenizer_status=count.tokenizer_status,
         tokenizer_sha256=count.tokenizer_sha256,
+        tokenizer_source=count.tokenizer_source,
+        tokenizer_name=count.tokenizer_name,
+        tokenizer_revision=count.tokenizer_revision,
     )
 
 
@@ -267,6 +285,9 @@ def build_event(
                 "count_method": measurement.count_method,
                 "tokenizer_sha256": measurement.tokenizer_sha256,
                 "tokenizer_status": measurement.tokenizer_status,
+                "tokenizer_source": measurement.tokenizer_source,
+                "tokenizer_name": measurement.tokenizer_name,
+                "tokenizer_revision": measurement.tokenizer_revision,
             }
         )
     else:
@@ -279,6 +300,9 @@ def build_event(
                 "count_method": None,
                 "tokenizer_sha256": None,
                 "tokenizer_status": None,
+                "tokenizer_source": None,
+                "tokenizer_name": None,
+                "tokenizer_revision": None,
             }
         )
 

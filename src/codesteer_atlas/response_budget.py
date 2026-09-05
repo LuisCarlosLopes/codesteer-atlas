@@ -5,7 +5,7 @@ em cada módulo (`graph.enforce_graph_response_budget`,
 `context._enforce_context_budget`, `brief._enforce_budget`, e o corte de
 resultados inteiros implementado em `server.py` para `atlas_search`) — aqui
 apenas garante a pós-condição final: caracteres, bytes UTF-8 e (quando há
-tokenizer local configurado) tokens exatos dentro do teto declarado, com
+tokenizer local disponível) tokens exatos dentro do teto declarado, com
 envelope mínimo quando nada mais couber. Não importa `server` (mantém D3).
 """
 
@@ -95,7 +95,7 @@ def serialize(payload: dict) -> str:
 
 
 def _tokens_fit(measurement: ResponseMeasurement, budget: ResponseBudget, reserve_tokens: int) -> bool:
-    # Sem contagem exata (tokenizer não configurado/indisponível), o teto de
+    # Sem contagem exata (tokenizer indisponível), o teto de
     # tokens não se aplica: o limite conservador passa a ser o de bytes (D2).
     if measurement.tokens is None:
         return True
