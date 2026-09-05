@@ -4,6 +4,8 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 
 ### Documentação
 
+**Primeira vez por aqui?** Siga o [guia de primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html): prepare o Atlas, conecte seu editor e faça a primeira busca, com exemplos para copiar. [Abrir a versão local](docs/primeiros-passos.html) no navegador.
+
 | Recurso | Descrição |
 | -------- | ---------- |
 | 📖 [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/) | Conceitos MCP, busca híbrida e indexação |
@@ -126,6 +128,8 @@ custo de overhead (observabilidade desligada / embarcado / estimativa degradada 
 sintéticos fixos, sem precisar de índice.
 
 ## Começar (3 passos)
+
+Para um percurso guiado e ajuda com erros comuns, veja [Primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html). Abaixo está a referência rápida de instalação.
 
 Pré-requisitos: Python 3.11–3.13 e [uv](https://github.com/astral-sh/uv) (fornece o `uvx`).
 

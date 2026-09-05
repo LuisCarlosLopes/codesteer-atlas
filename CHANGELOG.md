@@ -9,6 +9,8 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Added
 
+- Guia de primeiros passos em português, com configuração por editor, primeira
+  busca e ajuda com erros comuns, acessível pelo README e pela documentação visual.
 - **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):
   mede a string JSON final devolvida por `atlas_search`, `atlas_context`,
   `atlas_brief` e `atlas_graph` — caracteres/bytes exatos e tokens (exatos via

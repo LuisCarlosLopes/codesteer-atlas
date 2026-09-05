@@ -1355,6 +1355,45 @@ code {
    Responsividade (Media Queries)
 -------------------------------------------- */
 
+/* Guia de primeiros passos: detalhes opcionais e perguntas copiáveis. */
+.getting-started .section-body a {
+  color: #38bdf8;
+  text-underline-offset: 3px;
+}
+
+.getting-started .section-body {
+  overflow-wrap: anywhere;
+}
+
+.guide-details {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.guide-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.guide-details[open] summary {
+  margin-bottom: 16px;
+}
+
+.guide-details p:last-child {
+  margin-bottom: 0;
+}
+
+.getting-started .code-title::before {
+  content: none;
+}
+
+.getting-started pre {
+  white-space: pre-wrap;
+}
+
 /* Viewports Médios (Tablets) */
 @media (max-width: 900px) {
   .nav-toggle {

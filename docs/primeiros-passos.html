@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Primeiros passos — CodeSteer Atlas</title>
+  <meta name="description" content="Prepare o Atlas, conecte seu editor e encontre a primeira resposta sobre seu projeto. Guia prático em português, com exemplos para copiar.">
+  <meta name="theme-color" content="#080d1a">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="getting-started">
+  <a class="skip-link" href="#main">Ir para os passos</a>
+  <header class="hero">
+    <div class="hero-glow"></div>
+    <div class="container">
+      <div class="badge">CodeSteer Atlas · Primeiros passos</div>
+      <h1>Encontre respostas<br>no seu projeto</h1>
+      <p class="subtitle">O Atlas ajuda o assistente do seu editor a encontrar código e documentos. Siga estes quatro passos para fazer sua primeira pergunta e descobrir quais arquivos consultar.</p>
+      <div class="hero-actions">
+        <a href="#preparar" class="btn btn-primary">Começar agora</a>
+        <a href="index.html" class="btn btn-secondary">Explorar os conceitos</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="container content-grid">
+    <nav class="section-toc" aria-label="Etapas do guia">
+      <a href="#preparar">1. Preparar</a>
+      <a href="#indexar">2. Preparar a busca</a>
+      <a href="#conectar">3. Conectar</a>
+      <a href="#perguntar">4. Perguntar</a>
+      <a href="#ajuda">Preciso de ajuda</a>
+    </nav>
+
+    <section id="preparar" class="card-section" aria-labelledby="heading-preparar">
+      <div class="section-header">
+        <span class="section-num">01</span>
+        <h2 id="heading-preparar">Prepare o computador</h2>
+      </div>
+      <div class="section-body">
+        <p>Abra <strong>a pasta do projeto que você quer consultar</strong> no editor que já usa: Cursor, VS Code com Copilot, Claude Code, Kiro ou OpenCode. Você não precisa baixar uma cópia do repositório do Atlas.</p>
+        <p>Abra o <strong>terminal</strong> do editor — a área em que você digita comandos. No Windows, use o PowerShell. Cole cada linha abaixo e pressione Enter:</p>
+        <div class="code-example">
+          <div class="code-title">No terminal — conferir as ferramentas</div>
+          <pre><code>uv --version
+git --version</code></pre>
+        </div>
+        <p><strong>Deu certo?</strong> Cada comando mostra um número de versão. O <code>uv</code> prepara o Atlas e suas dependências; o Git permite baixar o pacote do GitHub.</p>
+        <details class="guide-details">
+          <summary>Algum comando não foi encontrado?</summary>
+          <p>Instale a ferramenta que faltou: <a href="https://docs.astral.sh/uv/getting-started/installation/">instalação oficial do uv</a> ou <a href="https://git-scm.com/downloads">instalação oficial do Git</a>. Escolha seu sistema operacional. Depois, feche e abra novamente o editor e repita a conferência.</p>
+        </details>
+        <p>Prepare uma versão de Python compatível com o Atlas. Este comando instala o Python 3.12, ou confirma que ele já está disponível:</p>
+        <div class="code-example">
+          <div class="code-title">No terminal — preparar o Python</div>
+          <pre><code>uv python install 3.12</code></pre>
+        </div>
+        <div class="note-box info"><strong>Internet na primeira preparação.</strong> O Atlas baixa o pacote, as dependências e o modelo usado na busca. Depois desses downloads, a indexação e a busca rodam localmente na configuração padrão deste guia. O chat do seu editor pode continuar dependendo de internet.</div>
+      </div>
+    </section>
+
+    <section id="indexar" class="card-section" aria-labelledby="heading-indexar">
+      <div class="section-header">
+        <span class="section-num">02</span>
+        <h2 id="heading-indexar">Prepare a busca no seu projeto</h2>
+      </div>
+      <div class="section-body">
+        <p>O Atlas precisa criar um <strong>índice</strong>: um catálogo dos arquivos para encontrar trechos relevantes. Faça isso uma vez para cada projeto.</p>
+        <p>No terminal, entre na pasta principal do seu projeto. Substitua o caminho do exemplo pelo caminho real e mantenha as aspas se houver espaços:</p>
+        <details class="guide-details">
+          <summary>Como entrar na pasta do projeto</summary>
+          <div class="code-example">
+            <div class="code-title">macOS ou Linux — exemplo de caminho</div>
+            <pre><code>cd "/Users/ana/Projetos/minha-loja"</code></pre>
+          </div>
+          <div class="code-example">
+            <div class="code-title">Windows (PowerShell) — exemplo de caminho</div>
+            <pre><code>cd "C:\Users\Ana\Projetos\minha-loja"</code></pre>
+          </div>
+          <p>Para conferir a pasta atual, use <code>pwd</code> no macOS/Linux ou <code>Get-Location</code> no PowerShell.</p>
+        </details>
+        <p>Cole este comando inteiro, em uma única linha:</p>
+        <div class="code-example">
+          <div class="code-title">No terminal — criar o índice</div>
+          <pre><code>uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .</code></pre>
+        </div>
+        <p>O ponto final significa <strong>“a pasta em que o terminal está agora”</strong>. Confira o caminho mostrado em <code>Workspace:</code>. Aguarde o término; o primeiro uso pode levar mais tempo por causa dos downloads.</p>
+        <p><strong>Deu certo?</strong> Aparece <code>Indexação Concluída com Sucesso!</code>, com um total de trechos (<code>chunks</code>) maior que zero. A pasta <code>.code-index</code> é criada dentro do seu projeto. Ela pode ficar oculta na lista de arquivos.</p>
+        <p>Se o projeto usa Git, adicione <code>.code-index/</code> em uma nova linha do arquivo <code>.gitignore</code> na pasta principal. Isso mantém o índice gerado fora do histórico do projeto.</p>
+      </div>
+    </section>
+
+    <section id="conectar" class="card-section" aria-labelledby="heading-conectar">
+      <div class="section-header">
+        <span class="section-num">03</span>
+        <h2 id="heading-conectar">Conecte o Atlas ao seu editor</h2>
+      </div>
+      <div class="section-body">
+        <p>A conexão usa <strong>MCP</strong>, o meio pelo qual o assistente acessa ferramentas como o Atlas. Configure apenas o editor que você usa, <strong>dentro do projeto aberto</strong>.</p>
+        <p>Abra sua opção abaixo, crie o arquivo indicado e copie o conteúdo. Os nomes que começam com ponto fazem parte do caminho. Salve o arquivo.</p>
+        <p><strong>O arquivo já existe?</strong> Acrescente só a entrada <code>codesteer-atlas</code> à seção indicada no exemplo, mantendo as outras ferramentas. Se precisar, peça ao assistente: “Adicione esta configuração do Atlas ao arquivo existente, preservando as outras entradas”.</p>
+        <details class="guide-details">
+          <summary>Cursor</summary>
+          <p>Crie <code>.cursor/mcp.json</code> dentro da pasta principal do seu projeto. Crie também as pastas do caminho, se necessário.</p>
+          <div class="code-example">
+            <div class="code-title">.cursor/mcp.json — conteúdo do arquivo</div>
+            <pre><code>{
+  &quot;mcpServers&quot;: {
+    &quot;codesteer-atlas&quot;: {
+      &quot;command&quot;: &quot;uvx&quot;,
+      &quot;args&quot;: [
+        &quot;--from&quot;,
+        &quot;git+https://github.com/LuisCarlosLopes/codesteer-atlas.git&quot;,
+        &quot;atlas-serve&quot;
+      ],
+      &quot;env&quot;: {
+        &quot;ATLAS_INDEX_DIR&quot;: &quot;${workspaceFolder}/.code-index&quot;
+      }
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+        <details class="guide-details">
+          <summary>VS Code com GitHub Copilot</summary>
+          <p>Crie <code>.vscode/mcp.json</code> dentro da pasta principal do seu projeto. Crie também as pastas do caminho, se necessário.</p>
+          <div class="code-example">
+            <div class="code-title">.vscode/mcp.json — conteúdo do arquivo</div>
+            <pre><code>{
+  &quot;servers&quot;: {
+    &quot;codesteer-atlas&quot;: {
+      &quot;command&quot;: &quot;uvx&quot;,
+      &quot;args&quot;: [
+        &quot;--from&quot;,
+        &quot;git+https://github.com/LuisCarlosLopes/codesteer-atlas.git&quot;,
+        &quot;atlas-serve&quot;
+      ]
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+        <details class="guide-details">
+          <summary>Claude Code</summary>
+          <p>Crie <code>.mcp.json</code> dentro da pasta principal do seu projeto. Crie também as pastas do caminho, se necessário.</p>
+          <div class="code-example">
+            <div class="code-title">.mcp.json — conteúdo do arquivo</div>
+            <pre><code>{
+  &quot;mcpServers&quot;: {
+    &quot;codesteer-atlas&quot;: {
+      &quot;command&quot;: &quot;uvx&quot;,
+      &quot;args&quot;: [
+        &quot;--from&quot;,
+        &quot;git+https://github.com/LuisCarlosLopes/codesteer-atlas.git&quot;,
+        &quot;atlas-serve&quot;
+      ]
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+        <details class="guide-details">
+          <summary>Kiro</summary>
+          <p>Crie <code>.kiro/settings/mcp.json</code> dentro da pasta principal do seu projeto. Crie também as pastas do caminho, se necessário.</p>
+          <div class="code-example">
+            <div class="code-title">.kiro/settings/mcp.json — conteúdo do arquivo</div>
+            <pre><code>{
+  &quot;mcpServers&quot;: {
+    &quot;codesteer-atlas&quot;: {
+      &quot;command&quot;: &quot;uvx&quot;,
+      &quot;args&quot;: [
+        &quot;--from&quot;,
+        &quot;git+https://github.com/LuisCarlosLopes/codesteer-atlas.git&quot;,
+        &quot;atlas-serve&quot;
+      ],
+      &quot;autoApprove&quot;: [
+        &quot;atlas_brief&quot;,
+        &quot;atlas_search&quot;,
+        &quot;atlas_graph&quot;,
+        &quot;atlas_context&quot;,
+        &quot;atlas_status&quot;
+      ]
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+        <details class="guide-details">
+          <summary>OpenCode</summary>
+          <p>Crie <code>opencode.json</code> dentro da pasta principal do seu projeto. Crie também as pastas do caminho, se necessário.</p>
+          <div class="code-example">
+            <div class="code-title">opencode.json — conteúdo do arquivo</div>
+            <pre><code>{
+  &quot;$schema&quot;: &quot;https://opencode.ai/config.json&quot;,
+  &quot;mcp&quot;: {
+    &quot;codesteer-atlas&quot;: {
+      &quot;type&quot;: &quot;local&quot;,
+      &quot;command&quot;: [
+        &quot;uvx&quot;,
+        &quot;--from&quot;,
+        &quot;git+https://github.com/LuisCarlosLopes/codesteer-atlas.git&quot;,
+        &quot;atlas-serve&quot;
+      ],
+      &quot;enabled&quot;: true
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+        <p>Feche e abra novamente o editor no mesmo projeto. Na área de ferramentas ou servidores MCP, confira se <code>codesteer-atlas</code> aparece conectado. Se o editor pedir para habilitar a conexão, habilite-a.</p>
+        <p><strong>Deu certo?</strong> O assistente tem acesso a ferramentas como <code>atlas_brief</code> e <code>atlas_search</code>. O editor inicia o Atlas para você.</p>
+      </div>
+    </section>
+
+    <section id="perguntar" class="card-section" aria-labelledby="heading-perguntar">
+      <div class="section-header">
+        <span class="section-num">04</span>
+        <h2 id="heading-perguntar">Faça sua primeira pergunta</h2>
+      </div>
+      <div class="section-body">
+        <p>Abra o <strong>chat do editor em um modo que permita usar ferramentas</strong> e envie:</p>
+        <div class="code-example">
+          <div class="code-title">No chat — conhecer o projeto</div>
+          <pre><code>Use atlas_brief para explicar este projeto em linguagem simples e indicar os principais arquivos por onde posso começar.</code></pre>
+        </div>
+        <p>Depois, peça uma busca concreta. Troque “login” por um assunto que exista no seu projeto, como “pagamento” ou “configuração”:</p>
+        <div class="code-example">
+          <div class="code-title">No chat — encontrar uma funcionalidade</div>
+          <pre><code>Use atlas_search para encontrar onde o login é tratado. Leia os trechos relevantes e me explique o que acontece, citando os arquivos e as linhas.</code></pre>
+        </div>
+        <div class="note-box info"><strong>Seu primeiro resultado útil:</strong> o chat mostra uma chamada ao Atlas e uma resposta com caminhos de arquivos e linhas que você consegue abrir. Você já pode usar esses trechos para entender o projeto ou orientar uma mudança.</div>
+        <p>Se vierem só nomes de arquivos, peça: “Leia os trechos desses resultados e explique”. O Atlas primeiro localiza os trechos; o assistente usa esse conteúdo para responder.</p>
+        <h3>Quando os arquivos mudarem</h3>
+        <p>Repita o comando do passo 2, na mesma pasta. Ele atualiza o índice aproveitando os arquivos que não mudaram. Você também pode pedir no chat: “Use atlas_index para atualizar o índice deste projeto”.</p>
+      </div>
+    </section>
+
+    <section id="ajuda" class="card-section" aria-labelledby="heading-ajuda">
+      <div class="section-header"><h2 id="heading-ajuda">Preciso de ajuda</h2></div>
+      <div class="section-body">
+        <details class="guide-details">
+          <summary>O terminal reconhece uvx, mas o editor não encontra o comando</summary>
+          <p>Feche completamente o editor e abra-o novamente. Se persistir, use <code>command -v uvx</code> no macOS/Linux ou <code>(Get-Command uvx).Source</code> no PowerShell. Troque <code>"uvx"</code> no arquivo de configuração pelo caminho retornado. Em JSON no Windows, use barras duplas, como <code>C:\Users\Ana</code> escrito como <code>C:\\Users\\Ana</code>.</p>
+        </details>
+        <details class="guide-details">
+          <summary>Apareceu “Índice local não encontrado”</summary>
+          <p>Conclua o passo 2 na pasta do projeto e reabra o editor nessa mesma pasta. Se continuar, peça no chat: “Use atlas_status e me mostre index_path e index_resolution”. O caminho deve apontar para a pasta <code>.code-index</code> do seu projeto.</p>
+          <p>Se apontar para outro lugar, consulte <a href="#caminho-indice">como indicar o caminho do índice</a> abaixo.</p>
+        </details>
+        <details class="guide-details">
+          <summary>O assistente diz que não tem atlas_search</summary>
+          <p>Confira o nome e a localização do arquivo do passo 3. Verifique se o Atlas está habilitado nas conexões MCP e reabra o editor. Use um modo de chat com acesso a ferramentas.</p>
+        </details>
+        <details class="guide-details">
+          <summary>O download falhou no primeiro uso</summary>
+          <p>Confira a conexão e tente novamente o comando do passo 2. Os downloads incluem o GitHub e o modelo de busca do Hugging Face. Se a rede da empresa bloquear um deles, encaminhe a mensagem de erro ao suporte da sua equipe.</p>
+        </details>
+        <details class="guide-details">
+          <summary>A busca veio vazia ou o total de trechos é zero</summary>
+          <p>Confira se a pasta indexada contém código ou documentos, como arquivos Python, JavaScript ou Markdown. Tente buscar um nome que aparece em um arquivo. Arquivos excluídos por <code>.atlasignore</code>, pastas como <code>node_modules</code> e arquivos maiores que 2 MB não entram na busca. Veja os <a href="index.html#texto-docs">formatos de documentos</a> e atualize o índice após corrigir a pasta.</p>
+        </details>
+        <details class="guide-details">
+          <summary>Apareceu “Indexação Concluída COM FALHAS”</summary>
+          <p>Alguns arquivos ficaram fora do índice. Veja os avisos anteriores à mensagem final, corrija o problema indicado e repita o passo 2. Se precisar de ajuda, copie a mensagem de erro e o nome do arquivo afetado para sua equipe.</p>
+        </details>
+      </div>
+    </section>
+
+    <section id="aprofundar" class="card-section" aria-labelledby="heading-aprofundar">
+      <div class="section-header"><h2 id="heading-aprofundar">Para depois, se precisar</h2></div>
+      <div class="section-body">
+        <details id="caminho-indice" class="guide-details">
+          <summary>Indicar o caminho do índice manualmente</summary>
+          <p>Para Cursor, VS Code, Claude Code e Kiro, adicione <code>env</code> dentro da entrada <code>codesteer-atlas</code>, ao lado de <code>command</code> e <code>args</code>. Se já existir <code>env</code>, ajuste apenas <code>ATLAS_INDEX_DIR</code>. Use o caminho completo da pasta <code>.code-index</code> criada no passo 2.</p>
+          <div class="code-example">
+            <div class="code-title">Trecho para acrescentar à configuração — ajuste o caminho</div>
+            <pre><code>"env": {
+  "ATLAS_INDEX_DIR": "/Users/ana/Projetos/minha-loja/.code-index"
+}</code></pre>
+          </div>
+          <p>Separe as propriedades com vírgula. No Windows, use barras normais no caminho, por exemplo <code>C:/Users/Ana/Projetos/minha-loja/.code-index</code>. Reabra o editor depois de salvar.</p>
+          <p>No OpenCode, acrescente <code>"--index-dir"</code> e o caminho completo ao final da lista <code>command</code>, depois de <code>"atlas-serve"</code>.</p>
+        </details>
+        <ul class="concept-list">
+          <li><strong>Ver as conexões do projeto:</strong> abra o arquivo <code>.code-index/graph.html</code> no navegador, após indexar.</li>
+          <li><a href="index.html#tools">Conhecer as ferramentas do Atlas</a>.</li>
+          <li><a href="https://github.com/LuisCarlosLopes/codesteer-atlas/blob/main/README.md#instruções-para-agentes-de-ia-agentsmd--claudemd">Orientar o assistente a usar o Atlas nas próximas conversas</a>.</li>
+          <li><a href="https://github.com/LuisCarlosLopes/codesteer-atlas/blob/main/CONTRIBUTING.md">Configuração avançada e contribuição</a>.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+  <footer class="main-footer">
+    <div class="container"><p>CodeSteer Atlas · <a href="index.html">Documentação visual</a> · <a href="https://github.com/LuisCarlosLopes/codesteer-atlas">GitHub</a></p></div>
+  </footer>
+</body>
+</html>
