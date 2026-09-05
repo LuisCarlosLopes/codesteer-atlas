@@ -79,10 +79,11 @@ flowchart TB
 
     subgraph MCP["Servidor MCP (server.py)"]
         T1[atlas_search]
-        T2[atlas_map]
-        T3[atlas_graph]
-        T4[atlas_index]
-        T5[atlas_status]
+        T2[atlas_brief]
+        T3[atlas_context]
+        T4[atlas_graph]
+        T5[atlas_index]
+        T6[atlas_status]
     end
 
     subgraph Core["Núcleo Python"]
@@ -101,11 +102,12 @@ flowchart TB
     end
 
     CURSOR <-->|stdio JSON-RPC| MCP
-    T4 --> IDX
+    T5 --> IDX
     T1 --> STO
     T2 --> STO
     T3 --> GJ
-    T5 --> MAN
+    T4 --> GJ
+    T6 --> MAN
 
     IDX --> CHK
     IDX --> EMB
@@ -220,7 +222,7 @@ flowchart LR
 | Arquivo | Conteúdo | Usado por |
 |---------|----------|-----------|
 | `manifest.json` | Hashes, repos, idiomas, versão do índice, git HEAD | `atlas_status`, incremental |
-| `lancedb/` | Tabela `chunks` com vetores e texto | `atlas_search`, `atlas_map` |
+| `lancedb/` | Tabela `chunks` com vetores e texto | `atlas_search` |
 | `graph.json` | Nós (arquivos, símbolos, docs) e arestas (imports, cites…) | `atlas_graph` |
 | `graph.html` | Viewer offline com pan/zoom e filtros | Humano (duplo-clique) |
 
@@ -326,7 +328,9 @@ mindmap
   root((Tools MCP))
     Descoberta
       atlas_search
-      atlas_map
+      atlas_brief
+    Tarefa
+      atlas_context
     Conectividade
       atlas_graph
     Operação
@@ -336,11 +340,14 @@ mindmap
 
 | Tool | Quando usar | Retorno típico |
 |------|-------------|----------------|
-| `atlas_search` | "Onde está X?" / "Como funciona Y?" | `file_path`, linhas, símbolo, score |
-| `atlas_map` | Visão estrutural do projeto | Árvore de classes/funções |
-| `atlas_graph` | Conectividade, hubs, caminhos | Nós, arestas, vizinhança |
-| `atlas_status` | Diagnóstico do índice | stale?, chunks, `graph_viewer_path` |
+| `atlas_search` | "Onde está X?" / "Como funciona Y?" | `file_path`, linhas, símbolo, score; `structural=true` e hits `type="commit"` |
+| `atlas_brief` | Orientar-se num projeto desconhecido | identidade, camadas, entrypoints, hubs |
+| `atlas_context` | Símbolo/arquivo da tarefa já conhecido | pacote por `intent` (`edit`/`debug`/`review`/`understand`) |
+| `atlas_graph` | Conectividade, hubs, caminhos, impacto | Nós, arestas, vizinhança, `affected` |
+| `atlas_status` | Diagnóstico do índice | stale?, `watch`, `semantic`, `resolution_coverage` |
 | `atlas_index` | Criar/atualizar índice | stats ou job em background |
+
+Variáveis de ambiente (`ATLAS_*`): veja a tabela em [README — Configuração](../README.md#configuração-e-variáveis-de-ambiente) e no [site](index.html#config).
 
 ### Fluxo recomendado para agentes
 
@@ -360,10 +367,12 @@ sequenceDiagram
     end
 ```
 
-1. **`atlas_search`** com metadados only (`include_content=false`).
-2. **`Read`** nas linhas retornadas.
-3. **`atlas_graph(explain)`** se precisar de contexto arquitetural.
-4. **`grep`** só para confirmar string literal exata.
+1. **`atlas_brief`** uma vez, se o projeto for desconhecido.
+2. **`atlas_context`** quando o símbolo/arquivo da tarefa já é conhecido.
+3. **`atlas_search`** com metadados only (`include_content=false`) para descoberta.
+4. **`Read`** nas linhas retornadas.
+5. **`atlas_graph(explain|affected)`** se precisar de vizinhança ou raio de impacto.
+6. **`grep`** só para confirmar string literal exata.
 
 ---
 
@@ -375,7 +384,8 @@ sequenceDiagram
 | Quais decisões arquiteturais este código cita? | `atlas_graph(explain)` |
 | Como o símbolo A se conecta ao doc B? | `atlas_graph(path)` |
 | Quais notas/docs são centrais no projeto? | `atlas_graph(hubs)` |
-| Estrutura de classes de um módulo | `atlas_map` |
+| Pacote da tarefa num símbolo conhecido | `atlas_context` |
+| O que quebra se eu mudar este símbolo? | `atlas_graph(affected)` |
 | Explorar clusters visualmente | `graph.html` |
 
 ```mermaid
@@ -384,7 +394,7 @@ quadrantChart
     x-axis Semântica --> Estrutural
     y-axis Localizar código --> Entender relações
     atlas_search: [0.25, 0.75]
-    atlas_map: [0.75, 0.55]
+    atlas_context: [0.55, 0.45]
     atlas_graph: [0.70, 0.25]
     graph.html: [0.85, 0.15]
 ```
@@ -449,7 +459,7 @@ erDiagram
 | `cites` | Referência `DECISAO-005` no código | função → doc de decisão |
 | `annotates` | Comentário rationale no símbolo | `# WHY: …` → nó rationale |
 
-### Tool `atlas_graph` — três modos
+### Tool `atlas_graph` — quatro modos
 
 #### `hubs` — nós mais conectados
 
@@ -493,6 +503,14 @@ flowchart LR
     A[index_workspace] -->|cites| B[dec-001-busca-hibrida-rrf.md]
     B -->|links_to| C[index.md — seção decisions]
     C -->|links_to| D[dec-002-resolucao-index-dir.md]
+```
+
+#### `affected` — raio de impacto
+
+BFS reversa: o que depende deste símbolo. Ignora nós `commit` e arestas `touches`.
+
+```text
+atlas_graph(mode="affected", target="index_workspace")
 ```
 
 ---

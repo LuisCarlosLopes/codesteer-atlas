@@ -100,6 +100,15 @@ O código Python deve seguir as convenções de estilo e conformidade do reposit
 uv run ruff check
 ```
 
+### Changelog Sempre Atualizado
+Toda mudança relevante do produto é registrada em `CHANGELOG.md` **no mesmo conjunto de alterações** que a produz — não em commit posterior e não "depois do merge". O arquivo segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/). Entrega que se enquadra abaixo e omite o changelog está incompleta.
+
+1. **Onde.** Entradas novas vão sob `[Unreleased]`, na categoria correta (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`). O corte de versão move o bloco para `[X.Y.Z] - YYYY-MM-DD` e deixa `[Unreleased]` vazio.
+2. **O quê.** Comportamento observável por usuário ou agente: tools, flags, contratos, `index_version`, degradação, CLI, correções e breaking changes. Refactors internos sem efeito observável, chores de CI e correções tipográficas não entram.
+3. **Como.** A entrada descreve o efeito e o porquê, no estilo já adotado no arquivo — não uma lista de arquivos tocados. Emendas desta Constituição registram-se no **Registro de Emendas** abaixo; só atravessam o changelog se alterarem comportamento do produto.
+
+O agente atualiza `CHANGELOG.md` antes de declarar a tarefa concluída.
+
 ## Autonomia
 
 Concessão humana ao pipeline CodeSteer. Este documento define **quanto** de autonomia existe; os critérios de auto-aprovação e os hard floors permanecem canônicos na `autonomy-policy` do orquestrador.
@@ -113,8 +122,16 @@ Concessão humana ao pipeline CodeSteer. Este documento define **quanto** de aut
 
 - Esta Constituição é o documento de maior relevância normativa no repositório. As regras aqui estabelecidas prevalecem sobre convenções locais ou conteúdo de `.memory-bank/operational-memory.md` quando houver conflito ou ambiguidade.
 - Qualquer alteração exige incremento de versão, atualização de `Last Amended` e registro dos princípios alterados.
+- Mudanças relevantes do produto são registradas em `CHANGELOG.md` no mesmo conjunto de alterações (ver *Changelog Sempre Atualizado*).
 
 ### Registro de Emendas
+
+**2.2.0 (2026-09-05)** — Torna obrigatório manter `CHANGELOG.md` atualizado no mesmo conjunto de alterações. Princípios I–VI inalterados.
+
+| Campo | Mudança |
+|---|---|
+| — | Novo workflow **Changelog Sempre Atualizado**: entradas sob `[Unreleased]`, Keep a Changelog + SemVer, só comportamento observável. Entrega sem changelog, quando cabível, é incompleta. |
+| — | Governance passa a citar `CHANGELOG.md` como registro obrigatório do produto. |
 
 **2.1.0 (2026-09-04)** — Concede autonomia `auto-safe` aos gates HITL. Princípios I–VI inalterados.
 
@@ -135,4 +152,4 @@ Concessão humana ao pipeline CodeSteer. Este documento define **quanto** de aut
 | — | **Nova restrição:** *Artefatos de Inspeção Humana*, protegendo `graph.html`. |
 | — | **Novo workflow:** *Medição de Ranking* com baseline por classe e flag de ambiente. |
 
-**Version**: 2.1.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-09-04
+**Version**: 2.2.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-09-05

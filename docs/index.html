@@ -53,7 +53,8 @@
           <li><a href="#grafo"><span class="nav-num">06</span> Grafo</a></li>
           <li><a href="#busca-hibrida"><span class="nav-num">07</span> Busca híbrida</a></li>
           <li><a href="#tools"><span class="nav-num">08</span> Tools</a></li>
-          <li><a href="#instalacao"><span class="nav-num">09</span> Instalar</a></li>
+          <li><a href="#config"><span class="nav-num">09</span> Config</a></li>
+          <li><a href="#instalacao"><span class="nav-num">10</span> Instalar</a></li>
         </ul>
       </div>
     </div>
@@ -163,7 +164,7 @@
           <div class="flow-step">
             <div class="step-badge">2</div>
             <h4>Descoberta (Listing)</h4>
-            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 5 ferramentas (ex: <code>atlas_search</code>, <code>atlas_graph</code>).</p>
+            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 6 ferramentas (ex: <code>atlas_search</code>, <code>atlas_context</code>, <code>atlas_graph</code>).</p>
           </div>
           <div class="flow-step">
             <div class="step-badge">3</div>
@@ -250,6 +251,12 @@
             <p>Atualiza <code>graph.json</code>/<code>graph.html</code> com a estratégia mais barata possível: pula se nada mudou, faz rebuild incremental quando só código já indexado foi alterado, ou reconstrói tudo nos demais casos.</p>
           </div>
         </div>
+        <p>
+          Depois do Graph, fases <strong>opt-in ou sempre-locais</strong> podem complementar o índice:
+          SCIP (<code>ATLAS_SCIP=1</code>) emite arestas <code>calls</code>; a camada semântica
+          (<code>ATLAS_SEMANTIC=1</code>) grava <code>semantic.json</code>; a história de Git
+          (sem flag) publica <code>history.json</code> na janela de 100 commits / 24 meses.
+        </p>
 
         <div class="diagram-container" role="img" aria-label="Fluxo linear: Scan, Hash, Chunk, Embed, Persist, Graph">
           <div class="diagram-title">Pipeline de indexação — visão linear</div>
@@ -340,7 +347,7 @@
           <div class="artifact-card">
             <span class="artifact-icon" aria-hidden="true">🗄️</span>
             <h4><code>lancedb/</code></h4>
-            <p>Tabela <code>chunks</code> com vetores + texto. Alimenta <code>atlas_search</code> (híbrido) e <code>atlas_map</code>.</p>
+            <p>Tabela <code>chunks</code> com vetores + texto. Alimenta <code>atlas_search</code> (híbrido).</p>
           </div>
           <div class="artifact-card">
             <span class="artifact-icon" aria-hidden="true">🔗</span>
@@ -351,6 +358,21 @@
             <span class="artifact-icon" aria-hidden="true">🌐</span>
             <h4><code>graph.html</code></h4>
             <p>Viewer offline com busca, filtros e pan/zoom. Abra via <code>file://</code> — caminho em <code>graph_viewer_path</code>.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">🧭</span>
+            <h4><code>brief.json</code></h4>
+            <p>Briefing ranqueado (identidade, camadas, entrypoints, hubs). Consumido por <code>atlas_brief</code>.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">✨</span>
+            <h4><code>semantic.json</code></h4>
+            <p>Sidecar da camada opt-in (<code>ATLAS_SEMANTIC=1</code>): propósito por símbolo e sumários. Ausente no default.</p>
+          </div>
+          <div class="artifact-card">
+            <span class="artifact-icon" aria-hidden="true">📜</span>
+            <h4><code>history.json</code></h4>
+            <p>Ponteiro da janela local de Git (sem flag de ambiente). Hits <code>type="commit"</code> e <code>recent_history</code> no intent <code>debug</code>.</p>
           </div>
         </div>
 
@@ -652,7 +674,11 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           </div>
           <div class="choice-card">
             <h4><code>atlas_graph</code></h4>
-            <p>Explorar hubs, caminhos e vizinhança — conectividade e rationale.</p>
+            <p>Explorar hubs, caminhos, vizinhança e raio de impacto (<code>affected</code>).</p>
+          </div>
+          <div class="choice-card">
+            <h4><code>atlas_context</code></h4>
+            <p>Pacote da tarefa (<code>target</code> + <code>intent</code>) numa chamada, com teto de tokens.</p>
           </div>
           <div class="choice-card">
             <h4><code>graph.html</code></h4>
@@ -682,7 +708,18 @@ def encode(self, texts: list[str]) -> list[list[float]]:
                 <td><code>symbol</code></td>
                 <td><code>index_workspace</code></td>
                 <td><code>imports</code></td>
-                <td>Import Python ou JS/TS relativo</td>
+                <td>Import resolvido (Python, JS/TS, Go, Java, C#, …). <code>origin: "treesitter"</code></td>
+              </tr>
+              <tr>
+                <td><code>commit</code></td>
+                <td>SHA da janela histórica</td>
+                <td><code>calls</code></td>
+                <td>Chamada via SCIP (<code>origin: "scip"</code>). Só com <code>ATLAS_SCIP=1</code></td>
+              </tr>
+              <tr>
+                <td colspan="2"></td>
+                <td><code>touches</code></td>
+                <td>Commit tocou o símbolo. Não entra em <code>hubs</code>/<code>affected</code></td>
               </tr>
               <tr>
                 <td><code>section</code></td>
@@ -734,7 +771,7 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           </svg>
         </div>
 
-        <h3 id="atlas-graph">Tool <code>atlas_graph</code> — três modos</h3>
+        <h3 id="atlas-graph">Tool <code>atlas_graph</code> — quatro modos</h3>
         <p>
           Lê o <code>graph.json</code> já gerado — <strong>não reconstrói</strong> o grafo.
           Reindexe com <code>atlas_index</code> se o grafo estiver ausente (índices &lt; 2.1.0).
@@ -761,6 +798,13 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             <pre><code>atlas_graph(mode="path",
   source="index_workspace",
   target="dec-002")</code></pre>
+          </div>
+          <div class="graph-mode-card">
+            <span class="graph-mode-badge">affected</span>
+            <h4>Raio de impacto</h4>
+            <p>BFS reversa: o que quebra se este símbolo mudar. Ignora nós <code>commit</code> e arestas <code>touches</code>.</p>
+            <pre><code>atlas_graph(mode="affected",
+  target="index_workspace")</code></pre>
           </div>
         </div>
 
@@ -824,6 +868,13 @@ def encode(self, texts: list[str]) -> list[list[float]]:
         <p>
           Dessa forma, arquivos que aparecem bem posicionados em ambos os motores ganham prioridade absoluta, garantindo um resultado final superior a qualquer um dos métodos isolados.
         </p>
+        <p>
+          Depois do RRF, um rerank lexical reordena o pool (desliga com <code>ATLAS_RERANK=0</code>).
+          <code>ATLAS_RERANK_MODEL</code> troca essa etapa por um cross-encoder ONNX.
+          <code>atlas_search(..., structural=true)</code> adiciona um terceiro braço RRF sobre
+          <code>graph.json</code>. Cada hit traz <code>match_arms</code> (<code>vector</code>, <code>fts</code>, <code>graph</code>).
+          Com história indexada, a busca também pode devolver <code>type="commit"</code>.
+        </p>
       </div>
     </section>
 
@@ -831,11 +882,13 @@ def encode(self, texts: list[str]) -> list[list[float]]:
     <section id="tools" class="card-section">
       <div class="section-header">
         <span class="section-num">08</span>
-        <h2>As 5 Ferramentas (Tools) do Atlas</h2>
+        <h2>As 6 Ferramentas (Tools) do Atlas</h2>
       </div>
       <div class="section-body">
         <p>
-          O servidor MCP expõe cinco ações principais. Use <code>atlas_search</code> para localizar código,
+          O servidor MCP expõe seis ações. Use <code>atlas_brief</code> para se orientar,
+          <code>atlas_context</code> quando o símbolo já é conhecido,
+          <code>atlas_search</code> para localizar código,
           <code>atlas_graph</code> para conectividade, e <code>atlas_status</code> apenas para diagnóstico explícito.
         </p>
 
@@ -848,39 +901,54 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             <p class="tool-desc">
               Busca semântica híbrida (vetorial + BM25) no índice local. Retorna metadados por padrão;
               use <code>include_content=true</code> ou <code>Read</code> nas linhas indicadas.
-              Resultados de código podem incluir <code>rationale_refs</code>; Markdown inclui
+              <code>structural=true</code> adiciona o braço do grafo. Hits de Git vêm como
+              <code>type="commit"</code>. Código pode incluir <code>rationale_refs</code>; Markdown inclui
               <code>markdown_references</code>.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>path_prefix</code>, <code>language</code>, <code>include_content</code>
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>path_prefix</code>, <code>language</code>, <code>include_content</code>, <code>structural</code>
             </div>
           </div>
 
           <div class="tool-card">
             <div class="tool-head">
-              <span class="tool-name">atlas_map</span>
-              <span class="tool-type">Arquitetura</span>
+              <span class="tool-name">atlas_brief</span>
+              <span class="tool-type">Orientação</span>
             </div>
             <p class="tool-desc">
-              Mapa hierárquico de classes, funções, métodos e seções Markdown.
-              Panorama estrutural token-eficiente.
+              Briefing do projeto: identidade, camadas, entrypoints e hubs.
+              Chame primeiro, uma vez, em repositório desconhecido. <code>level=0</code> ou <code>1</code>.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>path_prefix</code>, <code>max_depth</code>, <code>repo</code>
+              <strong>Argumentos:</strong> <code>level</code>
             </div>
           </div>
 
           <div class="tool-card tool-card--highlight">
             <div class="tool-head">
+              <span class="tool-name">atlas_context</span>
+              <span class="tool-type">Tarefa</span>
+            </div>
+            <p class="tool-desc">
+              Pacote da tarefa em uma chamada: vizinhança, impacto, testes inferidos e camada do brief,
+              sob teto de tokens. Só <code>intent="debug"</code> inclui <code>recent_history</code>.
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> <code>target</code>, <code>intent</code> (<code>edit</code>/<code>debug</code>/<code>review</code>/<code>understand</code>)
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
               <span class="tool-name">atlas_graph</span>
               <span class="tool-type">Conectividade</span>
             </div>
             <p class="tool-desc">
-              Consulta o grafo derivado (<code>graph.json</code>): hubs centrais, caminhos BFS entre nós
-              e vizinhança com docs/rationale. Use quando a pergunta for sobre relações, não localização.
+              Consulta o grafo derivado (<code>graph.json</code>): hubs, caminhos BFS, vizinhança
+              e raio de impacto. Use quando a pergunta for sobre relações, não localização.
             </p>
             <div class="tool-args">
-              <strong>Modos:</strong> <code>hubs</code>, <code>explain</code>, <code>path</code> —
+              <strong>Modos:</strong> <code>hubs</code>, <code>explain</code>, <code>path</code>, <code>affected</code> —
               ver seção <a href="#grafo">Grafo</a>
             </div>
           </div>
@@ -892,7 +960,8 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             </div>
             <p class="tool-desc">
               Metadados do índice: <code>is_stale</code>, <code>reindexing</code>, <code>index_resolution</code>,
-              <code>graph_available</code>, <code>graph_viewer_path</code>. Não é pré-requisito para busca.
+              <code>graph_available</code>, <code>watch</code>, <code>semantic</code>, <code>resolution_coverage</code>.
+              Não é pré-requisito para busca.
             </p>
             <div class="tool-args">
               <strong>Campos-chave:</strong> <code>total_chunks</code>, <code>index_path</code>, <code>git_head_sha</code>
@@ -915,21 +984,100 @@ def encode(self, texts: list[str]) -> list[list[float]]:
               <strong>Argumentos:</strong> <code>workspace</code>, <code>paths</code>, <code>full</code>, <code>dry_run</code>
             </div>
             <div class="tool-args">
-              <strong>Retorno inclui:</strong> <code>phase_durations_s</code> (tempo por fase),
-              <code>graph_strategy</code> (<code>full</code>/<code>incremental-code</code>/<code>skipped-unchanged</code>),
-              <code>files_scanned</code>, <code>files_eligible</code>, <code>chunks_generated</code>,
-              <code>graph_nodes</code>, <code>graph_edges</code>, <code>graph_bytes</code>, <code>graph_html_bytes</code>
+              <strong>Retorno inclui:</strong> <code>phase_durations_s</code>,
+              <code>graph_strategy</code>,
+              <code>scip_status</code>, <code>git_history_status</code>, <code>semantic_status</code>
             </div>
           </div>
         </div>
       </div>
     </section>
 
+    <!-- 9. CONFIGURAÇÃO -->
+    <section id="config" class="card-section card-section--flat">
+      <div class="section-header">
+        <span class="section-num">09</span>
+        <h2>Configuração e variáveis de ambiente</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          Todas as flags abaixo são <strong>opt-in ou de override</strong>. Sem elas, o Atlas indexa, busca e serve o grafo 100% local.
+          História de Git <strong>não tem variável de ambiente</strong> — a janela é teto interno (até 100 commits por arquivo e 24 meses).
+        </p>
+        <div class="table-responsive">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>Variável</th>
+                <th>Default</th>
+                <th>Efeito</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ATLAS_INDEX_DIR</code></td>
+                <td>discovery / <code>.code-index</code></td>
+                <td>Caminho explícito do índice (prioridade 2 da resolução).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RERANK</code></td>
+                <td>ligado</td>
+                <td><code>0</code> desliga toda reordenação pós-RRF (lexical e cross-encoder).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RERANK_MODEL</code></td>
+                <td>ausente</td>
+                <td>Presente → cross-encoder ONNX (slug do modelo; default <code>Xenova/ms-marco-MiniLM-L-6-v2</code>). Falha: <code>cross_encoder_unavailable</code>.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_WATCH</code></td>
+                <td>desligado</td>
+                <td><code>1</code> observa o workspace e reindexa em subprocesso após 2 s. Extra: <code>pip install "codesteer-atlas[watch]"</code>. Sem o extra: <code>watch: "unavailable"</code>.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SCIP</code></td>
+                <td>desligado</td>
+                <td><code>1</code> invoca o indexador SCIP e produz arestas <code>calls</code>. Sem toolchain: <code>scip_status: "toolchain_missing"</code>.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SEMANTIC</code></td>
+                <td>desligado</td>
+                <td><code>1</code> liga propósito por símbolo. Sem origem, o índice estrutural continua completo.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SEMANTIC_LOCAL_URL</code></td>
+                <td>ausente</td>
+                <td>Endpoint local (segunda origem, depois do sampling MCP).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SEMANTIC_API_URL</code></td>
+                <td>ausente</td>
+                <td>URL explícita de API (terceira origem). Sem host default.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SEMANTIC_API_KEY</code></td>
+                <td>ausente</td>
+                <td>Só no header da API.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_SEMANTIC_MODEL</code></td>
+                <td>ausente</td>
+                <td>Contrato OpenAI-compatible (<code>model</code> + <code>messages</code>). Sem ele, payload genérico legado.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Extra opcional: <code>codesteer-atlas[watch]</code>. Auditoria: <code>atlas_status</code> → <code>watch</code>, <code>semantic</code>, <code>resolution_coverage</code>.
+        </p>
+      </div>
+    </section>
+
     <!-- 9. PRINCÍPIO LOCAL-FIRST -->
     <section id="local-first" class="card-section">
       <div class="section-header">
-        <span class="section-num">09</span>
-        <h2>Princípio Constitucional: 100% Local-First</h2>
+        <span class="section-num">10</span>
+        <h2>Princípio Constitucional: Local-First por padrão</h2>
       </div>
       <div class="section-body">
         <div class="local-first-box">
@@ -937,10 +1085,10 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           <div class="local-first-text">
             <h3>Soberania e Privacidade de Código</h3>
             <p>
-              Em conformidade absoluta com o artigo I da constituição do CodeSteer Atlas (<code>.memory-bank/constitution.md</code>), <strong>todo o processamento de código-fonte e documentação é realizado de forma local e offline na máquina do usuário</strong>.
+              Em conformidade com o artigo I da constituição do CodeSteer Atlas (<code>.memory-bank/constitution.md</code>), <strong>no default todo o processamento de código-fonte e documentação é local e offline</strong>. Embeddings (<code>all-MiniLM-L6-v2</code> via ONNX) e LanceDB não saem da máquina.
             </p>
             <p>
-              Nenhum fragmento de código, nome de classe ou comentário é enviado para APIs de terceiros para fins de vetorização ou persistência. O modelo de embeddings (<code>all-MiniLM-L6-v2</code>) é executado localmente via runtime ONNX na CPU da máquina, e o banco de dados LanceDB opera de forma embutida, salvando arquivos puramente locais na pasta <code>.code-index/</code>.
+              A camada semântica (<code>ATLAS_SEMANTIC=1</code>) é o único opt-in que pode enviar texto a um modelo: sampling do cliente MCP, depois endpoint local, por último API com URL explícita. Sem origem, o índice estrutural permanece completo. A fronteira é inspecionável em <code>atlas_status.semantic</code> (<code>origin</code>, <code>egress</code>).
             </p>
           </div>
         </div>

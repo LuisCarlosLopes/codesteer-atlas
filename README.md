@@ -16,6 +16,10 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 - **Indexação incremental**: só arquivos novos/alterados (hash sha256).
 - **Embeddings locais**: `all-MiniLM-L6-v2` (384 dims) via `fastembed`, com lazy loading.
 - **Grafo de conhecimento**: `.code-index/graph.json` + visualizador `graph.html` (abre via `file://`).
+- **Pacote da tarefa**: `atlas_context` (`edit`/`debug`/`review`/`understand`) e raio de impacto `atlas_graph(mode="affected")`.
+- **Watcher opt-in**: `ATLAS_WATCH=1` (extra `[watch]`) reindexa em subprocesso após debounce.
+- **SCIP opt-in**: `ATLAS_SCIP=1` produz arestas `calls` (`origin: "scip"`) quando o toolchain está instalado.
+- **História local de Git**: sem flag — a indexação publica `history.json`; a busca pode devolver hits `type="commit"`; `atlas_context(intent="debug")` traz `recent_history`.
 - **Rationale em código**: `NOTE`/`WHY`, cites `DEC`/`ADR`/`RFC` e wikilinks nos resultados de busca.
 - **Multi-linguagem**: Python, JS/TS, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
 
@@ -158,12 +162,12 @@ Ou peça ao agente para usar a tool `atlas_index`.
 
 | Tool | Descrição |
 |---|---|
-| `atlas_search` | Busca híbrida. Por padrão retorna só metadados; use `include_content=true` ou `Read` nas linhas. Filtros: `repo`, `language`, `path_prefix`. |
+| `atlas_search` | Busca híbrida. Por padrão retorna só metadados; use `include_content=true` ou `Read` nas linhas. Filtros: `repo`, `language`, `path_prefix`. Opt-in: `structural=true` (braço do grafo). Hits de Git vêm como `type="commit"`. |
 | `atlas_brief` | Briefing do projeto (identidade, camadas, entrypoints, hubs). Chame primeiro em projeto desconhecido. `level=0` ou `1`. |
-| `atlas_context` | Pacote da tarefa (`target` + `intent`: `edit`/`debug`/`review`/`understand`) numa chamada, com teto de tokens. |
+| `atlas_context` | Pacote da tarefa (`target` + `intent`: `edit`/`debug`/`review`/`understand`) numa chamada, com teto de tokens. Só `debug` inclui `recent_history`. |
 | `atlas_graph` | Grafo: `hubs`, `path`, `explain`, `affected`. |
 | `atlas_index` | Indexa/reindexa; regenera `graph.json` / `graph.html`. Suporta `dry_run`. |
-| `atlas_status` | Diagnóstico do índice (`is_stale`, `graph_available`, `index_resolution`, …). |
+| `atlas_status` | Diagnóstico (`is_stale`, `graph_available`, `index_resolution`, `watch`, `semantic`, `resolution_coverage`). |
 
 Recurso somente leitura: `atlas://status`.
 
@@ -292,6 +296,46 @@ Para forçar um caminho explícito no `mcp.json` do projeto:
 > No Cursor, `${workspaceFolder}` é a forma mais segura de amarrar o índice ao projeto aberto. Veja [CONTRIBUTING.md — Cursor](CONTRIBUTING.md#cursor).
 
 Diagnóstico: `atlas_status` → `index_resolution`.
+
+## Configuração e variáveis de ambiente
+
+Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, busca e serve o grafo 100% local — igual à `main` 2.1.x, mais as tools F1.
+
+| Variável | Default | Efeito |
+|---|---|---|
+| `ATLAS_INDEX_DIR` | discovery / fallback `.code-index` | Caminho explícito do índice (prioridade 2 da resolução). |
+| `ATLAS_RERANK` | ligado | `0` desliga **toda** reordenação pós-RRF (lexical e cross-encoder). |
+| `ATLAS_RERANK_MODEL` | ausente | Presente → cross-encoder ONNX (o valor é o slug do modelo; default `Xenova/ms-marco-MiniLM-L-6-v2`). Falha de carga: `warnings: cross_encoder_unavailable`. |
+| `ATLAS_WATCH` | desligado | `1` observa o workspace e dispara reindex incremental em subprocesso após 2 s. Extra: `pip install "codesteer-atlas[watch]"` (`watchdog`). Sem o extra: `watch: "unavailable"`. |
+| `ATLAS_SCIP` | desligado | `1` invoca o indexador SCIP da linguagem (`scip-python`, `scip-typescript`, `scip-go`, `rust-analyzer`) e produz arestas `calls`. Sem toolchain: `scip_status: "toolchain_missing"`. |
+| `ATLAS_SEMANTIC` | desligado | `1` liga a camada de propósito por símbolo. Sem origem configurada, o índice estrutural continua completo. Detalhes: [Camada semântica opcional](#camada-semântica-opcional). |
+| `ATLAS_SEMANTIC_LOCAL_URL` | ausente | Endpoint local (segunda origem, depois do sampling MCP). |
+| `ATLAS_SEMANTIC_API_URL` | ausente | URL explícita de API (terceira origem). Sem host default. |
+| `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
+| `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
+
+História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses). Extra opcional: `codesteer-atlas[watch]`.
+
+No `mcp.json` do projeto:
+
+```json
+{
+  "mcpServers": {
+    "codesteer-atlas": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
+        "atlas-serve"
+      ],
+      "env": {
+        "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
+        "ATLAS_WATCH": "1"
+      }
+    }
+  }
+}
+```
 
 ## Contribuindo
 

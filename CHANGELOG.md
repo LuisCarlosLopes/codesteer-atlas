@@ -7,7 +7,42 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-_Nada ainda._
+Fase 1 omitida do corte 2.2.0, mais as camadas 4 (semântica opt-in) e 5
+(arqueologia de Git). Sem flag nova para a história: a janela é constante
+(`GIT_HISTORY_MAX_COMMITS_PER_FILE` / `GIT_HISTORY_MAX_MONTHS`). Watcher, SCIP,
+rerank e o braço estrutural já estão em [2.2.0].
+
+### Added
+
+- **`atlas_context`** — pacote da tarefa em uma chamada (`target` + `intent`
+  ∈ `edit`/`debug`/`review`/`understand`), com teto `CONTEXT_RESPONSE_MAX_CHARS`.
+  Substitui encadear `atlas_graph` + `atlas_brief` quando o símbolo já é conhecido.
+- **`atlas_graph(mode="affected")`** — raio de impacto por BFS reversa. Um commit
+  é história, não dependência: `affected` e `hubs` ignoram nós `commit` e arestas
+  `touches` (não entram no grau).
+- **Camada semântica opt-in** (`semantic.py`), ligada só com `ATLAS_SEMANTIC=1`.
+  Cadeia de origem: sampling MCP síncrono → `ATLAS_SEMANTIC_LOCAL_URL` →
+  `ATLAS_SEMANTIC_API_URL`. `ATLAS_SEMANTIC_API_KEY` vai só no header;
+  `ATLAS_SEMANTIC_MODEL` troca o payload para `model` + `messages` (OpenAI-compatible /
+  OpenRouter). Sem origem, o índice estrutural permanece completo.
+  `atlas_status.semantic` declara `enabled`, `origin`, `egress`, `index` e
+  `last_generation`. Warnings de busca: `semantic_layer_unavailable` e
+  `semantic_arm_unavailable` (vector+FTS seguem disponíveis).
+- **Arqueologia de Git** (local, sem env). A indexação lê a janela do repositório
+  e publica `.code-index/history.json` + tabela `commits_*`. `atlas_search` pode
+  devolver hits `type="commit"` / `language="git"`. `atlas_context(intent="debug")`
+  projeta `sections.recent_history` (commits ligados por `touches`). Degradação
+  declarada: `git_history_unavailable`, `git_history_partial`, `git_history_stale`,
+  `git_history_empty`. `atlas_index` reporta `git_history_status`,
+  `git_history_commits` e `git_history_touches`.
+
+### Changed
+
+- `CURRENT_INDEX_VERSION` passa de `2.2.0` para **`2.3.0`** (campos `purpose` /
+  `purpose_hash` / `purpose_vector` e sidecar `semantic.json`).
+  **`MIN_INDEX_VERSION` continua `2.0.0`**: índices 2.0.x–2.2.x seguem buscáveis.
+  Converter para 2.3.0 exige `atlas-index --full` sem `--paths` — recorte
+  incremental não mistura schemas.
 
 ## [2.2.0] - 2026-08-30
 
@@ -180,6 +215,7 @@ Release inicial do CodeSteer Atlas.
   Cline e Claude Code CLI.
 
 [Unreleased]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...HEAD
+[2.2.0]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...HEAD
 [2.1.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1...HEAD
 [1.4.2]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...34ef305
 [1.4.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...dbd5c9a
