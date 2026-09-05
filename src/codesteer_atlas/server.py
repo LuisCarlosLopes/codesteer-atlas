@@ -39,24 +39,47 @@ import anyio  # noqa: E402
 from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
 
-from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
+from codesteer_atlas import observability, response_budget  # noqa: E402
+from codesteer_atlas.brief import (  # noqa: E402
+    brief_cut_once,
+    brief_minimal_envelope,
+    build_brief_lazily,
+    load_brief,
+    render_brief,
+)
 from codesteer_atlas.config import (  # noqa: E402
     BACKGROUND_REINDEX_LOG_MAX_BYTES,
     BACKGROUND_REINDEX_MIN_INTERVAL_S,
+    BRIEF_LEVEL0_MAX_CHARS,
+    BRIEF_LEVEL1_MAX_CHARS,
+    CONTEXT_RESPONSE_MAX_CHARS,
     DEFAULT_INDEX_DIR,
     GRAPH_FILENAME,
     GRAPH_HTML_FILENAME,
     GRAPH_PATH_MAX_HOPS,
     GRAPH_RESPONSE_MAX_CHARS,
+    RESPONSE_BUDGET_BRIEF0_MAX_TOKENS,
+    RESPONSE_BUDGET_BRIEF1_MAX_TOKENS,
+    RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
+    RESPONSE_BUDGET_GRAPH_MAX_TOKENS,
+    RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+    RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+    RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.context import VALID_INTENTS, build_context  # noqa: E402
+from codesteer_atlas.context import (  # noqa: E402
+    VALID_INTENTS,
+    build_context,
+    context_cut_once,
+    context_minimal_envelope,
+)
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
 from codesteer_atlas.graph import (  # noqa: E402
     affected,
     bfs_path,
-    enforce_graph_response_budget,
     explain,
+    graph_cut_once,
+    graph_minimal_envelope,
     hubs,
     load_graph,
 )
@@ -444,6 +467,17 @@ def _semantic_status(storage: StorageBackend, ctx: "Optional[Context]" = None, e
     }
 
 
+def _observability_status_block() -> dict:
+    """
+    Bloco `observability` de `atlas_status`: AUSENTE quando
+    `ATLAS_OBSERVABILITY` não é `"1"` (DOD3) — nunca `{"enabled": false}`, para
+    não sugerir que existe estado a inspecionar quando não há nenhum.
+    """
+    if not observability.observability_enabled():
+        return {}
+    return {"observability": observability.get_observability_status()}
+
+
 def get_status_data(ctx: "Optional[Context]" = None) -> dict:
     """Função auxiliar para obter os metadados e status de diagnóstico do índice."""
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
@@ -471,6 +505,7 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx),
+            **_observability_status_block(),
         }
 
     try:
@@ -502,6 +537,7 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx),
+            **_observability_status_block(),
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
@@ -515,7 +551,59 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx, e),
+            **_observability_status_block(),
         }
+
+
+def _finish_observed(tool: str, start: float, text: str, *, extra: Optional[dict] = None) -> str:
+    """
+    Publica um evento de observabilidade de sucesso para `tool` quando
+    `ATLAS_OBSERVABILITY=1`, medindo a duração (relógio monotônico) desde
+    `start` até aqui — já incluindo enriquecimento, corte e contagem de
+    tokens; a persistência do evento em si fica FORA dessa janela (D1).
+    Nunca altera `text` nem propaga falha própria: erro de observabilidade
+    nunca substitui o resultado de negócio da tool.
+    """
+    if not observability.observability_enabled():
+        return text
+    try:
+        duration_ms = (time.monotonic() - start) * 1000
+        extra = dict(extra or {})
+        warnings = extra.pop("warnings", []) or []
+        truncated = extra.pop("truncated", bool(warnings))
+        measurement = response_budget.measure_response(text)
+        event = observability.build_event(
+            tool=tool,
+            outcome="success",
+            duration_ms=duration_ms,
+            measurement=measurement,
+            truncated=truncated,
+            warnings=warnings,
+            extra=extra,
+        )
+        observability.record_event(INDEX_DIR_PATH, event)
+    except Exception as e:
+        print(f"[atlas] Observabilidade: falha ao registrar evento de {tool}: {e}", file=sys.stderr)
+    return text
+
+
+def _finish_observed_error(
+    tool: str, start: float, error: BaseException, *, extra: Optional[dict] = None
+) -> None:
+    """Publica o evento de erro simétrico a `_finish_observed`; nunca propaga."""
+    if not observability.observability_enabled():
+        return
+    try:
+        duration_ms = (time.monotonic() - start) * 1000
+        event = observability.build_event(
+            tool=tool, outcome="error", duration_ms=duration_ms, error=error, extra=extra
+        )
+        observability.record_event(INDEX_DIR_PATH, event)
+    except Exception as e:
+        print(
+            f"[atlas] Observabilidade: falha ao registrar evento de erro de {tool}: {e}",
+            file=sys.stderr,
+        )
 
 
 def _resolve_note_candidates(name_to_paths: dict, key: str) -> list[str]:
@@ -610,50 +698,86 @@ def atlas_search(
         codebase. When both original arms fail the call raises instead of returning an
         empty result set.
     """
-    start_time = time.time()
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_search_impl(
+            query=query,
+            top_k=top_k,
+            repo=repo,
+            language=language,
+            path_prefix=path_prefix,
+            include_content=include_content,
+            limit=limit,
+            structural=structural,
+            ctx=ctx,
+            _obs_start=_obs_start,
+        )
+    except Exception as e:
+        _finish_observed_error(
+            "atlas_search",
+            _obs_start,
+            e,
+            extra={"top_k": top_k, "include_content": include_content},
+        )
+        raise
 
-    if limit is not None:
-        top_k = limit
 
-    # Validação obrigatória da entrada [V01]
-    if not query or not query.strip():
-        raise ValueError("O parâmetro 'query' é obrigatório e não pode ser vazio.")
+def _search_cut_once(payload: dict) -> bool:
+    """
+    Corte de `atlas_search` (§4.1 do plano observabilidade-tokens-consultas):
+    remove UM resultado inteiro da cauda por vez — nunca mutila `content`/
+    `commit`/paths/símbolos internamente — preservando ordem e identidade dos
+    sobreviventes.
+    """
+    results = payload.get("results")
+    if isinstance(results, list) and results:
+        results.pop()
+        truncated = dict(payload.get("truncated") or {})
+        truncated["results"] = truncated.get("results", 0) + 1
+        payload["truncated"] = truncated
+        warnings = set(payload.get("warnings") or [])
+        warnings.add("truncated_for_budget")
+        payload["warnings"] = sorted(warnings)
+        return True
+    return False
 
-    # Validação do limite de resultados [V02, L01]
-    if top_k < 1 or top_k > 50:
-        raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
 
-    _resolve_index_dir_via_roots(ctx)
-    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
-    if not storage.exists():
-        raise _index_not_found_error(storage)
+def _search_minimal_envelope(payload: dict) -> dict:
+    """
+    Envelope mínimo de `atlas_search`: mesmo com `results=[]`, `truncated.results`
+    declara quantos resultados existiam — nunca finge ausência de correspondências
+    quando o corte, não a busca, é a causa (guardrail do IPD/D3).
+    """
+    already_truncated = (payload.get("truncated") or {}).get("results", 0)
+    total_results = len(payload.get("results") or []) + already_truncated
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    return {
+        "results": [],
+        "total_chunks_searched": payload.get("total_chunks_searched"),
+        "query_time_ms": payload.get("query_time_ms"),
+        "truncated": {"results": total_results},
+        "warnings": sorted(warnings),
+    }
 
-    # Coleta filtros informados
-    filters = {}
-    if repo:
-        filters["repo"] = repo
-    if language:
-        filters["language"] = language
-    if path_prefix:
-        filters["path_prefix"] = path_prefix
 
-    # Inicializa o EmbeddingEngine e gera o embedding da query (Lazy Loading) [GA-07]
-    embedding_engine = EmbeddingEngine()
-    query_vector = embedding_engine.encode_single(query)
-
-    # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
-    outcome = storage.search_hybrid(
-        query_vector=query_vector,
-        query_text=query,
-        filters=filters,
-        top_k=top_k,
-        structural=structural,
-    )
-    results = outcome.results
-
-    query_time_ms = (time.time() - start_time) * 1000
-    manifest = storage.get_manifest()
-
+def assemble_search_payload(
+    storage: "StorageBackend",
+    results: list,
+    manifest,
+    *,
+    include_content: bool,
+    query_time_ms: float,
+    warnings: Optional[list] = None,
+) -> dict:
+    """
+    Monta o payload de `atlas_search` ANTES do orçamento de resposta: serializa
+    cada resultado recuperado (incluindo o enriquecimento markdown/rationale),
+    mas não aplica corte nem mede tokens — isso é `response_budget.finalize_response`
+    na tool MCP. Compartilhado com `scripts/eval_search.py --delivery` (§4.4 do
+    plano observabilidade-tokens-consultas) para o harness nunca duplicar a
+    regra de serialização do servidor.
+    """
     # Cache local de seções por arquivo referenciado, para evitar lookups
     # repetidos ao resolver #anchor de múltiplos links para o mesmo .md [F]
     sections_cache: dict = {}
@@ -765,15 +889,120 @@ def atlas_search(
 
     # Só presente quando algum braço da busca falhou: a ausência do campo é o
     # sinal de que o resultado veio da busca híbrida completa
-    if outcome.warnings:
-        response["warnings"] = sorted(set(outcome.warnings))
+    if warnings:
+        response["warnings"] = sorted(set(warnings))
 
-    return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
+    return response
 
 
-def _dump_graph_payload(payload: dict) -> str:
-    enforce_graph_response_budget(payload, GRAPH_RESPONSE_MAX_CHARS)
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+def _atlas_search_impl(
+    query: str,
+    top_k: int,
+    repo: Optional[str],
+    language: Optional[str],
+    path_prefix: Optional[str],
+    include_content: bool,
+    limit: Optional[int],
+    structural: bool,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
+    start_time = time.time()
+
+    if limit is not None:
+        top_k = limit
+
+    # Validação obrigatória da entrada [V01]
+    if not query or not query.strip():
+        raise ValueError("O parâmetro 'query' é obrigatório e não pode ser vazio.")
+
+    # Validação do limite de resultados [V02, L01]
+    if top_k < 1 or top_k > 50:
+        raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
+
+    _resolve_index_dir_via_roots(ctx)
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+
+    # Coleta filtros informados
+    filters = {}
+    if repo:
+        filters["repo"] = repo
+    if language:
+        filters["language"] = language
+    if path_prefix:
+        filters["path_prefix"] = path_prefix
+
+    # Inicializa o EmbeddingEngine e gera o embedding da query (Lazy Loading) [GA-07]
+    embedding_engine = EmbeddingEngine()
+    query_vector = embedding_engine.encode_single(query)
+
+    # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
+    outcome = storage.search_hybrid(
+        query_vector=query_vector,
+        query_text=query,
+        filters=filters,
+        top_k=top_k,
+        structural=structural,
+    )
+    results = outcome.results
+
+    query_time_ms = (time.time() - start_time) * 1000
+    manifest = storage.get_manifest()
+
+    response = assemble_search_payload(
+        storage,
+        results,
+        manifest,
+        include_content=include_content,
+        query_time_ms=query_time_ms,
+        warnings=outcome.warnings,
+    )
+
+    budget = response_budget.ResponseBudget(
+        "search",
+        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+    )
+    text, _measurement = response_budget.finalize_response(
+        response,
+        budget,
+        cut_once=_search_cut_once,
+        minimal_envelope=_search_minimal_envelope,
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_search",
+        _obs_start,
+        text,
+        extra={
+            "top_k": top_k,
+            "include_content": include_content,
+            "results_returned": len(final.get("results") or []),
+            "results_omitted": (final.get("truncated") or {}).get("results", 0),
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+        },
+    )
+
+
+def _dump_graph_payload(
+    payload: dict, *, mode: str, tool_start: float, extra: Optional[dict] = None
+) -> str:
+    budget = response_budget.ResponseBudget(
+        "graph", GRAPH_RESPONSE_MAX_CHARS, GRAPH_RESPONSE_MAX_CHARS, RESPONSE_BUDGET_GRAPH_MAX_TOKENS
+    )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=graph_cut_once, minimal_envelope=graph_minimal_envelope
+    )
+    final = json.loads(text)
+    observed_extra = dict(extra or {})
+    observed_extra["mode"] = mode
+    observed_extra["warnings"] = final.get("warnings") or []
+    observed_extra["truncated"] = bool(final.get("truncated"))
+    return _finish_observed("atlas_graph", tool_start, text, extra=observed_extra)
 
 
 @app.tool()
@@ -811,6 +1040,22 @@ def atlas_graph(
         ignore both: a commit is history, not a code dependency, and `touches`
         never contributes to node degree.
     """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_graph_impl(mode, target, source, top_n, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_graph", _obs_start, e, extra={"mode": mode})
+        raise
+
+
+def _atlas_graph_impl(
+    mode: str,
+    target: Optional[str],
+    source: Optional[str],
+    top_n: int,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
     _resolve_index_dir_via_roots(ctx)
 
     if mode not in {"hubs", "path", "explain", "affected"}:
@@ -822,27 +1067,27 @@ def atlas_graph(
 
     if mode == "hubs":
         payload = {"mode": "hubs", "items": hubs(graph, top_n)}
-        return _dump_graph_payload(payload)
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
     if mode == "path":
         if not source or not target:
             raise ValueError("Os parâmetros 'source' e 'target' são obrigatórios em mode='path'.")
         payload = bfs_path(graph, source, target, max_hops=GRAPH_PATH_MAX_HOPS)
         payload["mode"] = "path"
-        return _dump_graph_payload(payload)
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
     if mode == "affected":
         if not target:
             raise ValueError("O parâmetro 'target' é obrigatório em mode='affected'.")
         payload = affected(graph, target)
         payload["mode"] = "affected"
-        return _dump_graph_payload(payload)
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
     if not target:
         raise ValueError("O parâmetro 'target' é obrigatório em mode='explain'.")
     payload = explain(graph, target)
     payload["mode"] = "explain"
-    return _dump_graph_payload(payload)
+    return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
 
 @app.tool()
@@ -874,6 +1119,17 @@ def atlas_context(
         `git_history_empty`.
     """
     # @MindSpec: Input target+intent | Output JSON ≤ CONTEXT_RESPONSE_MAX_CHARS | Error ValueError / índice ausente
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_context_impl(target, intent, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_context", _obs_start, e, extra={"intent": intent})
+        raise
+
+
+def _atlas_context_impl(
+    target: str, intent: str, ctx: "Context | None", _obs_start: float
+) -> str:
     _resolve_index_dir_via_roots(ctx)
 
     if not target or not str(target).strip():
@@ -901,7 +1157,27 @@ def atlas_context(
         history_lookup=storage.lookup_commits,
         history_state=storage.get_history_state(),
     )
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    budget = response_budget.ResponseBudget(
+        "context",
+        CONTEXT_RESPONSE_MAX_CHARS,
+        CONTEXT_RESPONSE_MAX_CHARS,
+        RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
+    )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=context_cut_once, minimal_envelope=context_minimal_envelope
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_context",
+        _obs_start,
+        text,
+        extra={
+            "intent": intent,
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+        },
+    )
 
 
 @app.tool()
@@ -941,6 +1217,15 @@ def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
         JSON string with `identity`, `layers`, `entrypoints`, `hubs`, `warnings`,
         `is_stale` and `next` (suggested follow-up calls).
     """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_brief_impl(level, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_brief", _obs_start, e, extra={"level": level})
+        raise
+
+
+def _atlas_brief_impl(level: int, ctx: "Context | None", _obs_start: float) -> str:
     if level not in (0, 1):
         raise ValueError("O parâmetro 'level' deve ser 0 ou 1.")
 
@@ -974,7 +1259,27 @@ def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
             and semantic_index_state(INDEX_DIR_PATH, brief_manifest)[0] == "ready"
         ),
     )
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    budget = response_budget.ResponseBudget(
+        "brief",
+        BRIEF_LEVEL0_MAX_CHARS if level == 0 else BRIEF_LEVEL1_MAX_CHARS,
+        BRIEF_LEVEL0_MAX_CHARS if level == 0 else BRIEF_LEVEL1_MAX_CHARS,
+        RESPONSE_BUDGET_BRIEF0_MAX_TOKENS if level == 0 else RESPONSE_BUDGET_BRIEF1_MAX_TOKENS,
+    )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=brief_cut_once, minimal_envelope=brief_minimal_envelope
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_brief",
+        _obs_start,
+        text,
+        extra={
+            "level": level,
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+        },
+    )
 
 
 @app.tool()

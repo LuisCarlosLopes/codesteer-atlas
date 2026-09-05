@@ -74,6 +74,22 @@ def _table_names(db) -> List[str]:
     return list(tables)
 
 
+_VECTOR_DIM = 384
+
+
+def _normalize_fixed_vector(value: Any, dim: int = _VECTOR_DIM) -> Optional[List[float]]:
+    """Devolve um vetor de `dim` floats ou None — o LanceDB rejeita listas vazias/mistas."""
+    if value is None:
+        return None
+    try:
+        length = len(value)
+    except TypeError:
+        return None
+    if length != dim:
+        return None
+    return [float(item) for item in value]
+
+
 def _chunks_schema() -> pa.Schema:
     """Declara o schema 2.3.0, incluindo irmãos semânticos nullable."""
     return pa.schema(
@@ -88,10 +104,10 @@ def _chunks_schema() -> pa.Schema:
             pa.field("language", pa.string()),
             pa.field("content", pa.string()),
             pa.field("indexed_at", pa.string()),
-            pa.field("vector", pa.list_(pa.float32(), 384)),
+            pa.field("vector", pa.list_(pa.float32(), _VECTOR_DIM)),
             pa.field("purpose", pa.string()),
             pa.field("purpose_hash", pa.string()),
-            pa.field("purpose_vector", pa.list_(pa.float32(), 384)),
+            pa.field("purpose_vector", pa.list_(pa.float32(), _VECTOR_DIM)),
             pa.field("references_json", pa.string()),
         ]
     )
@@ -147,7 +163,7 @@ def _history_schema() -> pa.Schema:
             pa.field("is_revert", pa.bool_()),
             pa.field("reverted_commit_id", pa.string()),
             pa.field("stale", pa.bool_()),
-            pa.field("vector", pa.list_(pa.float32(), 384)),
+            pa.field("vector", pa.list_(pa.float32(), _VECTOR_DIM)),
         ]
     )
 
@@ -179,7 +195,7 @@ def _commit_row(record: Dict[str, Any]) -> Dict[str, Any]:
         "is_revert": bool(record.get("is_revert")),
         "reverted_commit_id": record.get("reverted_commit_id"),
         "stale": bool(record.get("stale")),
-        "vector": list(record.get("vector") or [0.0] * 384),
+        "vector": list(record.get("vector") or [0.0] * _VECTOR_DIM),
     }
 
 
@@ -234,6 +250,11 @@ class StorageBackend:
         row = chunk.model_dump()
         row["references_json"] = encode_references_json(chunk.references)
         row.pop("references", None)
+        # @MindRisk: purpose_vector vazio/None/dimensão errada vira "variable length
+        # vectors" no LanceDB (Windows, índice grande, F4 parcial). Null é válido.
+        row["purpose_vector"] = _normalize_fixed_vector(row.get("purpose_vector"))
+        vector = _normalize_fixed_vector(row.get("vector"))
+        row["vector"] = vector if vector is not None else [0.0] * _VECTOR_DIM
         return row
 
     def _assert_incremental_current(self) -> None:
@@ -289,7 +310,11 @@ class StorageBackend:
         # Sobrescreve a tabela se já existir para evitar duplicações no MVP
         table_name = "chunks"
         table = db.create_table(
-            table_name, data=data_to_insert, schema=_chunks_schema(), mode="overwrite"
+            table_name,
+            data=data_to_insert,
+            schema=_chunks_schema(),
+            mode="overwrite",
+            on_bad_vectors="null",
         )
 
         # Cria índice Full-Text Search (FTS) na coluna 'content' para buscas BM25
@@ -346,7 +371,7 @@ class StorageBackend:
         if "chunks" in _table_names(db):
             table = db.open_table("chunks")
             _assert_chunks_schema(table)
-            table.add(data_to_insert)
+            table.add(data_to_insert, on_bad_vectors="null")
 
             # Recria o índice FTS do zero após cada append incremental.
             # Workaround para bug lance-index 7.0.0 (lance-format/lance#7313):
@@ -360,6 +385,7 @@ class StorageBackend:
                 data=pa.Table.from_pylist(data_to_insert, schema=_chunks_schema()),
                 schema=_chunks_schema(),
                 mode="overwrite",
+                on_bad_vectors="null",
             )
             table.create_fts_index("content", replace=True)
 

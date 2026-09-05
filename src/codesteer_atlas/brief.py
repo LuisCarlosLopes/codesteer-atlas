@@ -934,6 +934,37 @@ def _enforce_budget(payload: Dict[str, Any], max_chars: int) -> None:
             return
 
 
+def brief_cut_once(payload: dict) -> bool:
+    """
+    Um passo de corte para o finalizador compartilhado do servidor (D3):
+    reaproveita a ordem de prioridade de `_enforce_budget`, mirando o tamanho
+    atual menos 1 caractere para remover só o próximo item da fila.
+    """
+    before = _serialized_len(payload)
+    if before <= 1:
+        return False
+    _enforce_budget(payload, before - 1)
+    return _serialized_len(payload) < before
+
+
+def brief_minimal_envelope(payload: dict) -> dict:
+    """Envelope mínimo de `atlas_brief`: identidade vazia, nunca inventada (D3)."""
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    return {
+        "brief_version": payload.get("brief_version"),
+        "level": payload.get("level"),
+        "identity": {},
+        "layers": [],
+        "layers_truncated": payload.get("layers_truncated", 0),
+        "entrypoints": [],
+        "hubs": [],
+        "warnings": sorted(warnings),
+        "next": [],
+        "truncated": True,
+    }
+
+
 def build_brief_lazily(manifest, index_dir: Path, workspace_root: Path) -> dict:
     """
     Recomputa o brief sob demanda quando `brief.json` não existe (índice de versão

@@ -22,6 +22,7 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 - **História local de Git**: sem flag — a indexação publica `history.json`; a busca pode devolver hits `type="commit"`; `atlas_context(intent="debug")` traz `recent_history`.
 - **Rationale em código**: `NOTE`/`WHY`, cites `DEC`/`ADR`/`RFC` e wikilinks nos resultados de busca.
 - **Multi-linguagem**: Python, JS/TS, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
+- **Observabilidade de tokens opt-in**: `ATLAS_OBSERVABILITY=1` mede a resposta de cada tool (chars/bytes/tokens) e aplica teto global em `atlas_search` (as demais já tinham teto de caracteres). Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional).
 
 ### Camada semântica opcional
 
@@ -45,6 +46,60 @@ continuam buscáveis como legados. Para convertê-los, use somente `atlas-index 
 Uma busca degradada inclui `warnings`: `semantic_layer_unavailable` indica camada ligada
 sem índice pronto e `semantic_arm_unavailable` indica falha do vetor semântico; em ambos
 os casos vector+FTS continuam disponíveis, mas a recuperação semântica está incompleta.
+
+### Observabilidade de tokens por consulta (opcional)
+
+`ATLAS_OBSERVABILITY=1` liga a medição local da string JSON final devolvida por
+`atlas_search`, `atlas_context`, `atlas_brief` e `atlas_graph` — chars/bytes exatos e
+tokens (exatos com tokenizer configurado, ou estimativa `ceil(chars/4)` sempre
+identificada como tal). **Isto mede o texto retornado pela tool, não o prompt inteiro do
+cliente MCP, geração do modelo ou faturamento** — não confunda as duas coisas.
+
+Desligado (padrão): nenhum arquivo é criado, nenhum estado fica em memória, e o bloco
+`observability` some de `atlas_status`. Ligado: cada tool grava o último evento em memória
+(`atlas_status.observability.last_by_tool`) e tenta persistir em
+`.code-index/observability/events.jsonl` (rotação em até 3 arquivos de 1 MiB, ~3 MiB no
+total). Contenção do lock ou falha de E/S descarta a persistência **daquele** evento (nunca
+a consulta), incrementa `dropped_events` e avisa uma vez por transição em stderr.
+
+O teto de resposta (chars/bytes; tokens exatos quando há tokenizer) é aplicado
+**independente** do flag acima — search corta resultados inteiros da cauda até caber;
+context/brief/graph reaproveitam suas prioridades de corte existentes. Toda resposta ganha
+um bloco `budget` (`mode`, `max_chars`, `max_bytes`, `max_tokens`, `tokenizer_sha256`,
+`used_chars`); `mode="byte_bpe_upper_bound"` é o teto conservador quando não há tokenizer
+exato configurado — **nunca leia isso como garantia de tokens exatos**.
+
+Contagem exata é opcional e local: aponte `ATLAS_TOKENIZER_PATH` para um `tokenizer.json`
+compatível com a lib [`tokenizers`](https://huggingface.co/docs/tokenizers). Carregado de
+forma preguiçosa (só na primeira consulta que precisar dele), identificado por
+`tokenizer_sha256` (SHA-256 do arquivo) — **não é necessariamente o tokenizer do seu
+cliente MCP**, apenas uma medição reproduzível para o arquivo configurado. Arquivo ausente,
+inválido, ou a lib `tokenizers` não instalada: degrada para estimativa
+(`tokenizer_status: "unavailable"`, warning `tokenizer_unavailable`) sem tentar de novo
+até reiniciar o processo. Trocar o arquivo também exige reiniciar o servidor.
+
+Exemplo de evento (JSONL, um por linha, sanitizado — nunca contém query, paths retornados,
+código-fonte ou texto de exceção):
+
+```json
+{"schema_version":"1.0","event_id":"…","timestamp":"2026-09-05T12:00:00.000Z","tool":"atlas_search","outcome":"success","scope":"tool_json_text","duration_ms":8.42,"response_chars":3120,"response_bytes":3120,"response_tokens":null,"estimated_tokens":780,"count_method":"chars_div_4","tokenizer_sha256":null,"tokenizer_status":"not_configured","truncated":false,"warnings":[],"top_k":5,"include_content":false,"results_returned":5,"results_omitted":0}
+```
+
+Com tokenizer configurado, `response_tokens` vira um inteiro, `estimated_tokens` fica
+`null`, `count_method` vira `"tokenizer"` e `tokenizer_status` vira `"ok"`. Em erro da tool
+(ex.: `top_k` inválido), `outcome` vira `"error"`, as medidas de resposta ficam `null` e
+`error_class` traz só o **nome da classe** da exceção (nunca a mensagem, que poderia
+carregar dado sensível).
+
+`duration_ms` cobre do início da tool até a serialização/medição finais — **não** inclui a
+escrita do evento em disco nem o transporte MCP, e é uma métrica **separada** de
+`query_time_ms` (que continua medindo só a recuperação, sem mudança de semântica).
+
+Avaliação de qualidade pós-orçamento: `uv run python scripts/eval_search.py --delivery`
+mede MRR/recall da resposta **realmente entregue** (metadados e conteúdo) sobre os mesmos
+candidatos do ranking, sem alterar a medição de ranking histórica. `--benchmark` roda o
+custo de overhead (observabilidade desligada / estimativa / tokenizer local) sobre payloads
+sintéticos fixos, sem precisar de índice.
 
 ## Começar (3 passos)
 
@@ -167,7 +222,7 @@ Ou peça ao agente para usar a tool `atlas_index`.
 | `atlas_context` | Pacote da tarefa (`target` + `intent`: `edit`/`debug`/`review`/`understand`) numa chamada, com teto de tokens. Só `debug` inclui `recent_history`. |
 | `atlas_graph` | Grafo: `hubs`, `path`, `explain`, `affected`. |
 | `atlas_index` | Indexa/reindexa; regenera `graph.json` / `graph.html`. Suporta `dry_run`. |
-| `atlas_status` | Diagnóstico (`is_stale`, `graph_available`, `index_resolution`, `watch`, `semantic`, `resolution_coverage`). |
+| `atlas_status` | Diagnóstico (`is_stale`, `graph_available`, `index_resolution`, `watch`, `semantic`, `resolution_coverage`, e `observability` só com `ATLAS_OBSERVABILITY=1`). |
 
 Recurso somente leitura: `atlas://status`.
 
@@ -313,6 +368,8 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_SEMANTIC_API_URL` | ausente | URL explícita de API (terceira origem). Sem host default. |
 | `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
 | `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
+| `ATLAS_OBSERVABILITY` | desligado | `1` grava eventos de medição de resposta (chars/bytes/tokens) em memória + `.code-index/observability/events.jsonl` e expõe `atlas_status.observability`. Sem ele, nada é criado. Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional). |
+| `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal. |
 
 História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses). Extra opcional: `codesteer-atlas[watch]`.
 

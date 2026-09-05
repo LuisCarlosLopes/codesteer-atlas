@@ -589,45 +589,84 @@ def _mark_graph_truncated(payload: dict, omitted: int = 1) -> None:
     payload["truncated"] = True
 
 
-def enforce_graph_response_budget(
-    payload: dict, max_chars: int = GRAPH_RESPONSE_MAX_CHARS
-) -> dict:
-    """Pós-condição: JSON do grafo ≤ teto; corte declarado em truncated/warnings."""
-    if _serialized_len(payload) <= max_chars:
-        return payload
-
+def graph_cut_once(payload: dict) -> bool:
+    """
+    Remove UM item do payload de `atlas_graph`, na mesma ordem de prioridade
+    histórica (items -> neighbors -> rationale/notes -> path), e declara o
+    corte em `truncated`/`warnings`. Retorna `False` quando não há mais nada a
+    remover (payload já reduzido ao essencial) — é o `cut_once` que
+    `response_budget.finalize_response` chama repetidamente até caber em
+    chars/bytes/tokens (§4.2 do plano observabilidade-tokens-consultas).
+    """
     items = payload.get("items")
-    while isinstance(items, list) and items and _serialized_len(payload) > max_chars:
+    if isinstance(items, list) and items:
         items.pop()
         _mark_graph_truncated(payload)
-        if _serialized_len(payload) <= max_chars:
-            return payload
+        return True
 
     neighbors = payload.get("neighbors")
     if isinstance(neighbors, dict):
         for kind in list(neighbors):
             bucket = neighbors.get(kind)
-            while isinstance(bucket, list) and bucket and _serialized_len(payload) > max_chars:
+            if isinstance(bucket, list) and bucket:
                 bucket.pop()
                 _mark_graph_truncated(payload)
-                if _serialized_len(payload) <= max_chars:
-                    return payload
+                return True
 
     for key in ("rationale", "notes"):
         bucket = payload.get(key)
-        while isinstance(bucket, list) and bucket and _serialized_len(payload) > max_chars:
+        if isinstance(bucket, list) and bucket:
             bucket.pop()
             _mark_graph_truncated(payload)
-            if _serialized_len(payload) <= max_chars:
-                return payload
+            return True
 
     path = payload.get("path")
-    while isinstance(path, list) and len(path) > 1 and _serialized_len(payload) > max_chars:
+    if isinstance(path, list) and len(path) > 1:
         path.pop()
         _mark_graph_truncated(payload)
-        if _serialized_len(payload) <= max_chars:
-            return payload
+        return True
 
+    return False
+
+
+def graph_minimal_envelope(payload: dict) -> dict:
+    """
+    Envelope mínimo de `atlas_graph`: preserva `mode` e a identidade do nó-alvo
+    (já bounded por `_node_summary`), esvazia coleções e declara o corte —
+    nunca finge ausência de correspondências (D3/guardrail do IPD).
+    """
+    minimal: Dict[str, Any] = {"mode": payload.get("mode")}
+    for key in ("node", "target"):
+        if key in payload:
+            minimal[key] = payload[key]
+    if "found" in payload:
+        minimal["found"] = payload["found"]
+        minimal["path"] = []
+    if "items" in payload:
+        minimal["items"] = []
+    if "neighbors" in payload:
+        minimal["neighbors"] = {}
+        minimal["rationale"] = []
+        minimal["notes"] = []
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    minimal["warnings"] = sorted(warnings)
+    minimal["truncated"] = {"omitted": "all"}
+    return minimal
+
+
+def enforce_graph_response_budget(
+    payload: dict, max_chars: int = GRAPH_RESPONSE_MAX_CHARS
+) -> dict:
+    """
+    Pós-condição por caracteres apenas (compat/uso direto fora do servidor
+    MCP): corte declarado em truncated/warnings. `atlas_graph` usa
+    `response_budget.finalize_response` (chars + bytes + tokens exatos) com
+    `graph_cut_once`/`graph_minimal_envelope` acima.
+    """
+    while _serialized_len(payload) > max_chars:
+        if not graph_cut_once(payload):
+            break
     return payload
 
 

@@ -7,8 +7,35 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Added
+
+- **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):
+  mede a string JSON final devolvida por `atlas_search`, `atlas_context`,
+  `atlas_brief` e `atlas_graph` — caracteres/bytes exatos e tokens (exatos via
+  tokenizer local opcional em `ATLAS_TOKENIZER_PATH`, ou estimativa
+  `ceil(chars/4)` sempre identificada como tal). Evento v1 em memória (último
+  por tool) e JSONL local com retenção limitada
+  (`.code-index/observability/events.jsonl`, ≤3 MiB com rotação). Bloco
+  `atlas_status.observability` só aparece quando o flag está ligado.
+- **Teto global de resposta em `atlas_search`** (24.000 caracteres/bytes,
+  6.000 tokens exatos com tokenizer configurado): corte determinístico de
+  resultados inteiros pela cauda, preservando ordem/identidade dos
+  sobreviventes; `truncated.results` declara quantos foram removidos.
+  `atlas_context`/`atlas_brief`/`atlas_graph` reaproveitam seus tetos de
+  caracteres existentes e ganham o mesmo bloco `budget` (`mode`, `max_chars`,
+  `max_bytes`, `max_tokens`, `tokenizer_sha256`, `used_chars`) na resposta.
+- `scripts/eval_search.py --delivery`: mede MRR/recall@5 da resposta
+  REALMENTE ENTREGUE (pós-montagem e pós-orçamento) nos modos
+  metadata/content, sobre os mesmos candidatos do ranking pré-budget — nunca
+  altera a medição histórica. `--benchmark` mede o overhead de observabilidade
+  (desligada / estimativa / tokenizer local) sobre payloads sintéticos fixos.
+- Dependência direta `tokenizers>=0.22.2,<0.23` (já transitiva via fastembed).
+
 ### Fixed
 
+- `context.py`: `budget.used_chars` agora representa o comprimento real do
+  JSON final devolvido (antes era calculado antes de o próprio valor ser
+  gravado, ficando sempre uma medição defasada).
 - `background_reindex.log` passa a ter teto de 256 KiB: o spawn recorta o
   final do arquivo antes de appendar o run novo, para o log de reindex em
   background não crescer sem limite.

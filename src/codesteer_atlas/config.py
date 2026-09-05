@@ -345,6 +345,58 @@ GIT_HISTORY_VERSION = "1.0"
 GIT_HISTORY_TIMEOUT_S = 60
 
 
+# ---------------------------------------------------------------------------
+# Observabilidade de tokens por consulta (opt-in) — plano
+# observabilidade-tokens-consultas. Ausência de ATLAS_OBSERVABILITY não cria
+# arquivo nem estado; ausência de ATLAS_TOKENIZER_PATH nunca carrega modelo
+# nem toca rede. Os dois flags são independentes: o orçamento de tokens usa o
+# tokenizer configurado mesmo com observabilidade desligada (§4.1 do IPD).
+# ---------------------------------------------------------------------------
+
+OBSERVABILITY_ENV_FLAG = "ATLAS_OBSERVABILITY"
+TOKENIZER_PATH_ENV_FLAG = "ATLAS_TOKENIZER_PATH"
+
+OBSERVABILITY_EVENT_SCHEMA_VERSION = "1.0"
+OBSERVABILITY_TOOLS = ("atlas_search", "atlas_context", "atlas_brief", "atlas_graph")
+
+OBSERVABILITY_DIRNAME = "observability"
+OBSERVABILITY_EVENTS_FILENAME = "events.jsonl"
+OBSERVABILITY_LOCK_FILENAME = ".observability.lock"
+# Rotação: 1 arquivo ativo + 2 backups = 3 MiB no total (§4.1 do IPD).
+OBSERVABILITY_MAX_FILE_BYTES = 1 * 1024 * 1024
+OBSERVABILITY_MAX_BACKUPS = 2
+# O sink nunca bloqueia a consulta: contenção descarta a persistência daquele evento.
+OBSERVABILITY_LOCK_TIMEOUT_S = 0
+
+# ceil(chars/4) quando não há tokenizer configurado ou ele está indisponível.
+TOKEN_ESTIMATE_DIVISOR = 4
+
+# Orçamentos de resposta por tool (§4.1). context/graph/brief reaproveitam os
+# tetos de caracteres já existentes (evita duas fontes de verdade para o mesmo
+# número); só `search` ganha teto novo, pois nunca teve um global.
+RESPONSE_BUDGET_SEARCH_MAX_CHARS = 24000
+RESPONSE_BUDGET_SEARCH_MAX_BYTES = 24000
+RESPONSE_BUDGET_SEARCH_MAX_TOKENS = 6000
+
+RESPONSE_BUDGET_CONTEXT_MAX_BYTES = CONTEXT_RESPONSE_MAX_CHARS
+RESPONSE_BUDGET_CONTEXT_MAX_TOKENS = 4000
+
+RESPONSE_BUDGET_GRAPH_MAX_BYTES = GRAPH_RESPONSE_MAX_CHARS
+RESPONSE_BUDGET_GRAPH_MAX_TOKENS = 2000
+
+RESPONSE_BUDGET_BRIEF0_MAX_BYTES = BRIEF_LEVEL0_MAX_CHARS
+RESPONSE_BUDGET_BRIEF0_MAX_TOKENS = 700
+
+RESPONSE_BUDGET_BRIEF1_MAX_BYTES = BRIEF_LEVEL1_MAX_CHARS
+RESPONSE_BUDGET_BRIEF1_MAX_TOKENS = 1700
+
+# Teto de tentativas do laço de corte do finalizador compartilhado
+# (`response_budget.finalize_response`): progresso estrito por construção (cada
+# tentativa remove um item), mas um número finito evita qualquer risco de loop
+# indefinido diante de um `cut_once` malformado.
+RESPONSE_BUDGET_MAX_CUT_ATTEMPTS = 4000
+
+
 def resolve_git_history_window(
     max_commits: int | None = None, max_months: int | None = None
 ) -> tuple[int, int]:

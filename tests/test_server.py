@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from codesteer_atlas.config import BRIEF_LEVEL0_MAX_CHARS, GRAPH_RESPONSE_MAX_CHARS
 from codesteer_atlas.models import IndexManifest, IndexStats, SearchOutcome, SearchResult
 from codesteer_atlas.server import (
     _file_uri_to_path,
@@ -180,7 +181,11 @@ def test_atlas_search_include_content_false_omits_content():
             scope_type="function",
             scope_name="run",
             language="python",
-            content="def run(): pass " * 20,  # conteúdo "grande" para comparação de tamanho
+            # Conteúdo grande o bastante para a comparação de tamanho continuar válida
+            # mesmo com os metadados de orçamento (budget/response_*) agora obrigatórios
+            # na resposta — ambas as respostas carregam o mesmo bloco de metadados de
+            # tamanho fixo, então só um conteúdo grande deixa a omissão dominar a razão.
+            content="def run(): pass " * 400,
             score=0.15,
             repo="my-project",
         )
@@ -2773,3 +2778,311 @@ def test_atlas_context_debug_entrega_lookup_e_estado_historico(tmp_path):
 
     assert capturado["history_state"] == {"state": "ok", "commits": 3}
     assert capturado["history_lookup"].__name__ == "lookup_commits"
+
+
+# ---------------------------------------------------------------------------
+# Observabilidade de tokens por consulta (plano observabilidade-tokens-consultas)
+# V4-V10: teto search, budget nas quatro tools, eventos e status.
+# ---------------------------------------------------------------------------
+
+
+def _mock_result(content: str, symbol: str) -> SearchResult:
+    return SearchResult(
+        file_path=f"src/{symbol}.py",
+        start_line=1,
+        end_line=10,
+        scope_type="function",
+        scope_name=symbol,
+        language="python",
+        content=content,
+        score=0.1,
+        repo="my-project",
+    )
+
+
+def test_atlas_search_truncates_tail_when_over_response_budget():
+    """V4: search com conteúdo grande corta resultados inteiros da cauda."""
+    big_content = "x" * 3000
+    mock_results = [_mock_result(big_content, f"fn{i}") for i in range(20)]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+    ):
+        result_json = atlas_search(query="fn", top_k=20, include_content=True)
+
+    result = json.loads(result_json)
+    assert len(result["results"]) < 20
+    assert result["truncated"]["results"] > 0
+    assert "truncated_for_budget" in result["warnings"]
+    assert "budget" in result
+    assert len(result_json) <= 24000
+    assert len(result_json.encode("utf-8")) <= 24000
+    # Ordem e identidade dos sobreviventes preservadas (cauda cortada, não a cabeça)
+    survivors = [r["symbol"] for r in result["results"]]
+    assert survivors == [f"fn{i}" for i in range(len(survivors))]
+
+
+def test_atlas_search_first_hit_too_big_returns_explicit_empty_not_no_match():
+    """V5: quando nem o primeiro hit cabe, results=[] mas truncated.results > 0."""
+    huge_content = "y" * 100000
+    mock_results = [_mock_result(huge_content, "only")]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+    ):
+        result_json = atlas_search(query="only", top_k=5, include_content=True)
+
+    result = json.loads(result_json)
+    assert result["results"] == []
+    assert result["truncated"]["results"] == 1
+    assert "truncated_for_budget" in result["warnings"]
+
+
+def test_atlas_search_no_hits_has_no_truncated_key():
+    """Contraponto de V5: ausência real de hits não carrega `truncated`."""
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=[]),
+        ),
+    ):
+        result_json = atlas_search(query="nada aqui", top_k=5)
+
+    result = json.loads(result_json)
+    assert result["results"] == []
+    assert "truncated" not in result
+
+
+def test_atlas_graph_hubs_response_has_budget_block(tmp_path):
+    graph = {
+        "nodes": [{"id": "file:a.py", "kind": "file", "label": "a.py", "file_path": "a.py", "degree": 1}],
+        "edges": [],
+        "metrics": {"top_hubs": [{"id": "file:a.py", "degree": 1}]},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path):
+        result = json.loads(atlas_graph(mode="hubs"))
+    assert result["budget"]["mode"] in ("tokenizer_exact", "byte_bpe_upper_bound")
+    assert result["budget"]["max_chars"] == GRAPH_RESPONSE_MAX_CHARS
+    assert result["budget"]["used_chars"] == len(json.dumps(result, separators=(",", ":"), ensure_ascii=False))
+
+
+def test_atlas_brief_response_has_budget_block(tmp_path):
+    manifest = MOCK_MANIFEST.model_copy(update={"files": {"a.py": "hash"}})
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value=None),
+    ):
+        result = json.loads(atlas_brief(level=0))
+    assert "budget" in result
+    assert result["budget"]["max_chars"] == BRIEF_LEVEL0_MAX_CHARS
+
+
+def test_atlas_context_response_has_canonical_budget_block(tmp_path):
+    graph = {
+        "nodes": [{"id": "file:pkg/a.py", "kind": "file", "label": "a.py", "file_path": "pkg/a.py", "degree": 0}],
+        "edges": [],
+        "metrics": {"top_hubs": []},
+    }
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    manifest = MOCK_MANIFEST.model_copy(update={"files": {"pkg/a.py": "hash"}})
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+    ):
+        raw = atlas_context(target="a.py", intent="understand")
+    payload = json.loads(raw)
+    assert payload["budget"]["mode"] in ("tokenizer_exact", "byte_bpe_upper_bound")
+    assert "max_bytes" in payload["budget"]
+
+
+def test_atlas_status_omits_observability_block_when_disabled(monkeypatch):
+    monkeypatch.delenv("ATLAS_OBSERVABILITY", raising=False)
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+    assert "observability" not in result
+
+
+def test_atlas_status_includes_observability_block_when_enabled(monkeypatch):
+    from codesteer_atlas import observability as obs
+
+    monkeypatch.setenv("ATLAS_OBSERVABILITY", "1")
+    obs.reset_observability_state_for_tests()
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        result = json.loads(atlas_status())
+    assert result["observability"]["enabled"] is True
+    assert "dropped_events" in result["observability"]
+    assert "last_by_tool" in result["observability"]
+    obs.reset_observability_state_for_tests()
+
+
+def test_atlas_search_records_success_event_when_enabled(tmp_path, monkeypatch):
+    from codesteer_atlas import observability as obs
+
+    monkeypatch.setenv("ATLAS_OBSERVABILITY", "1")
+    obs.reset_observability_state_for_tests()
+    mock_results = [_mock_result("def run(): pass", "run")]
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+    ):
+        result_json = atlas_search(query="run", top_k=5)
+
+    status = obs.get_observability_status()
+    event = status["last_by_tool"]["atlas_search"]
+    assert event["outcome"] == "success"
+    assert event["response_chars"] == len(result_json)
+    assert event["top_k"] == 5
+    assert event["results_returned"] == 1
+    obs.reset_observability_state_for_tests()
+
+
+def test_atlas_search_records_error_event_and_preserves_exception(tmp_path, monkeypatch):
+    from codesteer_atlas import observability as obs
+
+    monkeypatch.setenv("ATLAS_OBSERVABILITY", "1")
+    obs.reset_observability_state_for_tests()
+
+    with patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path), pytest.raises(ValueError):
+        atlas_search(query="")  # query vazia: erro de validação, antes de tocar o índice
+
+    status = obs.get_observability_status()
+    event = status["last_by_tool"]["atlas_search"]
+    assert event["outcome"] == "error"
+    assert event["error_class"] == "ValueError"
+    assert event["response_chars"] is None
+    obs.reset_observability_state_for_tests()
+
+
+def test_atlas_search_disabled_records_nothing(tmp_path, monkeypatch):
+    from codesteer_atlas import observability as obs
+
+    monkeypatch.delenv("ATLAS_OBSERVABILITY", raising=False)
+    obs.reset_observability_state_for_tests()
+    mock_results = [_mock_result("def run(): pass", "run")]
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+    ):
+        atlas_search(query="run", top_k=5)
+
+    assert not (tmp_path / "observability").exists()
+    status = obs.get_observability_status()
+    assert status["last_by_tool"] == {}
+
+
+def _write_minimal_index_fixture(index_dir):
+    """
+    Índice mínimo (sem LanceDB real/embeddings) suficiente para `atlas_status`
+    e `atlas_graph` responderem via stdio real (V10) — não exercita
+    `atlas_search` (que exigiria o modelo ONNX carregado no subprocesso).
+    """
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "lancedb").mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "total_chunks": 1,
+        "repos_indexed": ["fixture"],
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "embedding_dim": 384,
+        "embedding_backend": "fastembed",
+        "storage_backend": "lancedb",
+        "last_indexed_at": "2026-09-05T00:00:00+00:00",
+        "git_head_sha": None,
+        "languages_indexed": ["python"],
+        "index_version": "2.3.0",
+        "files": {"a.py": "hash"},
+    }
+    (index_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    graph = {
+        "nodes": [{"id": "file:a.py", "kind": "file", "label": "a.py", "file_path": "a.py", "degree": 0}],
+        "edges": [],
+        "metrics": {"node_count": 1, "edge_count": 0, "top_hubs": []},
+    }
+    (index_dir / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+
+def test_stdio_roundtrip_atlas_status_and_graph_with_observability(tmp_path):
+    """
+    V10: FastMCP Client + StdioTransport contra o servidor deste checkout,
+    iniciado como subprocesso real. Prova que stdout carrega só JSON-RPC
+    (senão o Client não conseguiria parsear a resposta) e que o conteúdo
+    textual corresponde à medição registrada em `atlas_status.observability`.
+    """
+    from fastmcp import Client
+    from fastmcp.client.transports import StdioTransport
+
+    index_dir = tmp_path / ".code-index"
+    _write_minimal_index_fixture(index_dir)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    env["ATLAS_OBSERVABILITY"] = "1"
+    env.setdefault("RUST_LOG", "off")
+    env.setdefault("LANCE_LOG", "off")
+
+    transport = StdioTransport(
+        command=sys.executable,
+        args=["-m", "codesteer_atlas.server", "--index-dir", str(index_dir)],
+        env=env,
+        cwd=str(tmp_path),
+    )
+
+    async def _run():
+        async with Client(transport) as client:
+            status_result = await client.call_tool("atlas_status", {})
+            status_text = status_result.content[0].text
+            status = json.loads(status_text)
+            assert status["index_exists"] is True
+
+            graph_result = await client.call_tool("atlas_graph", {"mode": "hubs"})
+            graph_text = graph_result.content[0].text
+            graph_payload = json.loads(graph_text)
+            assert graph_payload["mode"] == "hubs"
+            assert "budget" in graph_payload
+
+            # Round-trip: o evento registrado mede a MESMA string devolvida.
+            status_after = json.loads((await client.call_tool("atlas_status", {})).content[0].text)
+            last_event = status_after["observability"]["last_by_tool"]["atlas_graph"]
+            assert last_event["response_chars"] == len(graph_text)
+            assert last_event["outcome"] == "success"
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=60))

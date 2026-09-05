@@ -570,7 +570,7 @@ def build_context(
                 section_names = ("symbol", "file_summary", "layer", "neighbors", "brief_layer")
 
     sections = apply_section_quotas(section_names, sections, truncated)
-    payload = {
+    payload: Dict[str, Any] = {
         "target": _node_summary(node),
         "intent": intent,
         "sections": sections,
@@ -580,7 +580,41 @@ def build_context(
     if truncated:
         payload["truncated"] = truncated
     _enforce_context_budget(payload, CONTEXT_RESPONSE_MAX_CHARS)
-    payload["budget"]["used_chars"] = _serialized_len(payload)
     if not payload.get("truncated"):
         payload.pop("truncated", None)
+    # @MindWhy: inserir o valor real de used_chars muda o próprio tamanho do
+    # JSON (mais dígitos); estabilização numérica limitada (§4.2 do plano
+    # observabilidade-tokens-consultas) converge em poucas iterações em vez de
+    # gravar um valor que já ficou defasado (bug histórico corrigido aqui).
+    for _ in range(3):
+        length = _serialized_len(payload)
+        if payload["budget"]["used_chars"] == length:
+            break
+        payload["budget"]["used_chars"] = length
     return payload
+
+
+def context_cut_once(payload: dict) -> bool:
+    """
+    Um passo de corte para o finalizador compartilhado do servidor (D3):
+    reaproveita a ordem de prioridade de `_enforce_context_budget`, mirando o
+    tamanho atual menos 1 caractere para remover só o próximo item da fila.
+    """
+    before = _serialized_len(payload)
+    if before <= 1:
+        return False
+    _enforce_context_budget(payload, before - 1)
+    return _serialized_len(payload) < before
+
+
+def context_minimal_envelope(payload: dict) -> dict:
+    """Envelope mínimo de `atlas_context`: nunca finge ausência de seções (D3)."""
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    return {
+        "target": payload.get("target"),
+        "intent": payload.get("intent"),
+        "sections": {},
+        "warnings": sorted(warnings),
+        "truncated": {"omitted": "all"},
+    }

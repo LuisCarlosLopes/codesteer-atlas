@@ -1228,6 +1228,69 @@ def test_purpose_persistido_e_retornado_por_lookup(temp_storage):
     assert temp_storage.lookup_purpose("src/auth.py", "login") == purpose
 
 
+def _chunk_with_purpose_vector(chunk_id: str, purpose_vector):
+    return CodeChunk(
+        id=chunk_id,
+        file_path=f"src/{chunk_id}.py",
+        repo="test-project",
+        start_line=1,
+        end_line=2,
+        scope_type="function",
+        scope_name=chunk_id,
+        language="python",
+        content=f"def {chunk_id}(): pass",
+        indexed_at="2026-06-05T12:00:00Z",
+        vector=MOCK_VECTOR,
+        purpose_vector=purpose_vector,
+    )
+
+
+def test_store_chunks_normaliza_purpose_vector_nulo_vazio_ou_dimensao_errada(temp_storage):
+    """Índice grande no Windows falha se purpose_vector mistura None, [] e 384 dims."""
+    chunks = [
+        _chunk_with_purpose_vector("none", None),
+        _chunk_with_purpose_vector("empty", []),
+        _chunk_with_purpose_vector("short", [0.3] * 10),
+        _chunk_with_purpose_vector("ok", [0.2] * 384),
+    ]
+    chunks.extend(_chunk_with_purpose_vector(f"pad{i}", None) for i in range(80))
+
+    temp_storage.store_chunks(chunks)
+
+    rows = {
+        row["id"]: row
+        for row in lancedb.connect(str(temp_storage.db_path))
+        .open_table("chunks")
+        .to_arrow()
+        .to_pylist()
+    }
+    assert rows["none"]["purpose_vector"] is None
+    assert rows["empty"]["purpose_vector"] is None
+    assert rows["short"]["purpose_vector"] is None
+    assert rows["ok"]["purpose_vector"] == pytest.approx([0.2] * 384)
+    assert rows["pad0"]["purpose_vector"] is None
+
+
+def test_append_chunks_normaliza_purpose_vector_invalido(temp_storage):
+    temp_storage.store_chunks([_chunk_with_purpose_vector("base", [0.1] * 384)])
+    temp_storage.append_chunks(
+        [
+            _chunk_with_purpose_vector("empty", []),
+            _chunk_with_purpose_vector("ok", [0.4] * 384),
+        ]
+    )
+
+    rows = {
+        row["id"]: row
+        for row in lancedb.connect(str(temp_storage.db_path))
+        .open_table("chunks")
+        .to_arrow()
+        .to_pylist()
+    }
+    assert rows["empty"]["purpose_vector"] is None
+    assert rows["ok"]["purpose_vector"] == pytest.approx([0.4] * 384)
+
+
 def _write_legacy_storage(storage, version="2.2.0"):
     storage.index_dir.mkdir(parents=True, exist_ok=True)
     db = lancedb.connect(str(storage.db_path))
