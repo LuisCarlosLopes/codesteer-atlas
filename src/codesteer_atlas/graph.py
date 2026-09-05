@@ -20,7 +20,10 @@ from codesteer_atlas.config import (
     IGNORE_DIRS,
     IMPORT_RESOLUTION_TIERS,
 )
-from codesteer_atlas.markdown_links import extract_markdown_link_targets
+from codesteer_atlas.markdown_links import (
+    extract_markdown_link_targets,
+    resolve_heading_section,
+)
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
 from codesteer_atlas.viewer import write_graph_html
@@ -734,6 +737,68 @@ def _build_empty_graph(manifest) -> dict:
     }
 
 
+def _sections_by_file_from_rows(rows_by_file: Dict[str, List[dict]]) -> Dict[str, List[dict]]:
+    sections_by_file: Dict[str, List[dict]] = {}
+    for file_path, file_rows in rows_by_file.items():
+        sections = [
+            {
+                "scope_name": row["scope_name"],
+                "lines": [row["start_line"], row["end_line"]],
+            }
+            for row in file_rows
+            if row.get("language") == "markdown"
+        ]
+        if sections:
+            sections_by_file[file_path] = sections
+    return sections_by_file
+
+
+def _sections_by_file_from_nodes(nodes: Dict[str, dict]) -> Dict[str, List[dict]]:
+    sections_by_file: Dict[str, List[dict]] = {}
+    for node in nodes.values():
+        if node.get("kind") != "section":
+            continue
+        sections_by_file.setdefault(node["file_path"], []).append(
+            {"scope_name": node["label"], "lines": node.get("lines")}
+        )
+    return sections_by_file
+
+
+def _links_to_target_id(
+    target,
+    nodes: Dict[str, dict],
+    sections_by_file: Dict[str, List[dict]],
+) -> Optional[str]:
+    """Resolve `links_to` para a seção da âncora, ou para o doc se o heading faltar."""
+    if target.file_path is None:
+        return None
+    file_id = f"file:{target.file_path}"
+    if file_id not in nodes:
+        return None
+    if not target.anchor:
+        return file_id
+
+    sections = sections_by_file.get(target.file_path, [])
+    section_name = resolve_heading_section(target.anchor, sections)
+    if not section_name:
+        return file_id
+
+    section_id = f"sec:{target.file_path}#{section_name}"
+    if section_id not in nodes:
+        section_info = next(
+            (item for item in sections if item.get("scope_name") == section_name),
+            {},
+        )
+        nodes[section_id] = {
+            "id": section_id,
+            "kind": "section",
+            "label": section_name,
+            "file_path": target.file_path,
+            "lines": section_info.get("lines"),
+        }
+    return section_id
+
+
 def _add_contribution_from_rows(
     file_path: str,
     rows: Iterable[dict],
@@ -744,6 +809,7 @@ def _add_contribution_from_rows(
     edges: List[dict],
     edge_keys: set[tuple[str, str, str]],
     import_context: _ImportContext,
+    sections_by_file: Optional[Dict[str, List[dict]]] = None,
 ) -> None:
     file_kind = "doc" if file_path.lower().endswith(".md") else "file"
     file_node_id = f"file:{file_path}"
@@ -792,10 +858,8 @@ def _add_contribution_from_rows(
             for target in extract_markdown_link_targets(
                 row.get("content") or "", file_path, name_to_paths=name_to_paths
             ):
-                if target.file_path is None:
-                    continue
-                target_id = f"file:{target.file_path}"
-                if target_id not in nodes:
+                target_id = _links_to_target_id(target, nodes, sections_by_file or {})
+                if target_id is None:
                     continue
                 _add_edge(node_id, target_id, "links_to")
             continue
@@ -936,6 +1000,7 @@ def build_and_write(
     rows_by_file: Dict[str, List[dict]] = {}
     for row in rows:
         rows_by_file.setdefault(row["file_path"], []).append(row)
+    sections_by_file = _sections_by_file_from_rows(rows_by_file)
 
     nodes: Dict[str, dict] = {
         f"file:{file_path}": {
@@ -960,6 +1025,7 @@ def build_and_write(
             edges=edges,
             edge_keys=edge_keys,
             import_context=import_context,
+            sections_by_file=sections_by_file,
         )
 
     graph = _finalize_graph(
@@ -996,7 +1062,11 @@ def build_and_write_incremental(
 
     kept_edges: List[dict] = []
     for edge in graph.get("edges", []):
-        if edge["source"] in removed_node_ids or edge["target"] in removed_node_ids:
+        if edge["source"] in removed_node_ids:
+            continue
+        # Incoming `links_to` a uma seção reindexada sobrevive se o heading
+        # (mesmo id) for recriado; o prune pós-contribuição descarta o miss.
+        if edge["target"] in removed_node_ids and edge["kind"] != "links_to":
             continue
         if edge["kind"] in {"contains", "imports"} and edge["source"].startswith("file:"):
             source_file = edge["source"][len("file:") :]
@@ -1015,6 +1085,8 @@ def build_and_write_incremental(
         go_modules=infer_go_modules(manifest_files, workspace_root),
     )
     rows_by_file = _graph_rows_from_chunks(updated_chunks)
+    sections_by_file = _sections_by_file_from_nodes(nodes)
+    sections_by_file.update(_sections_by_file_from_rows(rows_by_file))
 
     for file_path in updated_file_paths:
         _add_contribution_from_rows(
@@ -1027,7 +1099,14 @@ def build_and_write_incremental(
             edges=kept_edges,
             edge_keys=edge_keys,
             import_context=import_context,
+            sections_by_file=sections_by_file,
         )
+
+    kept_edges[:] = [
+        edge
+        for edge in kept_edges
+        if edge["source"] in nodes and edge["target"] in nodes
+    ]
 
     updated_graph = _build_empty_graph(manifest) | {
         "nodes": list(nodes.values()),

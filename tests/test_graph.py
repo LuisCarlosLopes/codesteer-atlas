@@ -138,6 +138,193 @@ def test_unresolved_cite_does_not_create_ghost_node(temp_storage):
     assert not any(edge["kind"] == "cites" for edge in graph["edges"])
 
 
+def _store_markdown_graph(temp_storage, files: dict[str, tuple[str, str]]):
+    """Indexa notas markdown: {path: (scope_name, content)}."""
+    chunks = []
+    manifest_files = {}
+    for index, (file_path, (scope_name, content)) in enumerate(files.items()):
+        chunks.append(
+            CodeChunk(
+                id=f"md-{index}",
+                file_path=file_path,
+                repo="test-project",
+                start_line=1,
+                end_line=8,
+                scope_type="section",
+                scope_name=scope_name,
+                language="markdown",
+                content=content,
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=MOCK_VECTOR,
+            )
+        )
+        manifest_files[file_path] = f"sha-{index}"
+    temp_storage.store_chunks(chunks)
+    return temp_storage.get_manifest().model_copy(update={"files": manifest_files})
+
+
+def test_wikilink_vault_path_creates_links_to_from_nested_notes(temp_storage):
+    """[[meta/glossary#termo]] a partir de pastas aninhadas vira links_to no glossary."""
+    glossary = "cognitive-base/meta/glossary.md"
+    manifest = _store_markdown_graph(
+        temp_storage,
+        {
+            glossary: (
+                "CrudService",
+                "# CrudService\n\nServiço base.",
+            ),
+            "cognitive-base/system/sys-008.md": (
+                "Fiscal",
+                "Ver [[meta/glossary#crudservice]].",
+            ),
+            "cognitive-base/specs/spc-005.md": (
+                "Infra",
+                "Ver [[meta/glossary#crudservice]].",
+            ),
+            "cognitive-base/guides/architecture/gd-041.md": (
+                "Provisionamento",
+                "Ver [[meta/glossary#crudservice]].",
+            ),
+            "cognitive-base/guides/gd-071.md": (
+                "Ponta a ponta",
+                "Ver [[meta/hub-notas-pendentes]].",
+            ),
+            "cognitive-base/meta/hub-notas-pendentes.md": (
+                "Pendentes",
+                "# Pendentes",
+            ),
+        },
+    )
+
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    incoming = [
+        edge
+        for edge in graph["edges"]
+        if edge["kind"] == "links_to" and edge["target"] == f"sec:{glossary}#CrudService"
+    ]
+    sources = {edge["source"] for edge in incoming}
+
+    assert sources == {
+        "sec:cognitive-base/system/sys-008.md#Fiscal",
+        "sec:cognitive-base/specs/spc-005.md#Infra",
+        "sec:cognitive-base/guides/architecture/gd-041.md#Provisionamento",
+    }
+    assert any(
+        edge["kind"] == "links_to"
+        and edge["target"] == "file:cognitive-base/meta/hub-notas-pendentes.md"
+        for edge in graph["edges"]
+    )
+    assert all(
+        edge["target"] != "file:cognitive-base/system/meta/glossary.md"
+        for edge in graph["edges"]
+    )
+
+
+def test_wikilink_heading_links_to_section_not_only_file(temp_storage):
+    """[[nota#heading]] cria links_to na seção; heading ausente cai no doc."""
+    target = "docs/gd-037-arquitetura.md"
+    manifest = _store_markdown_graph(
+        temp_storage,
+        {
+            target: (
+                "Multi-tenancy: Master DB vs Tenant DB",
+                "# Multi-tenancy: Master DB vs Tenant DB\n\nDetalhes.",
+            ),
+            "docs/gd-071.md": (
+                "Guias de padrões",
+                "Ver [[gd-037-arquitetura#multi-tenancy-master-db-vs-tenant-db]] "
+                "e [[gd-037-arquitetura#heading-inexistente]] "
+                "e [[gd-044-aggregate-root|alias]] "
+                "e [[arquivo-inexistente]].",
+            ),
+            "docs/gd-044-aggregate-root.md": (
+                "Aggregate",
+                "# Aggregate",
+            ),
+        },
+    )
+
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    links = [
+        edge
+        for edge in graph["edges"]
+        if edge["kind"] == "links_to" and edge["source"] == "sec:docs/gd-071.md#Guias de padrões"
+    ]
+    targets = {edge["target"] for edge in links}
+
+    assert f"sec:{target}#Multi-tenancy: Master DB vs Tenant DB" in targets
+    assert f"file:{target}" in targets
+    assert "file:docs/gd-044-aggregate-root.md" in targets
+    assert all("arquivo-inexistente" not in edge["target"] for edge in graph["edges"])
+    assert all(node["id"] != "file:arquivo-inexistente.md" for node in graph["nodes"])
+
+
+def test_self_wikilink_vault_path_from_glossary_resolves(temp_storage):
+    """O próprio glossary.md com [[meta/glossary#termo]] não inventa meta/meta/."""
+    glossary = "cognitive-base/meta/glossary.md"
+    manifest = _store_markdown_graph(
+        temp_storage,
+        {
+            glossary: (
+                "CrudService",
+                "Ver também [[meta/glossary#crudservice]].",
+            ),
+        },
+    )
+
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+
+    assert not any(
+        "meta/meta/glossary" in (edge["source"] + edge["target"]) for edge in graph["edges"]
+    )
+
+
+def test_incremental_keeps_incoming_links_to_rebuilt_section(temp_storage):
+    """Reindexar o alvo preserva links_to de entrada quando o heading permanece."""
+    from codesteer_atlas.graph import build_and_write_incremental
+
+    glossary = "cognitive-base/meta/glossary.md"
+    source = "cognitive-base/system/sys-008.md"
+    manifest = _store_markdown_graph(
+        temp_storage,
+        {
+            glossary: ("CrudService", "# CrudService\n\nBase."),
+            source: ("Fiscal", "Ver [[meta/glossary#crudservice]]."),
+        },
+    )
+    build_and_write(temp_storage, manifest, temp_storage.index_dir)
+    _clear_graph_cache()
+
+    updated = CodeChunk(
+        id="md-0-updated",
+        file_path=glossary,
+        repo="test-project",
+        start_line=1,
+        end_line=10,
+        scope_type="section",
+        scope_name="CrudService",
+        language="markdown",
+        content="# CrudService\n\nBase atualizada.",
+        indexed_at="2026-06-05T13:00:00Z",
+        vector=MOCK_VECTOR,
+    )
+    graph = json.loads(
+        build_and_write_incremental(
+            index_path=temp_storage.index_dir,
+            manifest=manifest,
+            updated_chunks=[updated],
+            updated_file_paths={glossary},
+        )[0].read_text()
+    )
+
+    assert any(
+        edge["kind"] == "links_to"
+        and edge["source"] == f"sec:{source}#Fiscal"
+        and edge["target"] == f"sec:{glossary}#CrudService"
+        for edge in graph["edges"]
+    )
+
+
 def test_workspace_without_markdown_still_produces_valid_graph_and_queries(temp_storage):
     temp_storage.store_chunks(
         [

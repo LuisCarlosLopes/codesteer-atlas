@@ -112,6 +112,55 @@ def test_finalize_response_falls_back_to_minimal_envelope_when_nothing_left():
     assert parsed["items"] == []
 
 
+def test_finalize_response_minimal_envelope_check_reserves_room_for_budget_block(
+    tmp_path, monkeypatch
+):
+    # Regressão do achado do code review: a checagem pós-minimal_envelope não
+    # reservava espaço para o bloco `budget` embutido depois (diferente da
+    # checagem do laço principal, que já reserva). Isso permitia que o envelope
+    # mínimo, sozinho, coubesse exatamente no teto de tokens exatos, mas o
+    # bloco `budget` real (maior do que a folga restante) estourasse o teto sem
+    # que a degradação para bytes fosse acionada — a resposta final alegaria
+    # "tokenizer_exact" sem realmente caber no teto declarado.
+    tokenizer_path = tmp_path / "tokenizer.json"
+    _write_tiny_tokenizer(tokenizer_path)
+    monkeypatch.setenv(TOKENIZER_PATH_ENV_FLAG, str(tokenizer_path))
+    obs.reset_token_counter_for_tests()
+
+    def _minimal(_payload: dict) -> dict:
+        return {"items": [], "minimal": True}
+
+    bare_text = rb.serialize(_minimal({}))
+    bare_tokens = obs.count_tokens(bare_text).tokens
+    assert bare_tokens is not None
+
+    # max_tokens == tokens do envelope mínimo cru: cabe com folga zero: sem
+    # reserva, a checagem antiga julgaria "cabe" e nunca degradaria.
+    budget = rb.ResponseBudget("test", max_chars=100000, max_bytes=100000, max_tokens=bare_tokens)
+    _reserve_chars, reserve_tokens = rb._reserve_for_budget_block(budget)
+    assert reserve_tokens > 0  # a reserva é sempre positiva; sem ela o bug não é detectado
+
+    text, measurement = rb.finalize_response(
+        {"items": ["x"] * 5},
+        budget,
+        cut_once=lambda _payload: False,  # força o envelope mínimo de imediato
+        minimal_envelope=_minimal,
+    )
+    parsed = json.loads(text)
+
+    # A pós-condição real: se o modo final ainda alega tokenizer_exact, o
+    # texto final tem que caber de fato no teto de tokens declarado.
+    if parsed["budget"]["mode"] == "tokenizer_exact":
+        assert measurement.tokens is not None
+        assert measurement.tokens <= budget.max_tokens
+    else:
+        # Caminho esperado neste cenário: degrada e não promete teto exato
+        # que não coube.
+        assert parsed["budget"]["mode"] == "byte_bpe_upper_bound"
+        assert measurement.tokens is None
+        assert obs.get_token_counter()._unavailable is True
+
+
 def test_finalize_response_used_chars_matches_actual_final_length():
     payload = {"items": [f"item-{i}" for i in range(5)]}
     budget = rb.ResponseBudget("test", max_chars=200, max_bytes=200, max_tokens=1000)

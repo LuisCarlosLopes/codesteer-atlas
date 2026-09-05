@@ -33,9 +33,18 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Fixed
 
-- `context.py`: `budget.used_chars` agora representa o comprimento real do
-  JSON final devolvido (antes era calculado antes de o próprio valor ser
-  gravado, ficando sempre uma medição defasada).
+- Wikilinks Obsidian com caminho de vault (`[[meta/glossary#termo]]`) passam a
+  resolver a partir dos arquivos indexados (sufixo a partir da raiz da vault),
+  em vez de concatenar no diretório da nota de origem. `#heading` vira aresta
+  `links_to` no nó `section` correspondente e preenche `resolved_section`; se o
+  heading não existir, a aresta cai no `doc`. Alvo inexistente continua sem nó
+  fantasma; `[[nota]]` / `[[nota|alias]]` e `./`/`../` não mudam.
+- `budget.used_chars` agora representa o comprimento real do JSON final
+  devolvido (antes era calculado antes de o próprio valor ser gravado,
+  ficando sempre uma medição defasada). Em produção o campo é montado pelo
+  finalizador compartilhado (`response_budget.finalize_response`), que
+  substitui o bloco parcial que `context.py` monta para seus chamadores
+  diretos (ex.: testes).
 - `background_reindex.log` passa a ter teto de 256 KiB: o spawn recorta o
   final do arquivo antes de appendar o run novo, para o log de reindex em
   background não crescer sem limite.

@@ -767,6 +767,58 @@ def test_atlas_search_wikilink_with_anchor_resolves_section():
         ]
 
 
+def test_atlas_search_wikilink_vault_path_resolves_file_and_section():
+    """[[meta/glossary#crudservice]] a partir de nota aninhada resolve arquivo e seção."""
+    mock_results = [
+        SearchResult(
+            file_path="cognitive-base/system/sys-008.md",
+            start_line=1,
+            end_line=5,
+            scope_type="section",
+            scope_name="Fiscal",
+            language="markdown",
+            content="Ver [[meta/glossary#crudservice]].",
+            score=0.2,
+            repo="my-project",
+        )
+    ]
+    manifest_with_files = MOCK_MANIFEST.model_copy(
+        update={"files": {"cognitive-base/meta/glossary.md": "sha_1"}}
+    )
+    mock_sections = [
+        {"scope_type": "section", "scope_name": "CrudService"},
+    ]
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_manifest",
+            return_value=manifest_with_files,
+        ),
+        patch(
+            "codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=mock_results),
+        ),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.get_sections_by_file_path",
+            return_value=mock_sections,
+        ),
+    ):
+        result = json.loads(atlas_search(query="docs", top_k=1))
+
+        refs = result["results"][0]["markdown_references"]
+        assert refs == [
+            {
+                "file_path": "cognitive-base/meta/glossary.md",
+                "anchor": "crudservice",
+                "resolved_section": "CrudService",
+            }
+        ]
+
+
 def test_resolve_index_dir_precedence_arg_over_env_and_discovery(tmp_path):
     """`--index-dir` (cli_arg) tem prioridade sobre env e discovery."""
     env_dir = tmp_path / "env-index"

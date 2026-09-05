@@ -92,7 +92,7 @@ from codesteer_atlas.indexer import (  # noqa: E402
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
 from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
-    slugify_heading,
+    resolve_heading_section,
 )
 from codesteer_atlas.origin import OriginResolver  # noqa: E402
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
@@ -835,11 +835,9 @@ def assemble_search_payload(
                             sections_cache[target.file_path] = storage.get_sections_by_file_path(
                                 target.file_path
                             )
-                        target_slug = slugify_heading(target.anchor)
-                        for section in sections_cache[target.file_path]:
-                            if slugify_heading(section["scope_name"]) == target_slug:
-                                resolved_section = section["scope_name"]
-                                break
+                        resolved_section = resolve_heading_section(
+                            target.anchor, sections_cache[target.file_path]
+                        )
                     markdown_ref = {
                         "file_path": target.file_path,
                         "anchor": target.anchor,

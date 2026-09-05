@@ -187,7 +187,7 @@ def finalize_response(
             payload = minimal_envelope(payload)
             text = serialize(payload)
             measurement = measure_response(text)
-            if not _fits(measurement, budget):
+            if not _fits(measurement, budget, reserve_chars=reserve_chars, reserve_tokens=reserve_tokens):
                 # Guarda final (D2): nem o envelope mínimo cabe no teto de
                 # tokens exatos do tokenizer configurado — degrada para bytes
                 # e memoriza até reinício, sem prometer um teto inexequível.

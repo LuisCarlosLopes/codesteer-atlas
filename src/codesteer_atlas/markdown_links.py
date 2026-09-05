@@ -23,6 +23,52 @@ _WIKILINK_PATTERN = re.compile(r"\[\[([^\]|#]*)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\
 _EXTERNAL_SCHEMES = ("http://", "https://", "mailto:")
 
 
+def _ensure_md_wikilink_path(raw_target: str) -> Optional[str]:
+    """Garante sufixo `.md`; None se a extensão explícita não for markdown."""
+    if not raw_target:
+        return None
+    if "." in posixpath.basename(raw_target):
+        if not raw_target.lower().endswith(".md"):
+            return None
+        return raw_target
+    return raw_target + ".md"
+
+
+def _indexed_md_paths(name_to_paths: Dict[str, List[str]]) -> List[str]:
+    seen: set[str] = set()
+    paths: List[str] = []
+    for group in name_to_paths.values():
+        for path in group:
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
+
+
+def _match_indexed_path_suffix(path_part: str, indexed_paths: List[str]) -> List[str]:
+    needle = path_part.lstrip("/").replace("\\", "/").lower()
+    matches: List[str] = []
+    for indexed in indexed_paths:
+        normalized = indexed.replace("\\", "/").lower()
+        if normalized == needle or normalized.endswith("/" + needle):
+            matches.append(indexed)
+    return sorted(matches)
+
+
+def _unique_or_candidates(matches: List[str]) -> tuple[Optional[str], List[str]]:
+    if len(matches) == 1:
+        return matches[0], []
+    if len(matches) > 1:
+        return None, sorted(matches)
+    return None, []
+
+
+def _lookup_stem(
+    stem: str, name_to_paths: Dict[str, List[str]]
+) -> tuple[Optional[str], List[str]]:
+    return _unique_or_candidates(name_to_paths.get(stem.lower(), []))
+
+
 class MarkdownLinkTarget(NamedTuple):
     """Referência a outro arquivo `.md` extraída de um link/wikilink."""
 
@@ -43,12 +89,14 @@ def extract_markdown_link_targets(
 
     Ignora links externos (`http(s)://`, `mailto:`), referências
     puramente-âncora (`#secao`, sem destino) e referências para arquivos sem
-    extensão `.md`. Paths relativos/explícitos (incluindo `../`) são
-    resolvidos contra `source_file_path`. Wikilinks com nome "bare" (sem `/`
-    ou `.` no início) são resolvidos globalmente via `name_to_paths`
+    extensão `.md`. Links markdown padrão e wikilinks com `./` ou `../` são
+    resolvidos contra `source_file_path`. Wikilinks com `/` (estilo Obsidian
+    `[[pasta/nota]]`) resolvem contra os arquivos indexados — sufixo a partir
+    da raiz da vault/workspace, sem concatenar no diretório da origem. Nome
+    "bare" (sem `/`) e fallback de path sem sufixo usam `name_to_paths`
     (mapa stem -> lista de paths `.md`, tipicamente derivado de
     `manifest.files`): 1 match resolve `file_path`, 2+ matches preenchem
-    `candidates`, 0 matches deixa ambos vazios.
+    `candidates`, 0 matches deixa ambos vazios — nunca inventa path relativo.
 
     O resultado é deduplicado por (file_path, tuple(candidates), anchor, alias).
     """
@@ -57,6 +105,7 @@ def extract_markdown_link_targets(
 
     source_dir = posixpath.dirname(source_file_path)
     name_to_paths = name_to_paths or {}
+    indexed_md_paths = _indexed_md_paths(name_to_paths)
 
     seen = set()
     targets: List[MarkdownLinkTarget] = []
@@ -109,46 +158,53 @@ def extract_markdown_link_targets(
         if not raw_target:
             continue
 
-        if raw_target.startswith("/") or raw_target.startswith(".") or "/" in raw_target:
-            # Path explícito: garante sufixo .md, ignora extensão != .md
-            if "." in posixpath.basename(raw_target):
-                if not raw_target.lower().endswith(".md"):
-                    continue
-                path_part = raw_target
-            else:
-                path_part = raw_target + ".md"
-
+        if raw_target.startswith("."):
+            path_part = _ensure_md_wikilink_path(raw_target)
+            if path_part is None:
+                continue
             resolved_path = posixpath.normpath(posixpath.join(source_dir, path_part))
             _add(
                 MarkdownLinkTarget(
                     file_path=resolved_path, candidates=[], anchor=anchor, alias=alias
                 )
             )
-        else:
-            # Nome "bare": resolve globalmente por stem via name_to_paths
-            if "." in raw_target:
-                if not raw_target.lower().endswith(".md"):
-                    continue
-                stem = raw_target[: -len(".md")]
-            else:
-                stem = raw_target
+            continue
 
-            # Lookup case-insensitive: name_to_paths usa stems em minúsculas
-            matches = name_to_paths.get(stem.lower(), [])
-            if len(matches) == 1:
-                _add(
-                    MarkdownLinkTarget(
-                        file_path=matches[0], candidates=[], anchor=anchor, alias=alias
-                    )
-                )
-            elif len(matches) > 1:
-                _add(
-                    MarkdownLinkTarget(
-                        file_path=None, candidates=sorted(matches), anchor=anchor, alias=alias
-                    )
-                )
+        if "/" in raw_target:
+            # @MindWhy: Obsidian resolve [[pasta/nota]] a partir da raiz da vault,
+            # não do diretório do arquivo atual. join(source_dir, …) inventava
+            # paths inexistentes (ex.: system/meta/glossary.md).
+            path_part = _ensure_md_wikilink_path(raw_target.lstrip("/"))
+            if path_part is None:
+                continue
+            suffix_matches = _match_indexed_path_suffix(path_part, indexed_md_paths)
+            if suffix_matches:
+                file_path, candidates = _unique_or_candidates(suffix_matches)
             else:
-                _add(MarkdownLinkTarget(file_path=None, candidates=[], anchor=anchor, alias=alias))
+                stem = posixpath.basename(path_part)
+                if stem.lower().endswith(".md"):
+                    stem = stem[: -len(".md")]
+                file_path, candidates = _lookup_stem(stem, name_to_paths)
+            _add(
+                MarkdownLinkTarget(
+                    file_path=file_path, candidates=candidates, anchor=anchor, alias=alias
+                )
+            )
+            continue
+
+        if "." in raw_target:
+            if not raw_target.lower().endswith(".md"):
+                continue
+            stem = raw_target[: -len(".md")]
+        else:
+            stem = raw_target
+
+        file_path, candidates = _lookup_stem(stem, name_to_paths)
+        _add(
+            MarkdownLinkTarget(
+                file_path=file_path, candidates=candidates, anchor=anchor, alias=alias
+            )
+        )
 
     return targets
 
@@ -181,3 +237,20 @@ def slugify_heading(text: str) -> str:
     collapsed = re.sub(r"-+", "-", cleaned).strip("-")
 
     return collapsed
+
+
+def resolve_heading_section(anchor: str, sections: List[object]) -> Optional[str]:
+    """
+    Devolve o `scope_name` da seção cujo slug casa com `anchor`, ou None.
+
+    `sections` aceita dicts com `scope_name` (projeção do índice) ou strings.
+    """
+    target_slug = slugify_heading(anchor)
+    if not target_slug:
+        return None
+
+    for section in sections:
+        name = section["scope_name"] if isinstance(section, dict) else section
+        if slugify_heading(name) == target_slug:
+            return name
+    return None

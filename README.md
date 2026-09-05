@@ -69,6 +69,16 @@ um bloco `budget` (`mode`, `max_chars`, `max_bytes`, `max_tokens`, `tokenizer_sh
 `used_chars`); `mode="byte_bpe_upper_bound"` é o teto conservador quando não há tokenizer
 exato configurado — **nunca leia isso como garantia de tokens exatos**.
 
+**Por padrão (sem `ATLAS_TOKENIZER_PATH` configurado), `max_tokens` vem sempre `null` no
+bloco `budget` e em `atlas_status` — isso é esperado, não um bug, em qualquer sistema
+operacional (Windows, macOS, Linux).** O teto de tokens exato só existe quando há um
+tokenizer local carregado com sucesso; sem ele, `mode="byte_bpe_upper_bound"` e
+`max_tokens=null` são o sinal correto de "sem garantia de teto exato aqui". Se você
+configurou `ATLAS_TOKENIZER_PATH` e `max_tokens` continua `null`, o processo sempre
+escreve o motivo em stderr com o prefixo `[atlas]` (arquivo ausente, falha de leitura, lib
+`tokenizers` ausente, ou falha ao carregar o arquivo) — isso, sim, indica um problema real
+a investigar.
+
 Contagem exata é opcional e local: aponte `ATLAS_TOKENIZER_PATH` para um `tokenizer.json`
 compatível com a lib [`tokenizers`](https://huggingface.co/docs/tokenizers). Carregado de
 forma preguiçosa (só na primeira consulta que precisar dele), identificado por
@@ -369,7 +379,7 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
 | `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
 | `ATLAS_OBSERVABILITY` | desligado | `1` grava eventos de medição de resposta (chars/bytes/tokens) em memória + `.code-index/observability/events.jsonl` e expõe `atlas_status.observability`. Sem ele, nada é criado. Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional). |
-| `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal. |
+| `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal — `max_tokens` fica `null` em qualquer SO; isso é esperado, não um bug. |
 
 História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses). Extra opcional: `codesteer-atlas[watch]`.
 
