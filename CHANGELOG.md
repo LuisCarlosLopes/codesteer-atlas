@@ -7,7 +7,11 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-Fase 1 omitida do corte 2.2.0, mais as camadas 4 (semântica opt-in) e 5
+_Nada ainda._
+
+## [3.0.0] - 2026-09-05
+
+Corte major: Fase 1 omitida do 2.2.0, mais as camadas 4 (semântica opt-in) e 5
 (arqueologia de Git). Sem flag nova para a história: a janela é constante
 (`GIT_HISTORY_MAX_COMMITS_PER_FILE` / `GIT_HISTORY_MAX_MONTHS`). Watcher, SCIP,
 rerank e o braço estrutural já estão em [2.2.0].
@@ -214,8 +218,9 @@ Release inicial do CodeSteer Atlas.
 - Script de deploy (`deploy_mcp.py`) para registrar o servidor em Cursor, Claude Desktop,
   Cline e Claude Code CLI.
 
-[Unreleased]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...HEAD
-[2.2.0]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.2.0...v3.0.0
+[2.2.0]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v2.1...HEAD
 [1.4.2]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...34ef305
 [1.4.1]: https://github.com/LuisCarlosLopes/codesteer-atlas/compare/v1.4.0...dbd5c9a
