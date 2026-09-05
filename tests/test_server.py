@@ -20,6 +20,7 @@ from codesteer_atlas.server import (
     _spawn_background_reindex,
     _spawn_index_subprocess,
     _start_watcher,
+    _trim_background_reindex_log,
     _watch_spawn_reindex,
     atlas_brief,
     atlas_context,
@@ -1419,6 +1420,103 @@ def test_spawn_index_subprocess_writes_timestamped_header_to_log(tmp_path):
     assert "Reindex iniciado" in log_content
     assert "modo=incremental" in log_content
     assert "paths=src" in log_content
+
+
+def test_trim_background_reindex_log_noop_when_missing(tmp_path):
+    missing = tmp_path / "background_reindex.log"
+    _trim_background_reindex_log(missing)
+    assert not missing.exists()
+
+
+def test_trim_background_reindex_log_noop_when_under_limit(tmp_path):
+    log_path = tmp_path / "background_reindex.log"
+    payload = b"keep-me\n"
+    log_path.write_bytes(payload)
+    _trim_background_reindex_log(log_path)
+    assert log_path.read_bytes() == payload
+
+
+def test_trim_background_reindex_log_keeps_tail_when_over_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "codesteer_atlas.server.BACKGROUND_REINDEX_LOG_MAX_BYTES", 16
+    )
+    log_path = tmp_path / "background_reindex.log"
+    log_path.write_bytes(b"DROP_PREFIX\n" + b"Y" * 16)
+    _trim_background_reindex_log(log_path)
+    data = log_path.read_bytes()
+    assert len(data) <= 16
+    assert data == b"Y" * 16
+
+
+def test_trim_background_reindex_log_aligns_to_first_newline(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "codesteer_atlas.server.BACKGROUND_REINDEX_LOG_MAX_BYTES", 10
+    )
+    log_path = tmp_path / "background_reindex.log"
+    # € = 3 bytes; seek(-10) começa no meio da sequência UTF-8.
+    log_path.write_bytes(b"XXXX" + "€".encode("utf-8") + b"\nTAIL\n")
+    _trim_background_reindex_log(log_path)
+    assert log_path.read_bytes() == b"TAIL\n"
+
+
+def test_trim_background_reindex_log_oserror_does_not_propagate(tmp_path):
+    log_path = tmp_path / "background_reindex.log"
+    log_path.write_bytes(b"hello")
+    with (
+        patch.object(Path, "is_file", return_value=True),
+        patch.object(Path, "stat", side_effect=OSError("boom")),
+    ):
+        _trim_background_reindex_log(log_path)
+
+
+def test_spawn_index_subprocess_trims_oversized_log(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+    log_path = index_dir / "background_reindex.log"
+    monkeypatch.setattr(
+        "codesteer_atlas.server.BACKGROUND_REINDEX_LOG_MAX_BYTES", 32
+    )
+    log_path.write_bytes(b"OLD_PREFIX\n" + b"Z" * 40)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value.pid = 9
+        result = _spawn_index_subprocess(workspace, paths=None, full=False)
+
+    assert result["status"] == "started"
+    content = log_path.read_text(encoding="utf-8")
+    assert "OLD_PREFIX" not in content
+    assert "Reindex iniciado" in content
+    assert re.search(r"\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", content)
+
+
+def test_spawn_index_subprocess_skipped_does_not_trim(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+    log_path = index_dir / "background_reindex.log"
+    monkeypatch.setattr(
+        "codesteer_atlas.server.BACKGROUND_REINDEX_LOG_MAX_BYTES", 16
+    )
+    original = b"KEEP_THIS_OVERSIZED_PREFIX\n" + b"W" * 50
+    log_path.write_bytes(original)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=True),
+        patch("codesteer_atlas.server.subprocess.Popen") as mock_popen,
+    ):
+        result = _spawn_index_subprocess(workspace, paths=None, full=False)
+
+    assert result["status"] == "skipped"
+    mock_popen.assert_not_called()
+    assert log_path.read_bytes() == original
 
 
 def test_spawn_index_subprocess_popen_raises_returns_error(tmp_path):

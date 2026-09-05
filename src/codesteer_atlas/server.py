@@ -41,6 +41,7 @@ from mcp.shared.session import RequestResponder  # noqa: E402
 
 from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
 from codesteer_atlas.config import (  # noqa: E402
+    BACKGROUND_REINDEX_LOG_MAX_BYTES,
     BACKGROUND_REINDEX_MIN_INTERVAL_S,
     DEFAULT_INDEX_DIR,
     GRAPH_FILENAME,
@@ -1259,6 +1260,30 @@ def get_status_resource() -> str:
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
+def _trim_background_reindex_log(log_path: Path) -> None:
+    """Recorta o tail de `background_reindex.log` se passar do teto.
+
+    O corte é em bytes; o prefixo até o primeiro ``\\n`` do tail é
+    descartado para não deixar um codepoint UTF-8 partido no início.
+    ``OSError`` é engolido — o spawn não depende do recorte.
+    """
+    try:
+        if not log_path.is_file():
+            return
+        size = log_path.stat().st_size
+        if size <= BACKGROUND_REINDEX_LOG_MAX_BYTES:
+            return
+        with open(log_path, "rb") as handle:
+            handle.seek(-BACKGROUND_REINDEX_LOG_MAX_BYTES, os.SEEK_END)
+            data = handle.read()
+        newline = data.find(b"\n")
+        if newline != -1:
+            data = data[newline + 1 :]
+        log_path.write_bytes(data)
+    except OSError:
+        return
+
+
 def _spawn_index_subprocess(
     workspace_path: Path, paths: Optional[list[str]], full: bool
 ) -> dict:
@@ -1282,6 +1307,8 @@ def _spawn_index_subprocess(
             "reason": "reindex_in_progress",
             "log_path": str(log_path),
         }
+
+    _trim_background_reindex_log(log_path)
 
     cmd = [
         sys.executable,

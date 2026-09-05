@@ -143,6 +143,7 @@ GRAPH_NOISE_HUB_LABELS = frozenset(
     }
 )
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
+BACKGROUND_REINDEX_LOG_MAX_BYTES = 256 * 1024
 
 # Briefing pré-computado do projeto (atlas_brief). Todos os limites abaixo existem para
 # garantir custo de token com teto fixo, independente do tamanho do repositório:

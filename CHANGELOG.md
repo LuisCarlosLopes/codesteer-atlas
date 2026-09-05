@@ -7,7 +7,11 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-_Nada ainda._
+### Fixed
+
+- `background_reindex.log` passa a ter teto de 256 KiB: o spawn recorta o
+  final do arquivo antes de appendar o run novo, para o log de reindex em
+  background não crescer sem limite.
 
 ## [3.0.0] - 2026-09-05
 
