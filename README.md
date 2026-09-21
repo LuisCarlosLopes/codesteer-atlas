@@ -227,40 +227,33 @@ Conteúdo incompleto ou obsoleto e relações não verificadas impedem classific
 a tarefa como completa. Use `ATLAS_RELEVANCE=0` para medir apenas a
 compactação local; o benchmark respeita a configuração do avaliador.
 
+#### Resultado observado com expansão progressiva
 
-Exemplo opt-in (sem chave no arquivo versionado):
+Em duas execuções da mesma tarefa no Cursor, o agente passou a abrir dois símbolos e depois mais um,
+em vez de cinco de uma vez:
 
-```json
-"env": {
-  "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
-  "ATLAS_RELEVANCE": "1",
-  "ATLAS_SEMANTIC_API_URL": "https://openrouter.ai/api/v1/chat/completions",
-  "ATLAS_SEMANTIC_API_KEY": "sk-or-v1-..."
-}
-```
+| Métrica | Execução anterior | Expansão progressiva |
+| --- | ---: | ---: |
+| Tokens entregues por todas as ferramentas Atlas | 8.433 | 5.712 |
+| Buscas | 5 | 2 |
+| Símbolos expandidos | 5 em uma chamada | 2 + 1 em duas chamadas |
+| Tokens das expansões | 4.681 | 4.304 |
+| Chamadas remotas Jev | 8 | 3 |
+| Mediana do tempo das buscas | 2,15 s | 1,04 s |
+| Timeouts Jev | 1 | 0 |
 
-Exemplo de evento (JSONL, um por linha, sanitizado — nunca contém query, paths retornados,
-código-fonte ou texto de exceção):
+A redução observada foi **32,3% dos tokens entregues**, principalmente por menos
+operações; as expansões isoladamente reduziram **8,1%**. Os contadores usam o
+tokenizador do Atlas e medem respostas das ferramentas, não o consumo total ou
+o faturamento do agente. Não é uma comparação controlada nem uma economia
+garantida: consultas, candidatos e operações podem variar entre execuções.
 
-```json
-{"schema_version":"1.0","event_id":"…","timestamp":"2026-09-05T12:00:00.000Z","tool":"atlas_search","outcome":"success","scope":"tool_json_text","duration_ms":8.42,"response_chars":14,"response_bytes":14,"response_tokens":5,"estimated_tokens":null,"count_method":"tokenizer","tokenizer_sha256":"9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c","tokenizer_status":"ok","tokenizer_source":"bundled","tokenizer_name":"HuggingFaceTB/SmolLM2-135M","tokenizer_revision":"93efa2f097d58c2a74874c7e644dbc9b0cee75a2","truncated":false,"warnings":[]}
-```
-
-Com o tokenizer embarcado ou custom disponível, `response_tokens` é um inteiro, `estimated_tokens` fica
-`null`, `count_method` vira `"tokenizer"` e `tokenizer_status` vira `"ok"`. Em erro da tool
-(ex.: `top_k` inválido), `outcome` vira `"error"`, as medidas de resposta ficam `null` e
-`error_class` traz só o **nome da classe** da exceção (nunca a mensagem, que poderia
-carregar dado sensível).
-
-`duration_ms` cobre do início da tool até a serialização/medição finais — **não** inclui a
-escrita do evento em disco nem o transporte MCP, e é uma métrica **separada** de
-`query_time_ms` (que continua medindo só a recuperação, sem mudança de semântica).
-
-Avaliação de qualidade pós-orçamento: `uv run python scripts/eval_search.py --delivery`
-mede MRR/recall da resposta **realmente entregue** (metadados e conteúdo) sobre os mesmos
-candidatos do ranking, sem alterar a medição de ranking histórica. `--benchmark` roda o
-custo de overhead (observabilidade desligada / embarcado / estimativa degradada / custom) sobre payloads
-sintéticos fixos, sem precisar de índice.
+A execução  custou **US$ 0,000553644** em Jev, com todos os custos
+conhecidos e três símbolos entregues completos, sem truncamento ou referências
+obsoletas. A anterior teve uma tentativa com custo desconhecido, portanto não
+permite calcular a redução percentual do custo total. Nenhuma busca registrou
+`unique_exact_symbol`: este teste não valida a dispensa por símbolo exato nem
+atribui a ela a economia. Os logs também não comprovam a qualidade da resposta final.
 
 ## Começar (3 passos)
 
@@ -411,43 +404,63 @@ Copie o bloco abaixo para as instruções do seu projeto:
 
 | Cliente / IDE | Arquivo |
 |---|---|
-| Cursor, Copilot (VS Code), genérico | [`AGENTS.md`](AGENTS.md) |
-| Claude Code | [`CLAUDE.md`](CLAUDE.md) |
+| Cursor, Copilot (VS Code), Codex, genérico | [`AGENTS.md`](AGENTS.md) |
+| Claude Code | [`CLAUDE.md`](CLAUDE.md) importa [`AGENTS.md`](AGENTS.md) |
 | Kiro | regras do Power / instruções do agente |
 | GitHub Copilot CLI | instruções do plugin ou regras do projeto |
 
 ```markdown
 # Busca de código com `codesteer-atlas`
 
-Este repositório é indexado pelo MCP `codesteer-atlas`. Para entender, planejar, pesquisar ou explorar código, use Atlas antes de `grep`, `rg`, `find`, glob ou leitura em massa.
+Use Atlas antes de `grep`, `rg`, `find`, glob ou leitura em massa para
+entender, planejar ou investigar código e documentos deste projeto.
 
-## Use assim
+## Escolha a ferramenta pela tarefa
 
-- `atlas_brief`: orientar-se num projeto desconhecido — chame primeiro, uma vez
-- `atlas_context`: quando o símbolo/arquivo da tarefa já é conhecido (`intent` = edit/debug/review/understand)
-- `atlas_search`: localizar função, classe, método, símbolo ou conceito
-- `atlas_graph`: hubs, paths, conexões e `mode="affected"` (raio de impacto)
-- `atlas_status`: só se houver suspeita de índice ausente ou desatualizado
-- `atlas_index`: reindexar após mudanças grandes ou índice stale
+- Símbolo ou arquivo já conhecido: comece com `atlas_context(target, intent)`
+  (`edit`, `debug`, `review` ou `understand`).
+- Projeto desconhecido, sem alvo definido: comece com `atlas_brief` uma vez.
+- Localizar implementação ou conceito: `atlas_search` com metadados,
+  `top_k` baixo e filtros `path_prefix`/`language` quando úteis.
+- Ler conteúdo de um resultado compacto: `atlas_expand(refs)`.
+- Relações, caminhos e impacto: `atlas_graph`; use `mode="affected"` para impacto.
+- Diagnosticar frescor e cobertura: `atlas_status`, somente quando necessário.
+- Criar ou atualizar o índice: `atlas_index`, quando o diagnóstico indicar.
 
-## Fluxo padrão
+## Contexto mínimo suficiente
 
-1. `atlas_search` para descoberta (metadados).
-2. Restrinja com `path_prefix` e `language` quando fizer sentido.
-3. Leia os hits com `Read`, ou repita com `include_content=true`.
+1. Em `atlas_search` e `atlas_context`, omita `response_profile` ou use `default`
+   para respeitar a configuração do operador. Não envie `full` por rotina:
+   ele sobrescreve a compactação mesmo quando ela está habilitada.
+2. Comece a busca com metadados. No perfil compacto, expanda apenas uma ou duas
+   refs diretamente ligadas à pergunta e leia a resposta antes de pedir mais.
+3. Cada expansão adicional deve preencher uma lacuna concreta de evidência.
+   Não abra todos os hits, auxiliares ou tipos automaticamente. Lotes de três
+   a cinco refs só quando a tarefa já exigir comparar esses símbolos.
+4. Pare quando houver evidência suficiente. Se `atlas_context` já respondeu à
+   necessidade, não repita o conteúdo. Sem refs, leia somente as linhas úteis
+   com `Read` ou use `include_content=true` numa busca restrita.
+5. Siga `next_ref` apenas quando precisar do restante. Conteúdo paginado só
+   representa o símbolo completo após reunir todas as partes desde o offset zero.
+   Referência obsoleta exige localizar novamente o símbolo e verificar o índice.
+6. Use `full` somente se solicitado ou se precisar de campos ausentes no compacto.
 
-## Quando pode pular o Atlas
+## Evidência e limites
 
-- o usuário já informou o caminho exato
-- confirmação de string literal exata
-- edição, diff, commit, git, CI, testes ou instalação de deps
-- MCP indisponível ou índice vazio/desatualizado
+- Respeite os avisos de truncamento, baixa confiança e cobertura incompleta.
+  `calls_unavailable` ou ausência de resolução não significam ausência de dependências.
+- Relevância Jev e dispensa por símbolo exato são decisões do servidor conforme
+  as flags do operador; não altere configurações para forçar uma busca.
+- `status=success` e mudança de ranking não comprovam qualidade da evidência.
+- Não chame `atlas_status` antes de toda busca. Se houver erro de índice ou
+  evidência de desatualização, diagnostique e reindexe quando necessário.
 
-## Índice desatualizado
+## Fallback local
 
-1. `atlas_status`
-2. Se necessário, `atlas_index`
-3. Fallback local só se o problema persistir
+Use ferramentas locais se o MCP estiver indisponível ou a cobertura for
+insuficiente, explicando a limitação. Atlas não substitui edição, diff, Git,
+CI, testes ou instalação de dependências. Um caminho já conhecido permite
+leitura pontual; para entender seu contexto e relações, prefira `atlas_context`.
 ```
 
 ## Como funciona
@@ -565,7 +578,7 @@ No `mcp.json` do projeto:
 
 ## Contribuindo
 
-Clonar o repo, testes, lint e configuração avançada: [CONTRIBUTING.md](CONTRIBUTING.md) e [CLAUDE.md](CLAUDE.md).
+Clonar o repo, testes, lint e configuração avançada: [CONTRIBUTING.md](CONTRIBUTING.md) e [AGENTS.md](AGENTS.md).
 
 ## Licença
 

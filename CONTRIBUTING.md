@@ -55,7 +55,7 @@ Qualquer mudança de lógica no indexador ou no servidor MCP deve vir acompanhad
 
 ## Arquitetura
 
-Veja [CLAUDE.md](CLAUDE.md) para detalhes de arquitetura, módulos internos (`chunker.py`, `embeddings.py`, `storage.py`, `indexer.py`, `server.py`, `models.py`) e convenções de código, e [.memory-bank/constitution.md](.memory-bank/constitution.md) para os princípios que regem o projeto.
+Veja [AGENTS.md](AGENTS.md) para detalhes de arquitetura, módulos internos (`chunker.py`, `embeddings.py`, `storage.py`, `indexer.py`, `server.py`, `models.py`) e convenções de código, e [.memory-bank/constitution.md](.memory-bank/constitution.md) para os princípios que regem o projeto.
 
 ## Pipeline de indexação (detalhado)
 

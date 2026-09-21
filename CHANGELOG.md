@@ -7,7 +7,15 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Changed
+
+- `AGENTS.md` é a única fonte das instruções de agente e da arquitetura;
+  `CLAUDE.md` apenas importa esse arquivo.
+
 ### Fixed
+
+- Orientação de expansão começa com uma ou duas refs e exige lacuna de evidência
+  para abrir mais; continuações deixam de recomendar leitura integral automática.
 
 - `atlas_expand` recupera o intervalo original do símbolo, inclusive conteúdo
   truncado no índice, validando hash e caminho. Respostas grandes oferecem

@@ -670,7 +670,7 @@ grep para confirmar literais.
 
 - [README](../README.md) — instalação e início rápido
 - [Documentação visual](index.html) — conceitos MCP e busca híbrida
-- [CLAUDE.md](../CLAUDE.md) — arquitetura técnica para agentes
+- [AGENTS.md](../AGENTS.md) — arquitetura técnica para agentes
 - Código-fonte: `src/codesteer_atlas/indexer.py`, `graph.py`, `server.py`
 
 ---

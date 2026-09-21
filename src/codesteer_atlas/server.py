@@ -681,7 +681,7 @@ def atlas_search(
     Omit response_profile to respect the operator configuration. Do not select
     "full" routinely: it overrides ATLAS_CONTEXT_OPTIMIZATION even when enabled.
     Start with metadata and expand only symbols needed to close an evidence gap.
-    Prefer one or two directly relevant symbols first; inspect their contents
+    Start with only one or two directly relevant symbols; inspect their contents
     before expanding helpers, types or additional results. Do not expand every
     search hit automatically. Stop when the task has sufficient evidence.
     Use atlas_expand(refs) for omitted content; use "full" only when explicitly
@@ -1361,9 +1361,10 @@ def atlas_expand(
     """
     Expand compact search references by chunk id — no embedding and no Jev.
 
-    Expand only symbols needed for the current question, usually one or two at
-    first. Five is a request limit, not a recommended batch size. Add helpers or
-    continuations only if the evidence already received is insufficient.
+    Start with only one or two refs, then inspect the response before expanding
+    more. Each additional ref must fill a specific evidence gap. Use three to five
+    only when the task already requires comparing those symbols; never open all
+    hits automatically. Stop when there is enough evidence to answer.
 
     Pass up to five `ref` values from a compact `atlas_search` response. Each ref
     identifies a chunk in the current index (not a historical snapshot).
@@ -1372,11 +1373,12 @@ def atlas_expand(
     Content comes from the original symbol's indexed line range, including text
     truncated during indexing. If content_complete is false, pass next_ref to
     atlas_expand again and concatenate content in content_range order (character
-    offsets, exclusive end). Continue until content_complete is true. Continuations
-    are tied to the file hash and need no session cache.
+    offsets, exclusive end). Follow next_ref only if the remaining content is
+    needed; a complete symbol requires all its pages. Continuations are tied to
+    the file hash and need no session cache.
 
     Args:
-        refs: Search refs or next_ref continuations from expansion (max 5).
+        refs: Start with 1–2 search refs; add only needed evidence (hard limit 5).
         include_content: When true (default), include symbol content when it fits
             the search response budget.
 

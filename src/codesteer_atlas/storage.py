@@ -524,7 +524,7 @@ class StorageBackend:
         quando existem matches suficientes (DECISAO-003).
 
         A reordenação pós-RRF roda sobre um pool maior que `top_k`, e a regra veio de
-        medição no golden set, não de intuição. Veja CLAUDE.md (DECISAO-007).
+        medição no golden set, não de intuição. Veja AGENTS.md (DECISAO-007).
 
         `structural=True` acrescenta o braço de grafo à fusão (opt-in por chamada).
         Sem `ATLAS_RERANK_MODEL`, a reordenação permanece a lexical de `ranking.rerank`.
