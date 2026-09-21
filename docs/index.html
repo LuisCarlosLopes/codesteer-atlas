@@ -53,9 +53,10 @@
           <li><a href="#texto-docs"><span class="nav-num">05</span> Texto &amp; Docs</a></li>
           <li><a href="#grafo"><span class="nav-num">06</span> Grafo</a></li>
           <li><a href="#busca-hibrida"><span class="nav-num">07</span> Busca híbrida</a></li>
-          <li><a href="#tools"><span class="nav-num">08</span> Tools</a></li>
-          <li><a href="#config"><span class="nav-num">09</span> Config</a></li>
-          <li><a href="#instalacao"><span class="nav-num">10</span> Instalar</a></li>
+          <li><a href="#jev"><span class="nav-num">08</span> Jev</a></li>
+          <li><a href="#tools"><span class="nav-num">09</span> Tools</a></li>
+          <li><a href="#config"><span class="nav-num">10</span> Config</a></li>
+          <li><a href="#instalacao"><span class="nav-num">11</span> Instalar</a></li>
         </ul>
       </div>
     </div>
@@ -165,7 +166,7 @@
           <div class="flow-step">
             <div class="step-badge">2</div>
             <h4>Descoberta (Listing)</h4>
-            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 6 ferramentas (ex: <code>atlas_search</code>, <code>atlas_context</code>, <code>atlas_graph</code>).</p>
+            <p>O cliente pergunta ao servidor: <em>"Quais ferramentas você expõe?"</em>. O Atlas responde com a assinatura e descrição de suas 7 ferramentas (ex: <code>atlas_search</code>, <code>atlas_context</code>, <code>atlas_expand</code>, <code>atlas_graph</code>).</p>
           </div>
           <div class="flow-step">
             <div class="step-badge">3</div>
@@ -870,7 +871,8 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           Dessa forma, arquivos que aparecem bem posicionados em ambos os motores ganham prioridade absoluta, garantindo um resultado final superior a qualquer um dos métodos isolados.
         </p>
         <p>
-          Depois do RRF, um rerank lexical reordena o pool (desliga com <code>ATLAS_RERANK=0</code>).
+          Depois do RRF, um rerank lexical reordena o pool por padrão (<code>ATLAS_RERANK=0</code> desliga
+          toda reordenação, inclusive o Jev opt-in descrito na seção <a href="#jev">Jev</a>).
           <code>ATLAS_RERANK_MODEL</code> troca essa etapa por um cross-encoder ONNX.
           <code>atlas_search(..., structural=true)</code> adiciona um terceiro braço RRF sobre
           <code>graph.json</code>. Cada hit traz <code>match_arms</code> (<code>vector</code>, <code>fts</code>, <code>graph</code>).
@@ -879,17 +881,113 @@ def encode(self, texts: list[str]) -> list[list[float]]:
       </div>
     </section>
 
-    <!-- 8. TOOLS MCP DO ATLAS -->
-    <section id="tools" class="card-section">
+    <!-- 8. JEV E ENTREGA COMPACTA -->
+    <section id="jev" class="card-section">
       <div class="section-header">
         <span class="section-num">08</span>
-        <h2>As 6 Ferramentas (Tools) do Atlas</h2>
+        <h2>Jev e entrega compacta (opt-in)</h2>
       </div>
       <div class="section-body">
         <p>
-          O servidor MCP expõe seis ações. Use <code>atlas_brief</code> para se orientar,
+          O <a href="https://typesafe.ai/blog/introducing-system-one-models-and-jev">Jev</a> é o modelo System One da TypeSafe: recebe a pergunta e os candidatos e devolve, para cada um, uma decisão tipada com score e confiança. No Atlas ele vem desligado. A chamada, quando ligada, passa pela API System One do OpenRouter.
+        </p>
+        <p>
+          O default de v3.0 permanece: busca híbrida local, rerank lexical e resposta completa.
+          Três flags nascem <strong>desligadas</strong> e são independentes entre si.
+          Quem encontra os candidatos continua sendo a busca local — o Jev só reordena o pool
+          já recuperado.
+        </p>
+
+        <div class="flow-steps">
+          <div class="flow-step">
+            <div class="step-badge">1</div>
+            <h4>Pool pós-RRF</h4>
+            <p>Os candidatos vêm da fusão vetorial + BM25 (e, opcionalmente, do braço estrutural).</p>
+          </div>
+          <div class="flow-step">
+            <div class="step-badge">2</div>
+            <h4>Reordenação</h4>
+            <p>Default: rerank lexical local. Com <code>ATLAS_RELEVANCE=1</code>, o Jev substitui essa etapa.</p>
+          </div>
+          <div class="flow-step">
+            <div class="step-badge">3</div>
+            <h4>Corte e entrega</h4>
+            <p>Após o <code>top_k</code>, a resposta pode ser <code>full</code> ou <code>compact</code> (flag de contexto).</p>
+          </div>
+          <div class="flow-step">
+            <div class="step-badge">4</div>
+            <h4>Expansão seletiva</h4>
+            <p>No perfil compacto, abra o código com <code>atlas_expand</code> — uma ou duas refs por vez.</p>
+          </div>
+        </div>
+
+        <div class="search-arms">
+          <div class="arm-card remote">
+            <h4>Reordena por relevância</h4>
+            <p><strong>Flag:</strong> <code>ATLAS_RELEVANCE=1</code></p>
+            <p>O modelo Jev avalia consulta × candidato no pool pós-RRF, antes do corte <code>top_k</code>, pela API System One do OpenRouter. O <code>score</code> devolvido continua sendo o RRF.</p>
+            <p>Lotes de até 24 KB, no máximo duas chamadas, timeout compartilhado de 3 s. Modelo default <code>~typesafe/jev-latest</code>.</p>
+          </div>
+          <div class="arm-card remote">
+            <h4>Descarta só o irrelevante inequívoco</h4>
+            <p><strong>Perfil:</strong> compacto + Jev ligado</p>
+            <p>Remove candidato com score ≤ 0,25 e confiança ≥ 0,90. Se a seleção esvaziar o pool, devolve o primeiro do ranking local com aviso <code>relevance_unconfirmed_fallback</code>.</p>
+          </div>
+          <div class="arm-card remote">
+            <h4>Falha devolve o ranking local</h4>
+            <p><strong>Degradação:</strong> timeout, HTTP ou schema inválido</p>
+            <p>O lote afetado volta ao reranker lexical. <code>ATLAS_RERANK=0</code> impede a chamada remota e desliga também o rerank local.</p>
+          </div>
+        </div>
+
+        <h3>Entrega compacta (independente do Jev)</h3>
+        <p>
+          <code>ATLAS_CONTEXT_OPTIMIZATION=1</code> faz <code>response_profile=default</code> resolver para
+          <code>compact</code> em <code>atlas_search</code> e <code>atlas_context</code>: projeção enxuta,
+          deduplicação conservadora, orçamento a 70% do teto e campo <code>ref</code> para expansão.
+          <code>response_profile=full</code> mantém o formato anterior. Medição com Jev desligado:
+          metadados 32.336 → 21.977 tokens (−32%) nas 28 consultas do golden set, com MRR e recall@5 iguais.
+          Detalhes em <a href="referencia.md#otimização-de-contexto">referência do operador</a>.
+        </p>
+
+        <p>
+          <code>ATLAS_RELEVANCE_GATE=1</code> dispensa a chamada remota quando a consulta é o nome exato
+          de uma única função, método ou classe <em>no pool recuperado</em> (unicidade no pool, não no repositório).
+        </p>
+
+        <div class="note-box warning">
+          <strong>Egresso explícito:</strong> com <code>ATLAS_RELEVANCE=1</code>, a consulta e os trechos
+          candidatos saem do host para o OpenRouter. URL e chave são obrigatórias
+          (<code>ATLAS_RELEVANCE_API_URL</code>, <code>ATLAS_RELEVANCE_API_KEY</code>), salvo reuso quando
+          <code>ATLAS_SEMANTIC_API_URL</code> já é o chat HTTPS do OpenRouter. Cada busca emite uma linha JSON
+          de custo em stderr (sem query, código ou chave). Reinicie o MCP após mudar o <code>env</code>.
+          Inspecione <code>atlas_status.relevance</code> para auditoria.
+        </div>
+
+        <div class="code-example">
+          <div class="code-title">Exemplo — ligar o Jev no mcp.json do projeto</div>
+          <pre><code>"env": {
+  "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
+  "ATLAS_RELEVANCE": "1",
+  "ATLAS_RELEVANCE_API_URL": "https://openrouter.ai/api/v1/systemone",
+  "ATLAS_RELEVANCE_API_KEY": "sua-chave-openrouter"
+}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9. TOOLS MCP DO ATLAS -->
+    <section id="tools" class="card-section">
+      <div class="section-header">
+        <span class="section-num">09</span>
+        <h2>As 7 Ferramentas (Tools) do Atlas</h2>
+      </div>
+      <div class="section-body">
+        <p>
+          O servidor MCP expõe sete ações. Use <code>atlas_brief</code> para se orientar,
           <code>atlas_context</code> quando o símbolo já é conhecido,
           <code>atlas_search</code> para localizar código,
+          <code>atlas_expand</code> para abrir trechos de um resultado compacto,
           <code>atlas_graph</code> para conectividade, e <code>atlas_status</code> apenas para diagnóstico explícito.
         </p>
 
@@ -902,12 +1000,14 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             <p class="tool-desc">
               Busca semântica híbrida (vetorial + BM25) no índice local. Retorna metadados por padrão;
               use <code>include_content=true</code> ou <code>Read</code> nas linhas indicadas.
-              <code>structural=true</code> adiciona o braço do grafo. Hits de Git vêm como
+              <code>structural=true</code> adiciona o braço do grafo. Com
+              <code>ATLAS_CONTEXT_OPTIMIZATION=1</code>, <code>response_profile=default</code> resolve para
+              compacto; force <code>full</code> por chamada se precisar do formato anterior. Hits de Git vêm como
               <code>type="commit"</code>. Código pode incluir <code>rationale_refs</code>; Markdown inclui
               <code>markdown_references</code>.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>path_prefix</code>, <code>language</code>, <code>include_content</code>, <code>structural</code>
+              <strong>Argumentos:</strong> <code>query</code>, <code>top_k</code>, <code>path_prefix</code>, <code>language</code>, <code>include_content</code>, <code>structural</code>, <code>response_profile</code>
             </div>
           </div>
 
@@ -933,9 +1033,26 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             <p class="tool-desc">
               Pacote da tarefa em uma chamada: vizinhança, impacto, testes inferidos e camada do brief,
               sob teto de tokens. Só <code>intent="debug"</code> inclui <code>recent_history</code>.
+              Aceita <code>response_profile</code> (<code>default</code>/<code>compact</code>/<code>full</code>);
+              não invoca o Jev.
             </p>
             <div class="tool-args">
-              <strong>Argumentos:</strong> <code>target</code>, <code>intent</code> (<code>edit</code>/<code>debug</code>/<code>review</code>/<code>understand</code>)
+              <strong>Argumentos:</strong> <code>target</code>, <code>intent</code> (<code>edit</code>/<code>debug</code>/<code>review</code>/<code>understand</code>), <code>response_profile</code>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-name">atlas_expand</span>
+              <span class="tool-type">Expansão</span>
+            </div>
+            <p class="tool-desc">
+              Abre o código de um resultado compacto por <code>ref</code> — sem embedding e sem Jev.
+              Comece com uma ou duas refs diretamente ligadas à pergunta; leia a resposta antes de expandir mais.
+              Até 5 refs por chamada. Pagina símbolos longos com <code>next_ref</code>.
+            </p>
+            <div class="tool-args">
+              <strong>Argumentos:</strong> <code>refs</code>, <code>include_content</code>
             </div>
           </div>
 
@@ -961,7 +1078,8 @@ def encode(self, texts: list[str]) -> list[list[float]]:
             </div>
             <p class="tool-desc">
               Metadados do índice: <code>is_stale</code>, <code>reindexing</code>, <code>index_resolution</code>,
-              <code>graph_available</code>, <code>watch</code>, <code>semantic</code>, <code>resolution_coverage</code>.
+              <code>graph_available</code>, <code>watch</code>, <code>semantic</code>, <code>relevance</code>,
+              <code>resolution_coverage</code>. O bloco <code>relevance</code> declara egresso do Jev.
               Não é pré-requisito para busca.
             </p>
             <div class="tool-args">
@@ -994,10 +1112,10 @@ def encode(self, texts: list[str]) -> list[list[float]]:
       </div>
     </section>
 
-    <!-- 9. CONFIGURAÇÃO -->
+    <!-- 10. CONFIGURAÇÃO -->
     <section id="config" class="card-section card-section--flat">
       <div class="section-header">
-        <span class="section-num">09</span>
+        <span class="section-num">10</span>
         <h2>Configuração e variáveis de ambiente</h2>
       </div>
       <div class="section-body">
@@ -1023,7 +1141,37 @@ def encode(self, texts: list[str]) -> list[list[float]]:
               <tr>
                 <td><code>ATLAS_RERANK</code></td>
                 <td>ligado</td>
-                <td><code>0</code> desliga toda reordenação pós-RRF (lexical e cross-encoder).</td>
+                <td><code>0</code> desliga toda reordenação pós-RRF (lexical, cross-encoder e Jev).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE</code></td>
+                <td>desligado</td>
+                <td><code>1</code> julga relevância com o modelo Jev (TypeSafe) antes do <code>top_k</code>, pela API System One do OpenRouter. Requer URL e chave. Ver seção <a href="#jev">Jev</a>.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_API_URL</code></td>
+                <td>derivado / ausente</td>
+                <td>Endpoint HTTPS System One (<code>https://openrouter.ai/api/v1/systemone</code>).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_API_KEY</code></td>
+                <td>ausente</td>
+                <td>Chave OpenRouter. Reutiliza <code>ATLAS_SEMANTIC_API_KEY</code> só quando a URL semântica é chat HTTPS do OpenRouter.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_MODEL</code></td>
+                <td><code>~typesafe/jev-latest</code></td>
+                <td>Modelo Jev. Não herda <code>ATLAS_SEMANTIC_MODEL</code>.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_GATE</code></td>
+                <td>desligado</td>
+                <td><code>1</code> dispensa Jev quando a consulta é símbolo exato único no pool recuperado.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_CONTEXT_OPTIMIZATION</code></td>
+                <td>desligado</td>
+                <td><code>1</code> faz <code>response_profile=default</code> resolver para compacto em search/context. Independente do Jev.</td>
               </tr>
               <tr>
                 <td><code>ATLAS_RERANK_MODEL</code></td>
@@ -1069,15 +1217,15 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           </table>
         </div>
         <p>
-          Extra opcional: <code>codesteer-atlas[watch]</code>. Auditoria: <code>atlas_status</code> → <code>watch</code>, <code>semantic</code>, <code>resolution_coverage</code>.
+          Extra opcional: <code>codesteer-atlas[watch]</code>. Auditoria: <code>atlas_status</code> → <code>watch</code>, <code>semantic</code>, <code>relevance</code>, <code>resolution_coverage</code>.
         </p>
       </div>
     </section>
 
-    <!-- 9. PRINCÍPIO LOCAL-FIRST -->
+    <!-- 11. PRINCÍPIO LOCAL-FIRST -->
     <section id="local-first" class="card-section">
       <div class="section-header">
-        <span class="section-num">10</span>
+        <span class="section-num">11</span>
         <h2>Princípio Constitucional: Local-First por padrão</h2>
       </div>
       <div class="section-body">
@@ -1089,7 +1237,12 @@ def encode(self, texts: list[str]) -> list[list[float]]:
               Em conformidade com o artigo I da constituição do CodeSteer Atlas (<code>.memory-bank/constitution.md</code>), <strong>no default todo o processamento de código-fonte e documentação é local e offline</strong>. Embeddings (<code>all-MiniLM-L6-v2</code> via ONNX) e LanceDB não saem da máquina.
             </p>
             <p>
-              A camada semântica (<code>ATLAS_SEMANTIC=1</code>) é o único opt-in que pode enviar texto a um modelo: sampling do cliente MCP, depois endpoint local, por último API com URL explícita. Sem origem, o índice estrutural permanece completo. A fronteira é inspecionável em <code>atlas_status.semantic</code> (<code>origin</code>, <code>egress</code>).
+              Dois opt-ins podem enviar texto para fora do host: a camada semântica
+              (<code>ATLAS_SEMANTIC=1</code>) — sampling do cliente MCP, depois endpoint local,
+              por último API com URL explícita — e o Jev
+              (<code>ATLAS_RELEVANCE=1</code>), modelo System One da TypeSafe, que recebe consulta e candidatos pela API System One do OpenRouter.
+              Sem essas flags, busca e índice permanecem na máquina. A fronteira é inspecionável em
+              <code>atlas_status.semantic</code> e <code>atlas_status.relevance</code> (<code>origin</code>, <code>egress</code>).
             </p>
           </div>
         </div>

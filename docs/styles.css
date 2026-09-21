@@ -825,6 +825,11 @@ code {
   border-left: 4px solid var(--color-emerald);
 }
 
+.arm-card.remote {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(8, 13, 26, 0) 100%);
+  border-left: 4px solid var(--color-amber, #f59e0b);
+}
+
 .arm-card h4 {
   color: #fff;
   font-size: 15px;

@@ -239,7 +239,7 @@ O Jev fica de fora: ele reordena e pode retirar um irrelevante, e também envia 
 
 ## Jev: o trecho mais útil na frente
 
-O Jev é o avaliador de relevância da OpenRouter (System One). Ele vem **desligado**. Com ele desligado, busca e índice continuam na sua máquina.
+O [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) é o modelo System One da TypeSafe: recebe a pergunta e os candidatos e devolve, para cada um, uma decisão tipada com score e confiança. No Atlas ele vem **desligado**. A chamada, quando ligada, passa pela API System One do OpenRouter. Com ele desligado, busca e índice continuam na sua máquina.
 
 Ligado, o Jev lê a pergunta e os candidatos que o Atlas já recuperou. Coloca na frente o trecho que julgou mais útil para aquela pergunta. No perfil compacto, pode retirar um candidato claramente irrelevante. Quem encontra os candidatos continua sendo a busca local.
 
@@ -247,7 +247,7 @@ A entrega compacta, com o Jev desligado, reduziu cerca de **32%** dos tokens de 
 
 ### O que precisa estar no `env`
 
-Três variáveis ligam o Jev. Com a flag sozinha, sem URL e sem chave, o avaliador permanece desconfigurado.
+Três variáveis ligam a chamada ao Jev. Com a flag sozinha, sem URL e sem chave, ela permanece desconfigurada.
 
 | Variável | Valor |
 | --- | --- |

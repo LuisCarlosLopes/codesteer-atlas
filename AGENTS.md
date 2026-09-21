@@ -220,11 +220,13 @@ CLI e watcher não atravessam `ctx` nem usam sampling. Sumários entram apenas e
 `understand`, cedendo primeiro ao teto de resposta. `graph.json`/`graph.html` não recebem
 overlay semântico.
 
-### Avaliador de relevância Jev (opt-in)
+### Relevância com o modelo Jev (opt-in)
 
-`ATLAS_RELEVANCE=1` (ou `true`) substitui a reordenação lexical/cross-encoder pelo
-Jev no OpenRouter System One, no pool pós-RRF **antes** de `_merge_typed` e do
-corte `top_k`. Default False. `ATLAS_RERANK=0` desliga Jev e o rerank local.
+O Jev é o modelo System One da TypeSafe: devolve, por candidato, uma decisão
+tipada com score e confiança. `ATLAS_RELEVANCE=1` (ou `true`) usa essa decisão
+no lugar da reordenação lexical/cross-encoder, no pool pós-RRF **antes** de
+`_merge_typed` e do corte `top_k`. A chamada passa pela API System One do
+OpenRouter. Default False. `ATLAS_RERANK=0` desliga Jev e o rerank local.
 Lotes ≤ 24 KB (máx. 2 chamadas, timeout compartilhado 3 s). Baixa confiança
 isola o candidato; falha de contrato invalida só o lote. No perfil compacto,
 seleção semântica remove apenas score ≤ 0,25 com confiança ≥ 0,90. O custo

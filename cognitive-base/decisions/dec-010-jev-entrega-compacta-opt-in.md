@@ -41,7 +41,8 @@ O default de `v3.0` permanece. Três flags nascem desligadas e não se promovem
 nesta entrega:
 
 - **`ATLAS_RELEVANCE=1`** substitui a reordenação lexical ou cross-encoder pelo
-  Jev (OpenRouter System One) no pool pós-[[meta/glossary#rrf|RRF]], antes do
+  modelo Jev (System One da TypeSafe, chamado pela API System One do
+  OpenRouter) no pool pós-[[meta/glossary#rrf|RRF]], antes do
   merge tipado e do corte `top_k`. Lotes de até 24 KB, no máximo duas chamadas,
   timeout compartilhado de 3 s. Confiança abaixo de 0,70 isola o candidato.
   Falha de contrato ou timeout devolve o lote ao reranker local.

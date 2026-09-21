@@ -4,7 +4,9 @@ Contrato das opções, medições e variáveis de ambiente. Para instalar o Atla
 
 Os comandos de avaliação abaixo rodam na raiz deste repositório, com o índice e o workspace congelados.
 
-## Avaliador de relevância Jev
+## Relevância com o modelo Jev
+
+O [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) é o modelo System One da TypeSafe: devolve, por candidato, uma decisão tipada com score e confiança. No Atlas, `ATLAS_RELEVANCE` usa essa decisão para reordenar o pool já recuperado. A chamada vai à API System One do OpenRouter.
 
 `ATLAS_RELEVANCE` é **False** por padrão (`ausente`/`0`/`false`). Não liga por
 presença de chave, modelo ou `ATLAS_SEMANTIC`. Aceite `1`/`true` (sem distinção
@@ -396,7 +398,7 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
 | `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
 | `ATLAS_OBSERVABILITY` | desligado | `1` grava eventos de medição de resposta (chars/bytes/tokens) em memória + `.code-index/observability/events.jsonl` e expõe `atlas_status.observability`. Sem ele, nada é criado. Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta). |
-| `ATLAS_RELEVANCE` | desligado | `1`/`true` avalia relevância com Jev via OpenRouter System One antes do `top_k`. Default False. `ATLAS_RERANK=0` vence. Detalhes: [Avaliador de relevância Jev](#avaliador-de-relevância-jev). |
+| `ATLAS_RELEVANCE` | desligado | `1`/`true` julga relevância com o modelo Jev (TypeSafe) antes do `top_k`, pela API System One do OpenRouter. Default False. `ATLAS_RERANK=0` vence. Detalhes: [Relevância com o modelo Jev](#relevância-com-o-modelo-jev). |
 | `ATLAS_RELEVANCE_API_URL` | derivado só de OpenRouter chat | Endpoint HTTPS System One. Sem host implícito genérico. |
 | `ATLAS_RELEVANCE_API_KEY` | reuso condicional | Se ausente, reutiliza `ATLAS_SEMANTIC_API_KEY` somente quando a URL semântica é OpenRouter HTTPS. |
 | `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Não herda `ATLAS_SEMANTIC_MODEL`. Alias OpenRouter ou pin `typesafe/jev-[0-9]…`. |
