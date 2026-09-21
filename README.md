@@ -4,7 +4,6 @@ O assistente do seu editor encontra o trecho certo do seu projeto, na sua máqui
 
 Na configuração padrão, indexação e busca acontecem no seu computador. O código permanece local. A instalação vem do GitHub pelo [uv](https://github.com/astral-sh/uv); clonar este repositório fica para quem desenvolve o Atlas.
 
-**Primeira vez?** O [guia de primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html) acompanha a preparação, a conexão e a primeira busca, com exemplos para copiar. [Abrir a versão local](docs/primeiros-passos.html).
 
 | Recurso | Para quê |
 | --- | --- |
