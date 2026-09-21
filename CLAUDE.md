@@ -266,3 +266,11 @@ Não envie `full` por rotina: ele sobrescreve a flag mesmo quando está ligada.
 Use `full` apenas se solicitado ou se precisar de campos ausentes no compacto;
 para obter conteúdo de um resultado compacto, prefira `atlas_expand(refs)`.
 <!-- /atlas:response-profile -->
+
+<!-- atlas:selective-expansion -->
+Expanda apenas símbolos necessários para responder à tarefa: comece por um ou
+dois resultados diretamente relevantes e avalie o conteúdo antes de pedir
+auxiliares, tipos ou continuações. Cinco refs é o limite, não o tamanho recomendado
+de lote. Não expanda automaticamente todos os hits; pare quando houver evidência
+suficiente. Se `atlas_context` já atende à pergunta, não repita a leitura completa.
+<!-- /atlas:selective-expansion -->

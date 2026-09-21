@@ -21,6 +21,7 @@ from codesteer_atlas.config import (
     RELEVANCE_API_URL_ENV,
     RELEVANCE_DEFAULT_MODEL,
     RELEVANCE_ENV_FLAG,
+    RELEVANCE_GATE_ENV_FLAG,
     RELEVANCE_MAX_BATCH_CALLS,
     RELEVANCE_MAX_CONTENT_CHARS,
     RELEVANCE_MAX_REQUEST_BYTES,
@@ -206,6 +207,29 @@ def resolve_config(environ: Optional[Mapping[str, str]] = None) -> RelevanceConf
     )
 
 
+def exact_gate_status(environ: Optional[Mapping[str, str]] = None) -> dict:
+    values = environ if environ is not None else os.environ
+    enabled, reason = _truthy_flag(values.get(RELEVANCE_GATE_ENV_FLAG))
+    return {"enabled": enabled, "policy": "unique_exact_symbol_v1", "reason": reason}
+
+
+def exact_gate_reason(
+    pool: Sequence[SearchResult], query: str, *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Dispensa opcional só para nome exato único de função, método ou classe."""
+    if not exact_gate_status(environ)["enabled"]:
+        return None
+    if not all(part.isidentifier() for part in query.strip().split(".")):
+        return None
+    matches = [result for result in pool if is_exact_match(result, query)]
+    if (len(matches) == 1 and matches[0].type == "code"
+            and matches[0].scope_type in {"function", "method", "class"}
+            and matches[0].language not in {"markdown", "text", "json", "yaml", "toml"}):
+        return "unique_exact_symbol"
+    return None
+
+
 def status_block(environ: Optional[Mapping[str, str]] = None) -> dict:
     """Bloco estático de `atlas_status.relevance`: sem rede e sem credencial."""
     cfg = resolve_config(environ)
@@ -213,6 +237,7 @@ def status_block(environ: Optional[Mapping[str, str]] = None) -> dict:
         egress = "Nenhum dado enviado; avaliador desligado."
         return {
             "enabled": False,
+            "gate": exact_gate_status(environ),
             "configured": False,
             "provider": None,
             "model": None,
@@ -225,6 +250,7 @@ def status_block(environ: Optional[Mapping[str, str]] = None) -> dict:
     )
     return {
         "enabled": True,
+        "gate": exact_gate_status(environ),
         "configured": cfg.configured,
         "provider": "openrouter",
         "model": cfg.model if is_versioned_jev_model(cfg.model) else None,
@@ -628,6 +654,11 @@ def try_rerank(
     if not cfg.configured or cfg.url is None or cfg.api_key is None:
         _mark_fallback(usage, cfg.reason or "invalid_url")
         _append_warning(warnings, _WARN_UNAVAILABLE)
+        return None
+
+    gate_reason = exact_gate_reason(pool, query_text, environ=environ)
+    if gate_reason:
+        _mark_skipped(usage, gate_reason)
         return None
 
     batches, leftover = _pack_batches(query_text, pool, cfg.model)

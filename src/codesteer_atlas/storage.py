@@ -33,7 +33,7 @@ from codesteer_atlas.models import (
 )
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
-from codesteer_atlas.relevance import new_usage, try_rerank
+from codesteer_atlas.relevance import new_usage, order_by_relevance, try_rerank
 from codesteer_atlas.semantic import semantic_enabled, semantic_index_state
 from codesteer_atlas.structural import node_id_for, spreading_activation
 
@@ -679,6 +679,12 @@ class StorageBackend:
             reranked = try_rerank(pool, query_text, warnings, usage)
             if reranked is None:
                 pool = self._rerank_pool(pool, query_text, warnings)
+                if usage.reason == "unique_exact_symbol":
+                    # Preserva a promoção de exatos do Jev usando apenas evidência local.
+                    pool = order_by_relevance(pool, query_text, {})
+                    usage.ranking_changed = [
+                        (r.chunk_id, r.file_path, r.scope_name) for r in pool
+                    ] != [(r.chunk_id, r.file_path, r.scope_name) for r in local_fallback]
             else:
                 pool = reranked
                 evaluations = list(usage.evaluations)

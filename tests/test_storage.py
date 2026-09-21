@@ -1938,3 +1938,18 @@ def test_candidate_pool_preserves_results_and_local_order(temp_storage, monkeypa
     assert legacy.candidate_pool is None
     assert len(extended.candidate_pool) == 2
     assert extended.local_fallback == extended.candidate_pool
+
+
+def test_exact_gate_promotes_target_and_does_not_call_jev(temp_storage, monkeypatch):
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RELEVANCE_GATE", "1")
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json",
+                        lambda *args, **kwargs: pytest.fail("gate deve evitar rede"))
+    outcome = temp_storage.search_hybrid(query_vector=VEC_A, query_text="search_hybrid",
+                                         filters={}, top_k=1, include_candidates=True)
+    assert outcome.results[0].scope_name == "StorageBackend.search_hybrid"
+    assert outcome.relevance_usage.reason == "unique_exact_symbol"
+    assert outcome.relevance_usage.request_count == 0
+    assert outcome.pool_evaluations == []
+    assert len(outcome.candidate_pool) == 2

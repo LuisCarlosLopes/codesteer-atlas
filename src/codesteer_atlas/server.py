@@ -680,6 +680,10 @@ def atlas_search(
 
     Omit response_profile to respect the operator configuration. Do not select
     "full" routinely: it overrides ATLAS_CONTEXT_OPTIMIZATION even when enabled.
+    Start with metadata and expand only symbols needed to close an evidence gap.
+    Prefer one or two directly relevant symbols first; inspect their contents
+    before expanding helpers, types or additional results. Do not expand every
+    search hit automatically. Stop when the task has sufficient evidence.
     Use atlas_expand(refs) for omitted content; use "full" only when explicitly
     requested or when fields omitted by the compact format are required.
 
@@ -1357,6 +1361,10 @@ def atlas_expand(
     """
     Expand compact search references by chunk id — no embedding and no Jev.
 
+    Expand only symbols needed for the current question, usually one or two at
+    first. Five is a request limit, not a recommended batch size. Add helpers or
+    continuations only if the evidence already received is insufficient.
+
     Pass up to five `ref` values from a compact `atlas_search` response. Each ref
     identifies a chunk in the current index (not a historical snapshot).
     Legacy Base64 references are also supported. If the file changed or the
@@ -1397,6 +1405,12 @@ def prepare_expand_delivery(
     from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
 
     validate_expand_refs(refs)
+    budget = budget or response_budget.ResponseBudget(
+        "search",
+        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+    )
     workspace = workspace.resolve()
     manifest = storage.get_manifest()
     items: list[dict] = []
@@ -1469,15 +1483,14 @@ def prepare_expand_delivery(
             # Hash e conteúdo vêm dos mesmos bytes; não há segunda leitura sujeita a corrida.
             assert source_bytes is not None
             try:
-                source_lines = source_bytes.decode("utf-8").splitlines(keepends=True)
+                # Linhas seguem LF do parser; preserva CRLF e separadores Unicode.
+                lines = source_bytes.decode("utf-8").split("\n")
+                source_lines = [line + "\n" for line in lines[:-1]] + [lines[-1]]
             except UnicodeDecodeError:
                 items.append({"ref": ref, "status": "unavailable", "reason": "invalid_encoding"})
                 warnings.append("expand_invalid_encoding")
                 continue
             start, end = chunk["start_line"], chunk["end_line"]
-            # Tree-sitter pode terminar no início da linha vazia após a última quebra.
-            if source_bytes.endswith(b"\n"):
-                source_lines.append("")
             if start < 1 or end < start or end > len(source_lines):
                 items.append({"ref": ref, "status": "obsolete", "reason": "invalid_line_range"})
                 warnings.append("expand_obsolete")
@@ -1488,9 +1501,14 @@ def prepare_expand_delivery(
                 items.append({"ref": ref, "status": "invalid_ref", "reason": "invalid_offset"})
                 warnings.append("expand_invalid_ref")
                 continue
-            entry["content"] = content[offset:]
-            entry["content_range"] = [offset, len(content)]
-            entry["content_complete"] = True
+            # Limita o trabalho do serializador antes da verificação final de bytes/tokens.
+            stop = min(len(content), offset + budget.max_chars)
+            entry["content"] = content[offset:stop]
+            entry["content_range"] = [offset, stop]
+            entry["content_complete"] = stop == len(content)
+            if stop < len(content):
+                entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{stop}'
+                warnings.append("expand_more_available")
 
         refs_json = chunk.get("references_json")
         if refs_json:
@@ -1519,12 +1537,6 @@ def prepare_expand_delivery(
     if warnings:
         payload["warnings"] = sorted(set(warnings))
 
-    budget = budget or response_budget.ResponseBudget(
-        "search",
-        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
-        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
-        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
-    )
     def cut_page(payload: dict) -> bool:
         candidates = [item for item in payload["results"] if len(item.get("content", "")) > 1]
         if not candidates:
@@ -1577,6 +1589,8 @@ def _atlas_expand_impl(
             "refs_count": len(refs),
             "include_content": include_content,
             "results_returned": len(final.get("results") or []),
+            "continuations_returned": sum(bool(item.get("next_ref")) for item in final.get("results", [])),
+            "content_complete_results": sum(item.get("content_complete") is True for item in final.get("results", [])),
             "warnings": final.get("warnings") or [],
         },
     )

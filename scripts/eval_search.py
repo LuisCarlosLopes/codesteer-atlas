@@ -212,7 +212,10 @@ def observe_relevance_usage(tracker: Dict[str, Any], usage: Any, max_cost_usd: f
             tracker["complete"] = False
             tracker["stop_reason"] = "max_cost"
             return True
-    elif usage.request_count > 0 and usage.cost_status == "unknown":
+    elif usage.request_count > 0 and usage.cost_status in {"unknown", "partially_known"}:
+        if usage.cost_usd is not None:
+            tracker["cost_usd_known"] += usage.cost_usd
+            tracker["cost_known_n"] += 1
         tracker["cost_unknown_count"] += 1
         tracker["complete"] = False
         tracker["stop_reason"] = "unknown_cost"
@@ -408,12 +411,15 @@ def _complete_expansion_items(items):
 
 def measure_task_delivery(atlas_server, storage, manifest, outcome, scenario, *,
                           workspace, profile, mode, optimization_stage="selection",
-                          max_expansion_calls=100):
+                          max_expansion_calls=100, expansion_batch_size=5):
     """Política reproduzível: expande em ordem, até cobrir evidências ou esgotar refs.
 
     Não simula decisões de um agente; relações ainda não verificáveis ficam pendentes.
     """
     from codesteer_atlas.config import CHUNK_TRUNCATION_MARKER
+
+    if not 1 <= expansion_batch_size <= 5:
+        raise ValueError("expansion_batch_size deve estar entre 1 e 5")
 
     started = time.perf_counter()
     text, measurement = atlas_server.prepare_search_delivery(
@@ -441,17 +447,18 @@ def measure_task_delivery(atlas_server, storage, manifest, outcome, scenario, *,
 
     refs = list(dict.fromkeys(
         ref for item in initial.get("results", [])
-        if (ref := item.get("ref") or by_identity.get((item.get("file_path"), item.get("symbol"), *item.get("lines", [])))))
+        if (ref := item.get("ref") or by_identity.get((item.get("file_path"), item.get("symbol"), *item.get("lines", []))))
         and (not item.get("content") or CHUNK_TRUNCATION_MARKER in item["content"])
     ))
     expansion_calls = 0
     obsolete = 0
+    coverage_by_ref = {item.get("ref"): item.get("covered_refs", []) for item in evidence}
     seen_refs = set()
     continuation_count = 0
     while refs and expansion_calls < max_expansion_calls:
         if all(covered(t) for t in scenario["required_evidence"]):
             break
-        batch, refs = refs[:5], refs[5:]
+        batch, refs = refs[:expansion_batch_size], refs[expansion_batch_size:]
         seen_refs.update(batch)
         expanded, measured = atlas_server.prepare_expand_delivery(
             storage, workspace, batch, include_content=True,
@@ -459,6 +466,12 @@ def measure_task_delivery(atlas_server, storage, manifest, outcome, scenario, *,
         expansion_calls += 1
         measurements.append(measured)
         items = json.loads(expanded).get("results", [])
+        for item in items:
+            coverage = coverage_by_ref.get(item.get("ref"), [])
+            if coverage:
+                item["covered_refs"] = coverage
+            if item.get("next_ref"):
+                coverage_by_ref[item["next_ref"]] = coverage
         evidence.extend(items)
         continuations = [item["next_ref"] for item in items
                          if item.get("next_ref") and item["next_ref"] not in seen_refs]
@@ -473,6 +486,7 @@ def measure_task_delivery(atlas_server, storage, manifest, outcome, scenario, *,
         "complete": not missing and not scenario.get("relations"),
         "missing_evidence": missing, "unverified_relations": scenario.get("relations", []),
         "expansion_calls": expansion_calls, "obsolete_refs": obsolete,
+        "expansion_batch_size": expansion_batch_size,
         "continuations": continuation_count,
         "expansion_limit_reached": bool(missing and refs and expansion_calls >= max_expansion_calls),
         "search_tokens": measurement.tokens,

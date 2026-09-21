@@ -9,6 +9,15 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Fixed
 
+- `atlas_expand` recupera o intervalo original do símbolo, inclusive conteúdo
+  truncado no índice, validando hash e caminho. Respostas grandes oferecem
+  `next_ref` sem cache, vinculado ao hash, e offsets de conteúdo; continuações
+  após alteração do arquivo são rejeitadas. O harness segue as páginas e só
+  contabiliza evidência completa após receber a cadeia inteira.
+- [Avaliação pareada de expansão](tests/eval/expansion_delivery_20260921.md):
+  6/12 cenários completos contra 2/12 com conteúdo indexado; comparação inclui
+  busca e expansões, sem chamadas Jev.
+
 - Orientação de ferramentas e agentes esclarece que `response_profile=full`
   sobrescreve a flag de compactação; chamadas normais devem omitir o parâmetro.
 
@@ -25,6 +34,16 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   mantendo MRR/recall por classe sobre os mesmos candidatos (Jev desligado).
 
 ### Added
+
+- `ATLAS_RELEVANCE_GATE` opt-in (default off) evita Jev para função, método ou
+  classe de nome exato único no pool, mantendo promoção determinística do alvo.
+  Configuração aparece no status e motivo de dispensa no ledger sem custo remoto.
+- Orientação de expansão seletiva (um ou dois símbolos por necessidade) e harness
+  pareado de gate/expansão em lotes de 5, 2 e 1. Uma avaliação remota por consulta;
+  custos contrafactuais separados dos reais, com parada em custo desconhecido.
+  [Avaliação pareada](tests/eval/context_policy_20260921.md): 7,63% menos tokens
+  em metadados com gate e lote dois, com mais chamadas de expansão; métricas
+  de qualidade iguais entre variantes, com lacunas explicitadas por classe.
 
 - **Perfil compacto de contexto** (`ATLAS_CONTEXT_OPTIMIZATION`, default False):
   `atlas_search` e `atlas_context` aceitam `response_profile`

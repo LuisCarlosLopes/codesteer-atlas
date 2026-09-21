@@ -650,3 +650,43 @@ def test_processing_success_reports_ranking_evidence(confidence, changed, confid
     assert fields["status"] == "success"
     assert fields["ranking_changed"] is changed
     assert fields["confident_evaluations"] == confident
+
+
+def test_exact_gate_is_opt_in_and_skips_without_remote_call():
+    pool = [_hit("unrelated"), _hit("Owner.target")]
+    from codesteer_atlas.relevance import exact_gate_reason
+
+    assert exact_gate_reason(pool, "target", environ={}) is None
+    assert exact_gate_reason(pool, "target", environ={"ATLAS_RELEVANCE_GATE": "1"}) == "unique_exact_symbol"
+    usage = new_usage()
+    result = try_rerank(pool, "target", [], usage,
+                        environ=_openrouter_env(ATLAS_RELEVANCE_GATE="1"),
+                        post=lambda *a, **k: pytest.fail("Não deve chamar rede"))
+    assert result is None
+    assert usage.status == "skipped"
+    assert usage.reason == "unique_exact_symbol"
+    assert usage.request_count == 0
+    assert usage.cost_status == "not_incurred"
+    assert usage.cost_usd == 0
+
+
+@pytest.mark.parametrize("names,query,scope_type", [
+    (["Owner.target", "Other.target"], "target", "function"),
+    (["Owner.target"], "how target works", "function"),
+    (["Owner.target"], "Target", "function"),
+    (["Owner.target"], "tar", "function"),
+    (["target"], "target", "section"),
+])
+def test_exact_gate_does_not_skip_ambiguous_or_non_symbol_queries(names, query, scope_type):
+    from codesteer_atlas.relevance import exact_gate_reason
+
+    pool = [_hit(name).model_copy(update={"scope_type": scope_type}) for name in names]
+    assert exact_gate_reason(pool, query, environ={"ATLAS_RELEVANCE_GATE": "1"}) is None
+
+
+def test_exact_gate_status_declares_configuration():
+    gate = status_block(_openrouter_env(ATLAS_RELEVANCE_GATE="1"))["gate"]
+    assert gate["enabled"] is True
+    assert gate["policy"] == "unique_exact_symbol_v1"
+    assert status_block(_openrouter_env())["gate"]["enabled"] is False
+    assert status_block(_openrouter_env(ATLAS_RELEVANCE_GATE="bad"))["gate"]["reason"] == "invalid_flag"

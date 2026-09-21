@@ -133,6 +133,37 @@ tokenizer da observabilidade nem o custo de indexação F4. `ATLAS_OBSERVABILITY
 só copia o ledger para o evento JSONL já existente. Logs nunca incluem query,
 código, paths ou a chave.
 
+### Dispensa de Jev para símbolo exato (opcional)
+
+`ATLAS_RELEVANCE_GATE=1` dispensa a chamada remota quando a consulta é um nome
+exato e existe apenas uma correspondência de função, método ou classe no pool
+recuperado. Não significa unicidade no repositório inteiro. O símbolo exato é
+promovido ao primeiro lugar; os demais candidatos mantêm a ordenação local.
+
+O default é **desligado**. Consultas naturais, identificadores parciais, nomes
+ambíguos e documentos continuam seguindo a política anterior. A regra existente
+para pools com menos de dois candidatos permanece. Os limiares Jev não mudam.
+`atlas_status.relevance.gate` declara configuração e versão da política; buscas
+dispensadas registram `status=skipped`, `reason=unique_exact_symbol`, nenhuma
+chamada remota e `cost_status=not_incurred`. `ATLAS_RERANK=0` continua prevalecendo.
+
+Para avaliação pareada com Jev habilitado, usando as credenciais já configuradas
+no ambiente, sem duplicar chamadas remotas entre variantes:
+
+```bash
+ATLAS_OBSERVABILITY=1 uv run python scripts/eval_context_policy.py \
+  --workspace . --max-cost-usd 0.025 --out /tmp/atlas-context-policy.json
+```
+
+Mantenha índice e workspace congelados durante a medição. O harness verifica
+os hashes antes de iniciar chamadas pagas e rejeita divergências.
+
+O relatório separa custo real da baseline e custo contrafactual evitável pelo
+gate. Compara expansões em lotes de cinco, dois e um; usa os alvos do cenário
+somente para verificar cobertura/parar, nunca para reordenar os candidatos.
+Interrompe novas consultas ao atingir o teto conhecido ou receber custo
+parcialmente conhecido/desconhecido. O teto é verificado após cada consulta.
+
 ### Otimização de contexto (opcional)
 
 `ATLAS_CONTEXT_OPTIMIZATION` é **False** por padrão e é independente de
@@ -141,11 +172,31 @@ código, paths ou a chave.
 chamada). Compacto: menos campos por hit, `ref` de expansão, deduplicação
 conservadora, orçamento a 70% do teto. `atlas_expand(refs)` recupera até 5
 chunks por id sem nova busca. Sem Jev, a compactação é só determinística.
+Comece expandindo um ou dois símbolos diretamente ligados à pergunta. Leia o
+resultado antes de abrir auxiliares ou continuar páginas; cinco refs é o limite
+da chamada, não uma recomendação de lote. Parar quando já existe evidência evita
+transferir código adicional. Lotes menores podem aumentar o número de chamadas:
+essa troca também deve ser medida, não apenas o tamanho da primeira resposta.
+
 
 `ref` e `covered_refs` usam IDs curtos do índice atual. A expansão consulta o
 manifesto e valida o hash atual e o caminho dentro do workspace. Referências
 Base64 antigas continuam aceitas com sua validação de hash. IDs curtos não
 representam snapshots históricos após reindexação.
+
+A expansão lê somente o intervalo de linhas do símbolo no arquivo original,
+mesmo quando o conteúdo indexado foi truncado. O hash é validado sobre os mesmos
+bytes usados na leitura. `content_range` informa offsets em caracteres Unicode
+(início inclusivo, fim exclusivo). `content_complete=false` inclui `next_ref`:
+passe essa referência a `atlas_expand` se precisar do restante. A última página
+traz `content_complete=true`; para reconstituir o símbolo, concatene todas as
+partes desde o offset zero. A continuação é vinculada ao hash do arquivo e não
+usa cache; se o arquivo mudar, ela fica obsoleta mesmo após reindexação.
+
+Os tetos de bytes e tokens valem para cada resposta inteira, incluindo referências
+e metadados. A paginação prefere quebras de linha; linhas muito longas podem ser
+divididas por caracteres. Logs de expansão incluem `continuations_returned` e
+`content_complete_results` (páginas que chegaram ao fim do símbolo).
 
 A seleção conservadora e a deduplicação acontecem no pool antes do `top_k`.
 Correspondências exatas e avaliações incertas são preservadas; se todos forem
@@ -169,9 +220,11 @@ ATLAS_OBSERVABILITY=1 uv run python scripts/eval_search.py --delivery \
 ```
 
 Os cenários expandem resultados em ordem até cobrir a evidência ou esgotar as
-referências. É uma política determinística de avaliação, não uma simulação de
-um agente. Conteúdo truncado ou obsoleto e relações não verificadas impedem
-classificar a tarefa como completa. Use `ATLAS_RELEVANCE=0` para medir apenas a
+referências, seguindo também `next_ref` (limite de 100 chamadas por cenário).
+É uma política determinística de avaliação, não uma simulação de um agente.
+A evidência paginada só conta quando a cadeia é contígua desde o offset zero.
+Conteúdo incompleto ou obsoleto e relações não verificadas impedem classificar
+a tarefa como completa. Use `ATLAS_RELEVANCE=0` para medir apenas a
 compactação local; o benchmark respeita a configuração do avaliador.
 
 
@@ -483,6 +536,7 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_RELEVANCE_API_URL` | derivado só de OpenRouter chat | Endpoint HTTPS System One. Sem host implícito genérico. |
 | `ATLAS_RELEVANCE_API_KEY` | reuso condicional | Se ausente, reutiliza `ATLAS_SEMANTIC_API_KEY` somente quando a URL semântica é OpenRouter HTTPS. |
 | `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Não herda `ATLAS_SEMANTIC_MODEL`. Alias OpenRouter ou pin `typesafe/jev-[0-9]…`. |
+| `ATLAS_RELEVANCE_GATE` | desligado | `1`/`true` dispensa Jev para símbolo exato único no pool; preserva promoção local do exato. |
 | `ATLAS_CONTEXT_OPTIMIZATION` | desligado | `1`/`true` faz `response_profile=default` resolver para compacto em search/context. Independente do Jev. Detalhes: [Otimização de contexto](#otimização-de-contexto-opcional). |
 | `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal — `max_tokens` fica `null` em qualquer SO; isso é esperado, não um bug. |
 
