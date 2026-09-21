@@ -234,3 +234,105 @@ def test_print_report_accepts_old_baseline_without_delivery_block(capsys):
     captured = capsys.readouterr()
     assert "TOTAL" in captured.out
     assert "Resposta entregue" in captured.out
+
+
+def test_observe_usage_does_not_sum_unknown_as_zero():
+    tracker = eval_search.new_relevance_tracker()
+    usage = type(
+        "U",
+        (),
+        {
+            "resolved_model": "typesafe/jev-1.13",
+            "requested_model": "typesafe/jev-1.13",
+            "request_count": 1,
+            "status": "success",
+            "duration_ms": 12.0,
+            "cost_status": "unknown",
+            "cost_usd": None,
+        },
+    )()
+    stop = eval_search.observe_relevance_usage(tracker, usage, 1.0)
+    report = eval_search.finalize_relevance_report(tracker)
+    assert stop is True
+    assert report["cost_usd_known"] is None
+    assert report["cost_unknown_count"] == 1
+    assert report["complete"] is False
+    assert report["experimental_success"] is False
+
+
+def test_observe_usage_stops_at_max_cost_and_keeps_known_sum():
+    tracker = eval_search.new_relevance_tracker()
+    usage = type(
+        "U",
+        (),
+        {
+            "resolved_model": "typesafe/jev-1.13",
+            "requested_model": "typesafe/jev-1.13",
+            "request_count": 1,
+            "status": "success",
+            "duration_ms": 9.0,
+            "cost_status": "reported",
+            "cost_usd": 0.4,
+        },
+    )()
+    assert eval_search.observe_relevance_usage(tracker, usage, 1.0) is False
+    assert eval_search.observe_relevance_usage(tracker, usage, 0.5) is True
+    report = eval_search.finalize_relevance_report(tracker)
+    assert report["cost_usd_known"] == 0.8
+    assert report["stop_reason"] == "max_cost"
+    assert report["experimental_success"] is False
+
+
+def test_all_fallback_is_not_experimental_success():
+    tracker = eval_search.new_relevance_tracker()
+    usage = type(
+        "U",
+        (),
+        {
+            "resolved_model": None,
+            "requested_model": "typesafe/jev-1.13",
+            "request_count": 1,
+            "status": "fallback",
+            "duration_ms": 3.0,
+            "cost_status": "unknown",
+            "cost_usd": None,
+        },
+    )()
+    eval_search.observe_relevance_usage(tracker, usage, 1.0)
+    report = eval_search.finalize_relevance_report(tracker)
+    assert report["valid_evaluations"] == 0
+    assert report["experimental_success"] is False
+
+
+def test_delivery_modes_reuse_same_outcome_without_second_search(_import_server_once):
+    atlas_server = _import_server_once
+    response_budget_mod = __import__(
+        "codesteer_atlas.response_budget", fromlist=["response_budget"]
+    )
+    from codesteer_atlas.relevance import new_usage
+
+    usage = new_usage()
+    usage.request_count = 1
+    usage.cost_status = "reported"
+    usage.cost_usd = 0.02
+    usage.status = "success"
+    outcome = SearchOutcome(
+        results=[_result("target", "ok", score=0.9)],
+        warnings=[],
+        relevance_usage=usage,
+    )
+    tracker = eval_search.new_relevance_tracker()
+    eval_search.observe_relevance_usage(tracker, outcome.relevance_usage, 1.0)
+    for mode in ("metadata", "content"):
+        eval_search._delivery_for_query(
+            atlas_server,
+            response_budget_mod,
+            _fake_storage(),
+            _manifest(),
+            outcome,
+            [{"file_path": "src/target.py", "scope_name": "target"}],
+            mode=mode,
+        )
+    report = eval_search.finalize_relevance_report(tracker)
+    assert report["requests"] == 1
+    assert report["cost_usd_known"] == 0.02

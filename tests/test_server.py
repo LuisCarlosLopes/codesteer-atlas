@@ -3148,3 +3148,143 @@ def test_stdio_roundtrip_atlas_status_and_graph_with_observability(tmp_path):
             assert last_event["outcome"] == "success"
 
     asyncio.run(asyncio.wait_for(_run(), timeout=60))
+
+
+def _relevance_cost_lines(err: str):
+    lines = []
+    for line in err.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("event") == "relevance_cost":
+            lines.append(payload)
+    return lines
+
+
+def test_atlas_search_emite_uma_linha_de_custo_mesmo_com_query_invalida(capsys):
+    with pytest.raises(ValueError):
+        atlas_search(query="")
+    lines = _relevance_cost_lines(capsys.readouterr().err)
+    assert len(lines) == 1
+    assert lines[0]["cost_status"] == "not_incurred"
+    assert lines[0]["request_count"] == 0
+    assert lines[0]["cost_usd"] == 0.0
+
+
+def test_atlas_search_indice_ausente_emite_custo_zero(tmp_path, monkeypatch, capsys):
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        pytest.raises(FileNotFoundError),
+    ):
+        atlas_search(query="run")
+    lines = _relevance_cost_lines(capsys.readouterr().err)
+    assert len(lines) == 1
+    assert lines[0]["cost_status"] == "not_incurred"
+
+
+def test_atlas_search_stdout_limpo_com_linha_de_custo_no_stderr(capsys):
+    result = _search_with_outcome(SearchOutcome(results=[_DEGRADED_RESULT]))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert result["results"]
+    lines = _relevance_cost_lines(captured.err)
+    assert len(lines) == 1
+
+
+def test_atlas_search_preserva_custo_em_erro_posterior(tmp_path, monkeypatch, capsys):
+    def fake_search(*_args, **kwargs):
+        usage = kwargs["relevance_usage"]
+        usage.status = "success"
+        usage.request_count = 1
+        usage.cost_status = "reported"
+        usage.cost_usd = 0.25
+        return SearchOutcome(results=[_mock_result("def run(): pass", "run")], relevance_usage=usage)
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch("codesteer_atlas.storage.StorageBackend.search_hybrid", side_effect=fake_search),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        atlas_search(query="run")
+    lines = _relevance_cost_lines(capsys.readouterr().err)
+    assert len(lines) == 1
+    assert lines[0]["cost_status"] == "reported"
+    assert lines[0]["cost_usd"] == 0.25
+
+
+def test_atlas_search_concorrente_nao_mistura_ledgers(capsys):
+    import threading
+
+    def fake_search(*_args, **kwargs):
+        usage = kwargs["relevance_usage"]
+        usage.search_id = usage.search_id
+        return SearchOutcome(results=[_mock_result("x", "run")], relevance_usage=usage)
+
+    with (
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch("codesteer_atlas.storage.StorageBackend.search_hybrid", side_effect=fake_search),
+    ):
+        threads = [
+            threading.Thread(target=lambda: atlas_search(query="run")),
+            threading.Thread(target=lambda: atlas_search(query="run")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    ids = [line["search_id"] for line in _relevance_cost_lines(capsys.readouterr().err)]
+    assert len(ids) == 2
+    assert ids[0] != ids[1]
+
+
+def test_atlas_status_relevance_sem_rede_nem_segredo(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_RELEVANCE", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_KEY", "sk-or-v1-secret")
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.server._resolve_index_dir_via_roots"),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=False),
+        patch("codesteer_atlas.server.is_reindex_locked", return_value=False),
+    ):
+        payload = json.loads(atlas_status())
+    dumped = json.dumps(payload)
+    assert "sk-or-v1-secret" not in dumped
+    assert payload["relevance"]["enabled"] is True
+    assert payload["relevance"]["configured"] is True
+    assert payload["relevance"]["provider"] == "openrouter"
+
+
+def test_observabilidade_on_nao_duplica_evento_de_custo(tmp_path, monkeypatch):
+    from codesteer_atlas import observability as obs
+
+    monkeypatch.setenv("ATLAS_OBSERVABILITY", "1")
+    obs.reset_observability_state_for_tests()
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", tmp_path),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=MOCK_MANIFEST),
+        patch("codesteer_atlas.embeddings.EmbeddingEngine.encode_single", return_value=[0.0] * 384),
+        patch(
+            "codesteer_atlas.storage.StorageBackend.search_hybrid",
+            return_value=SearchOutcome(results=[_mock_result("def run(): pass", "run")]),
+        ),
+    ):
+        atlas_search(query="run", top_k=5)
+    events_path = tmp_path / "observability" / "events.jsonl"
+    lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["tool"] == "atlas_search"
+    assert "relevance_usage" in event
+    obs.reset_observability_state_for_tests()

@@ -17,6 +17,7 @@ de eventos (memória + JSONL + bloco em `atlas_status`) é que liga/desliga com
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -438,3 +439,18 @@ def get_observability_status() -> dict:
         "dropped_events": dropped,
         "last_by_tool": last_by_tool,
     }
+
+
+def log_relevance_cost(usage: Any) -> None:
+    """
+    Uma linha JSON em stderr por busca. Independente de `ATLAS_OBSERVABILITY`.
+    Nunca propaga falha e nunca inclui query, código, paths ou credenciais.
+    """
+    try:
+        from codesteer_atlas.relevance import public_usage_fields
+
+        payload = public_usage_fields(usage)
+        print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False), file=sys.stderr)
+    except Exception:
+        with contextlib.suppress(Exception):
+            print("[atlas] Falha ao registrar custo de relevância.", file=sys.stderr)

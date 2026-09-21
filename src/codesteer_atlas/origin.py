@@ -10,7 +10,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 from codesteer_atlas.config import (
     SEMANTIC_API_KEY_ENV,
@@ -19,6 +18,7 @@ from codesteer_atlas.config import (
     SEMANTIC_MODEL_ENV,
     SEMANTIC_TIMEOUT_S,
 )
+from codesteer_atlas.http_transport import post_json
 
 
 @dataclass(frozen=True)
@@ -148,15 +148,8 @@ class OriginResolver:
                 "model": model,
                 "messages": [{"role": "user", "content": str(prompt)}],
             }
-        body = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if api:
-            key = self.environ.get(SEMANTIC_API_KEY_ENV)
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-        request = Request(url, data=body, headers=headers, method="POST")
-        with urlopen(request, timeout=self.timeout_s) as response:
-            raw = response.read().decode("utf-8", errors="replace")
+        key = self.environ.get(SEMANTIC_API_KEY_ENV) if api else None
+        raw = post_json(url, request_payload, api_key=key or None, timeout_s=self.timeout_s)
         try:
             return _response_text(json.loads(raw))
         except json.JSONDecodeError:

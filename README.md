@@ -104,6 +104,88 @@ manual. Isso pode cortar respostas que antes cabiam apenas em chars/bytes.
 Se o contador estiver indisponível, o limite passa a chars/bytes:
 `mode="byte_bpe_upper_bound"`, `max_tokens=null`, sem garantia de tokens exatos.
 
+### Avaliador de relevância Jev (opcional)
+
+`ATLAS_RELEVANCE` é **False** por padrão (`ausente`/`0`/`false`). Não liga por
+presença de chave, modelo ou `ATLAS_SEMANTIC`. Aceite `1`/`true` (sem distinção
+de maiúsculas) para enviar a consulta e os candidatos do pool pós-RRF à API
+System One do OpenRouter (`POST /api/v1/systemone`, modelo
+`~typesafe/jev-latest`). `ATLAS_RERANK=0` continua desligando **toda** reordenação,
+inclusive Jev.
+
+A URL default só é derivada de `ATLAS_SEMANTIC_API_URL` quando essa URL é
+exatamente o endpoint HTTPS de chat do OpenRouter; a chave
+`ATLAS_SEMANTIC_API_KEY` só é reutilizada nesse caso. Para um endpoint próprio,
+use `ATLAS_RELEVANCE_API_URL` (apenas `https://openrouter.ai/api/v1/systemone`)
+e, se quiser, `ATLAS_RELEVANCE_API_KEY`. `ATLAS_RELEVANCE_MODEL` não herda
+`ATLAS_SEMANTIC_MODEL`. Default `~typesafe/jev-latest`; também aceita o alias
+sem `~` e pins versionados `typesafe/jev-[0-9]…`.
+
+Jev **reordena** o pool; no perfil compacto também pode excluir só candidatos
+com score ≤ 0,25 e confiança ≥ 0,90. Lotes cabem em 24.000 bytes UTF-8 (até
+duas chamadas, timeout compartilhado de 3 s). Timeout, HTTP ou schema inválido
+caem no reranker local para o lote afetado; baixa confiança isola o candidato
+sem invalidar os demais. Reinicie o MCP depois de mudar o `env`.
+
+Cada `atlas_search` emite **uma** linha JSON de custo em stderr (conhecido,
+parcialmente conhecido, zero sem chamada, ou desconhecido). Isso **não** é o
+tokenizer da observabilidade nem o custo de indexação F4. `ATLAS_OBSERVABILITY=1`
+só copia o ledger para o evento JSONL já existente. Logs nunca incluem query,
+código, paths ou a chave.
+
+### Otimização de contexto (opcional)
+
+`ATLAS_CONTEXT_OPTIMIZATION` é **False** por padrão e é independente de
+`ATLAS_RELEVANCE`. Com `1`/`true`, `response_profile` default resolve para
+`compact` em `atlas_search` e `atlas_context` (ainda dá para forçar `full` por
+chamada). Compacto: menos campos por hit, `ref` de expansão, deduplicação
+conservadora, orçamento a 70% do teto. `atlas_expand(refs)` recupera até 5
+chunks por id sem nova busca. Sem Jev, a compactação é só determinística.
+
+`ref` e `covered_refs` usam IDs curtos do índice atual. A expansão consulta o
+manifesto e valida o hash atual e o caminho dentro do workspace. Referências
+Base64 antigas continuam aceitas com sua validação de hash. IDs curtos não
+representam snapshots históricos após reindexação.
+
+A seleção conservadora e a deduplicação acontecem no pool antes do `top_k`.
+Correspondências exatas e avaliações incertas são preservadas; se todos forem
+rejeitados, retorna o primeiro candidato do ranking local com aviso. Commits
+ocupam apenas vagas restantes, seguindo a política existente.
+
+Nos logs, `bytes_recovered` e `bytes_selected` medem conteúdo interno;
+`bytes_delivered` mede o JSON final. Os dois primeiros não demonstram economia
+serializada. `ranking_changed` registra mudança de ordem e
+`confident_evaluations` conta avaliações confiantes. `status=success` significa
+processamento válido, não melhoria de qualidade. Custos desconhecidos continuam
+explicitamente desconhecidos.
+
+O benchmark usa a mesma montagem do MCP e a mesma recuperação para `full`,
+projeção compacta, deduplicação e seleção. A chamada Jev é contabilizada uma vez.
+Para comparar as 28 consultas e os cenários com busca mais expansões:
+
+```bash
+ATLAS_OBSERVABILITY=1 uv run python scripts/eval_search.py --delivery \
+  --tasks tests/eval/task_scenarios.yaml --workspace . --out /tmp/atlas-delivery.json
+```
+
+Os cenários expandem resultados em ordem até cobrir a evidência ou esgotar as
+referências. É uma política determinística de avaliação, não uma simulação de
+um agente. Conteúdo truncado ou obsoleto e relações não verificadas impedem
+classificar a tarefa como completa. Use `ATLAS_RELEVANCE=0` para medir apenas a
+compactação local; o benchmark respeita a configuração do avaliador.
+
+
+Exemplo opt-in (sem chave no arquivo versionado):
+
+```json
+"env": {
+  "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
+  "ATLAS_RELEVANCE": "1",
+  "ATLAS_SEMANTIC_API_URL": "https://openrouter.ai/api/v1/chat/completions",
+  "ATLAS_SEMANTIC_API_KEY": "sk-or-v1-..."
+}
+```
+
 Exemplo de evento (JSONL, um por linha, sanitizado — nunca contém query, paths retornados,
 código-fonte ou texto de exceção):
 
@@ -397,6 +479,11 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
 | `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
 | `ATLAS_OBSERVABILITY` | desligado | `1` grava eventos de medição de resposta (chars/bytes/tokens) em memória + `.code-index/observability/events.jsonl` e expõe `atlas_status.observability`. Sem ele, nada é criado. Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional). |
+| `ATLAS_RELEVANCE` | desligado | `1`/`true` avalia relevância com Jev via OpenRouter System One antes do `top_k`. Default False. `ATLAS_RERANK=0` vence. Detalhes: [Avaliador de relevância Jev](#avaliador-de-relevância-jev-opcional). |
+| `ATLAS_RELEVANCE_API_URL` | derivado só de OpenRouter chat | Endpoint HTTPS System One. Sem host implícito genérico. |
+| `ATLAS_RELEVANCE_API_KEY` | reuso condicional | Se ausente, reutiliza `ATLAS_SEMANTIC_API_KEY` somente quando a URL semântica é OpenRouter HTTPS. |
+| `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Não herda `ATLAS_SEMANTIC_MODEL`. Alias OpenRouter ou pin `typesafe/jev-[0-9]…`. |
+| `ATLAS_CONTEXT_OPTIMIZATION` | desligado | `1`/`true` faz `response_profile=default` resolver para compacto em search/context. Independente do Jev. Detalhes: [Otimização de contexto](#otimização-de-contexto-opcional). |
 | `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal — `max_tokens` fica `null` em qualquer SO; isso é esperado, não um bug. |
 
 História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses). Extra opcional: `codesteer-atlas[watch]`.

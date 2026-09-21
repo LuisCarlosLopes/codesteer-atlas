@@ -224,6 +224,27 @@ CLI e watcher não atravessam `ctx` nem usam sampling. Sumários entram apenas e
 `understand`, cedendo primeiro ao teto de resposta. `graph.json`/`graph.html` não recebem
 overlay semântico.
 
+### Avaliador de relevância Jev (opt-in)
+
+`ATLAS_RELEVANCE=1` (ou `true`) substitui a reordenação lexical/cross-encoder pelo
+Jev no OpenRouter System One, no pool pós-RRF **antes** de `_merge_typed` e do
+corte `top_k`. Default False. `ATLAS_RERANK=0` desliga Jev e o rerank local.
+Lotes ≤ 24 KB (máx. 2 chamadas, timeout compartilhado 3 s). Baixa confiança
+isola o candidato; falha de contrato invalida só o lote. No perfil compacto,
+seleção semântica remove apenas score ≤ 0,25 com confiança ≥ 0,90. O custo
+remoto sai em uma linha JSON em stderr por `atlas_search` (conhecido /
+parcialmente conhecido / zero / desconhecido); `atlas_status.relevance` é
+estático. Default `~typesafe/jev-latest` via `ATLAS_RELEVANCE_MODEL`. Reinicie
+o MCP após mudar o `env`.
+
+### Otimização de contexto (opt-in)
+
+`ATLAS_CONTEXT_OPTIMIZATION=1` faz `response_profile=default` resolver para
+`compact` em `atlas_search`/`atlas_context`. Independente do Jev. Compacto:
+projeção enxuta, dedup por cobertura verificável, orçamento a 70%,
+`atlas_expand` por id. Sem a flag (ou com `response_profile=full`), o formato
+atual permanece.
+
 ### Incremental indexing (DECISAO-005 / [J])
 
 `index_workspace()` compares per-file sha256 hashes against `manifest.files` to skip unchanged files. Changed/deleted files have their old chunks removed from LanceDB (`delete_by_file_paths`) before new chunks are appended (`append_chunks`). A full reindex (no existing manifest, or `--full` without `paths`) instead overwrites the table entirely via `store_chunks`.
@@ -236,3 +257,12 @@ Standalone deployment script (separate from the package) that registers the MCP 
 
 - Code comments and docstrings are written in Portuguese (pt-BR), per `.memory-bank/constitution.md`. Keep comments minimal — only document non-obvious logic, per the `codesteer-tagger` skill conventions (1-3 tags per logical unit, no redundant/process recap comments).
 - Any logic change to the indexer or MCP server must be accompanied by unit/integration tests.
+
+
+<!-- atlas:response-profile -->
+Em `atlas_search` e `atlas_context`, **omita `response_profile`** normalmente
+(ou use `default`) para respeitar `ATLAS_CONTEXT_OPTIMIZATION` do operador.
+Não envie `full` por rotina: ele sobrescreve a flag mesmo quando está ligada.
+Use `full` apenas se solicitado ou se precisar de campos ausentes no compacto;
+para obter conteúdo de um resultado compacto, prefira `atlas_expand(refs)`.
+<!-- /atlas:response-profile -->

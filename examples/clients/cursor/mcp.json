@@ -8,7 +8,9 @@
         "atlas-serve"
       ],
       "env": {
-        "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index"
+        "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
+        "ATLAS_RELEVANCE": "0",
+        "ATLAS_CONTEXT_OPTIMIZATION": "0"
       }
     }
   }

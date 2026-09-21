@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -8,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import unquote, urlparse
 
 # 1. Duplica o file descriptor real do stdout (fd 1) para uso exclusivo do
@@ -60,8 +61,13 @@ from codesteer_atlas.config import (  # noqa: E402
     GRAPH_RESPONSE_MAX_CHARS,
     RESPONSE_BUDGET_BRIEF0_MAX_TOKENS,
     RESPONSE_BUDGET_BRIEF1_MAX_TOKENS,
+    RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+    RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS,
     RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
     RESPONSE_BUDGET_GRAPH_MAX_TOKENS,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS,
     RESPONSE_BUDGET_SEARCH_MAX_BYTES,
     RESPONSE_BUDGET_SEARCH_MAX_CHARS,
     RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
@@ -72,6 +78,18 @@ from codesteer_atlas.context import (  # noqa: E402
     build_context,
     context_cut_once,
     context_minimal_envelope,
+)
+from codesteer_atlas.context_optimization import (  # noqa: E402
+    compact_context_payload,
+    compact_search_envelope,
+    context_optimization_status,
+    decode_expand_ref,
+    deduplicate_results,
+    project_compact_search_results,
+    record_selection_usage,
+    resolve_response_profile,
+    select_conservative,
+    validate_expand_refs,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
 from codesteer_atlas.graph import (  # noqa: E402
@@ -94,8 +112,11 @@ from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
     resolve_heading_section,
 )
+from codesteer_atlas.models import IndexManifest, RelevanceUsage, SearchOutcome  # noqa: E402
 from codesteer_atlas.origin import OriginResolver  # noqa: E402
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
+from codesteer_atlas.relevance import new_usage, public_usage_fields  # noqa: E402
+from codesteer_atlas.relevance import status_block as relevance_status  # noqa: E402
 from codesteer_atlas.semantic import (  # noqa: E402
     load_semantic_sidecar,
     semantic_enabled,
@@ -506,6 +527,8 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
             **_observability_status_block(),
         }
 
@@ -538,6 +561,8 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
             **_observability_status_block(),
         }
     except Exception as e:
@@ -552,6 +577,8 @@ def get_status_data(ctx: "Optional[Context]" = None) -> dict:
             "resolution_coverage": _read_resolution_coverage(graph_path),
             "watch": WATCH_STATE,
             "semantic": _semantic_status(storage, ctx, e),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
             **_observability_status_block(),
         }
 
@@ -631,6 +658,7 @@ def atlas_search(
     include_content: bool = False,
     limit: Optional[int] = None,
     structural: bool = False,
+    response_profile: str = "default",
     ctx: "Context | None" = None,
 ) -> str:
     """
@@ -650,6 +678,11 @@ def atlas_search(
     not exist yet, this raises an actionable error explaining how to build it (see
     `atlas_index`).
 
+    Omit response_profile to respect the operator configuration. Do not select
+    "full" routinely: it overrides ATLAS_CONTEXT_OPTIMIZATION even when enabled.
+    Use atlas_expand(refs) for omitted content; use "full" only when explicitly
+    requested or when fields omitted by the compact format are required.
+
     Args:
         query: Natural language description or exact symbols to find.
         top_k: Max results, 1-50. Defaults to 5.
@@ -657,15 +690,21 @@ def atlas_search(
         language: Optional language filter (e.g. 'python', 'javascript', 'go').
         path_prefix: Optional path prefix filter (e.g. 'src/controllers').
         include_content: When true, includes each result's 'content'. Defaults to false
-            (metadata/location only) to save tokens.
+            (metadata/location only) to save tokens. Compact profile never turns content on.
         limit: Alias for 'top_k'; overrides it when provided.
         structural: When true, adds a graph spreading-activation arm to the RRF fusion
             for this call only. Defaults to false (opt-in; does not change default ranking).
+        response_profile: `default` follows ATLAS_CONTEXT_OPTIMIZATION; `full` keeps the
+            current delivery format; `compact` applies deterministic compaction (and
+            conservative Jev selection when ATLAS_RELEVANCE is on).
 
     Returns:
         JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
         `match_arms`, and `content` only when include_content=true),
         `total_chunks_searched`, and `query_time_ms`.
+
+        Compact profile omits score/match_arms/language/timing from results and adds
+        expansion `ref`s; use `atlas_expand` for omitted content.
 
         A commit message result has `type="commit"`, `language="git"`, a `commit`
         object (id, repo, subject, body, dates, files_touched, is_revert,
@@ -694,12 +733,24 @@ def atlas_search(
         `semantic_layer_unavailable` (the opt-in semantic index is not
         ready) and `semantic_arm_unavailable` (the semantic vector arm failed).
         The last two keep vector+FTS results available but indicate that semantic
-        recall is incomplete. Treat a degraded result as incomplete: reindex with
-        `atlas_index(full=true)` before concluding that something does not exist in the
-        codebase. When both original arms fail the call raises instead of returning an
-        empty result set.
+        recall is incomplete. Opt-in Jev relevance (`ATLAS_RELEVANCE=1`) may add
+        `relevance_unavailable`, `relevance_invalid_response`,
+        `relevance_low_confidence`, `relevance_budget_exceeded` or
+        `relevance_cost_unknown`. When Jev fails or times out, ranking falls back
+        to the local reranker — do NOT reindex solely for a Jev warning.
+        `relevance_cost_unknown` only means billing was unavailable; it is not by
+        itself a ranking degradation. Treat index-arm degradation (fts/vector/
+        semantic/structural) as incomplete: reindex with `atlas_index(full=true)`
+        before concluding that something does not exist. When both original arms
+        fail the call raises instead of returning an empty result set.
     """
     _obs_start = time.monotonic()
+    usage = new_usage()
+    extra: dict[str, Any] = {
+        "top_k": top_k,
+        "include_content": include_content,
+        "response_profile": response_profile,
+    }
     try:
         return _atlas_search_impl(
             query=query,
@@ -710,17 +761,22 @@ def atlas_search(
             include_content=include_content,
             limit=limit,
             structural=structural,
+            response_profile=response_profile,
             ctx=ctx,
+            relevance_usage=usage,
             _obs_start=_obs_start,
         )
     except Exception as e:
+        extra["relevance_usage"] = public_usage_fields(usage)
         _finish_observed_error(
             "atlas_search",
             _obs_start,
             e,
-            extra={"top_k": top_k, "include_content": include_content},
+            extra=extra,
         )
         raise
+    finally:
+        observability.log_relevance_cost(usage)
 
 
 def _search_cut_once(payload: dict) -> bool:
@@ -736,6 +792,8 @@ def _search_cut_once(payload: dict) -> bool:
         truncated = dict(payload.get("truncated") or {})
         truncated["results"] = truncated.get("results", 0) + 1
         payload["truncated"] = truncated
+        if "omitted" in payload:
+            payload["omitted"]["budget"] = truncated["results"]
         warnings = set(payload.get("warnings") or [])
         warnings.add("truncated_for_budget")
         payload["warnings"] = sorted(warnings)
@@ -753,13 +811,16 @@ def _search_minimal_envelope(payload: dict) -> dict:
     total_results = len(payload.get("results") or []) + already_truncated
     warnings = set(payload.get("warnings") or [])
     warnings.add("truncated_for_budget")
-    return {
+    minimal = {
         "results": [],
         "total_chunks_searched": payload.get("total_chunks_searched"),
         "query_time_ms": payload.get("query_time_ms"),
         "truncated": {"results": total_results},
         "warnings": sorted(warnings),
     }
+    if "omitted" in payload:
+        minimal["omitted"] = {**payload["omitted"], "budget": total_results}
+    return minimal
 
 
 def assemble_search_payload(
@@ -894,6 +955,103 @@ def assemble_search_payload(
     return response
 
 
+def prepare_search_delivery(
+    storage: StorageBackend,
+    manifest: IndexManifest,
+    outcome: SearchOutcome,
+    *,
+    query: str = "",
+    top_k: int = 10,
+    include_content: bool = False,
+    profile: str = "full",
+    query_time_ms: float = 0.0,
+    budget: Optional[response_budget.ResponseBudget] = None,
+    optimization_stage: str = "selection",
+    relevance_usage: Optional[RelevanceUsage] = None,
+) -> tuple[str, response_budget.ResponseMeasurement]:
+    """Montagem única para MCP e avaliação; não recupera nem avalia candidatos."""
+    if profile not in {"full", "compact"} or optimization_stage not in {"projection", "dedup", "selection"}:
+        raise ValueError("Perfil ou estágio de entrega inválido")
+    relevance_usage = relevance_usage if relevance_usage is not None else RelevanceUsage(search_id="delivery")
+    results = list(outcome.results)
+    warnings = list(outcome.warnings or [])
+    pool = getattr(outcome, "candidate_pool", None)
+    recovered = list(pool) if pool is not None else list(results)
+    local_fallback = getattr(outcome, "local_fallback", None) or recovered
+
+    omitted = {"redundancy": 0, "relevance": 0, "budget": 0}
+
+    if profile == "compact":
+        candidates = recovered if optimization_stage != "projection" else results
+        results = list(candidates)
+        evaluations = getattr(outcome, "pool_evaluations", None) or outcome.evaluations
+        if evaluations and optimization_stage == "selection":
+            selected = select_conservative(
+                results, query, evaluations, top_k=len(results),
+                local_fallback=local_fallback,
+            )
+            results = selected.results
+            omitted["relevance"] = selected.removed_by_relevance
+            warnings.extend(selected.warnings)
+        if optimization_stage != "projection":
+            deduped = deduplicate_results(results)
+            results = deduped.results
+            omitted["redundancy"] = deduped.removed_by_redundancy
+        results = results[:top_k]
+        if pool is not None and optimization_stage != "projection":
+            results = storage._merge_typed(results, outcome.history_candidates, top_k)
+        record_selection_usage(
+            relevance_usage,
+            recovered=recovered,
+            selected=results,
+            removed_by_redundancy=omitted["redundancy"],
+            removed_by_relevance=omitted["relevance"],
+        )
+        items, envelope_repo = project_compact_search_results(
+            results,
+            include_content=include_content,
+            file_hashes=manifest.files,
+        )
+        response = compact_search_envelope(
+            results=items,
+            repo=envelope_repo,
+            warnings=warnings,
+            omitted=omitted,
+            total_chunks_searched=manifest.total_chunks,
+        )
+        budget = budget or response_budget.ResponseBudget(
+            "search",
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS,
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS,
+        )
+    else:
+        response = assemble_search_payload(
+            storage,
+            results,
+            manifest,
+            include_content=include_content,
+            query_time_ms=query_time_ms,
+            warnings=warnings,
+        )
+        budget = budget or response_budget.ResponseBudget(
+            "search",
+            RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+            RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+            RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+        )
+
+    text, measurement = response_budget.finalize_response(
+        response,
+        budget,
+        cut_once=_search_cut_once,
+        minimal_envelope=_search_minimal_envelope,
+    )
+    relevance_usage.bytes_delivered = measurement.bytes
+    relevance_usage.removed_by_budget = (json.loads(text).get("truncated") or {}).get("results", 0)
+    return text, measurement
+
+
 def _atlas_search_impl(
     query: str,
     top_k: int,
@@ -903,7 +1061,9 @@ def _atlas_search_impl(
     include_content: bool,
     limit: Optional[int],
     structural: bool,
+    response_profile: str,
     ctx: "Context | None",
+    relevance_usage,
     _obs_start: float,
 ) -> str:
     start_time = time.time()
@@ -918,6 +1078,8 @@ def _atlas_search_impl(
     # Validação do limite de resultados [V02, L01]
     if top_k < 1 or top_k > 50:
         raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
+
+    profile = resolve_response_profile(response_profile)
 
     _resolve_index_dir_via_roots(ctx)
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
@@ -944,34 +1106,17 @@ def _atlas_search_impl(
         filters=filters,
         top_k=top_k,
         structural=structural,
+        relevance_usage=relevance_usage,
+        include_candidates=(profile == "compact"),
     )
-    results = outcome.results
-
-    query_time_ms = (time.time() - start_time) * 1000
-    manifest = storage.get_manifest()
-
-    response = assemble_search_payload(
-        storage,
-        results,
-        manifest,
-        include_content=include_content,
-        query_time_ms=query_time_ms,
-        warnings=outcome.warnings,
-    )
-
-    budget = response_budget.ResponseBudget(
-        "search",
-        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
-        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
-        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
-    )
-    text, _measurement = response_budget.finalize_response(
-        response,
-        budget,
-        cut_once=_search_cut_once,
-        minimal_envelope=_search_minimal_envelope,
+    text, measurement = prepare_search_delivery(
+        storage, storage.get_manifest(), outcome, query=query, top_k=top_k,
+        include_content=include_content, profile=profile,
+        query_time_ms=(time.time() - start_time) * 1000,
+        relevance_usage=relevance_usage,
     )
     final = json.loads(text)
+    omitted_budget = relevance_usage.removed_by_budget
     return _finish_observed(
         "atlas_search",
         _obs_start,
@@ -979,10 +1124,12 @@ def _atlas_search_impl(
         extra={
             "top_k": top_k,
             "include_content": include_content,
+            "response_profile": profile,
             "results_returned": len(final.get("results") or []),
-            "results_omitted": (final.get("truncated") or {}).get("results", 0),
+            "results_omitted": omitted_budget,
             "warnings": final.get("warnings") or [],
             "truncated": bool(final.get("truncated")),
+            "relevance_usage": public_usage_fields(relevance_usage),
         },
     )
 
@@ -1093,6 +1240,7 @@ def _atlas_graph_impl(
 def atlas_context(
     target: str,
     intent: str,
+    response_profile: str = "default",
     ctx: "Context | None" = None,
 ) -> str:
     """
@@ -1103,9 +1251,16 @@ def atlas_context(
     inferred tests and brief layer under a token budget so you do not need
     to chain atlas_graph / atlas_brief / atlas_search yourself.
 
+    Omit response_profile to respect the operator configuration. An explicit
+    "full" overrides ATLAS_CONTEXT_OPTIMIZATION; use it only when requested or
+    when the full representation is required.
+
     Args:
         target: Node id, exact label, or unique suffix (same resolution as atlas_graph).
         intent: One of `edit`, `debug`, `review`, or `understand`.
+        response_profile: `default` follows ATLAS_CONTEXT_OPTIMIZATION; `full` keeps
+            the current format; `compact` drops duplicated target/symbol and
+            layer/brief_layer representations. Does not call Jev.
 
     Returns:
         JSON string with `target`, `intent`, `sections`, optional `truncated`,
@@ -1120,14 +1275,18 @@ def atlas_context(
     # @MindSpec: Input target+intent | Output JSON ≤ CONTEXT_RESPONSE_MAX_CHARS | Error ValueError / índice ausente
     _obs_start = time.monotonic()
     try:
-        return _atlas_context_impl(target, intent, ctx, _obs_start)
+        return _atlas_context_impl(target, intent, response_profile, ctx, _obs_start)
     except Exception as e:
         _finish_observed_error("atlas_context", _obs_start, e, extra={"intent": intent})
         raise
 
 
 def _atlas_context_impl(
-    target: str, intent: str, ctx: "Context | None", _obs_start: float
+    target: str,
+    intent: str,
+    response_profile: str,
+    ctx: "Context | None",
+    _obs_start: float,
 ) -> str:
     _resolve_index_dir_via_roots(ctx)
 
@@ -1138,6 +1297,7 @@ def _atlas_context_impl(
             "O parâmetro 'intent' deve ser 'edit', 'debug', 'review' ou 'understand'."
         )
 
+    profile = resolve_response_profile(response_profile)
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     if not storage.exists():
         raise _index_not_found_error(storage)
@@ -1156,13 +1316,21 @@ def _atlas_context_impl(
         history_lookup=storage.lookup_commits,
         history_state=storage.get_history_state(),
     )
-
-    budget = response_budget.ResponseBudget(
-        "context",
-        CONTEXT_RESPONSE_MAX_CHARS,
-        CONTEXT_RESPONSE_MAX_CHARS,
-        RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
-    )
+    if profile == "compact":
+        payload = compact_context_payload(payload)
+        budget = response_budget.ResponseBudget(
+            "context",
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS,
+        )
+    else:
+        budget = response_budget.ResponseBudget(
+            "context",
+            CONTEXT_RESPONSE_MAX_CHARS,
+            CONTEXT_RESPONSE_MAX_CHARS,
+            RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
+        )
     text, _measurement = response_budget.finalize_response(
         payload, budget, cut_once=context_cut_once, minimal_envelope=context_minimal_envelope
     )
@@ -1173,8 +1341,243 @@ def _atlas_context_impl(
         text,
         extra={
             "intent": intent,
+            "response_profile": profile,
             "warnings": final.get("warnings") or [],
             "truncated": bool(final.get("truncated")),
+        },
+    )
+
+
+@app.tool()
+def atlas_expand(
+    refs: list[str],
+    include_content: bool = True,
+    ctx: "Context | None" = None,
+) -> str:
+    """
+    Expand compact search references by chunk id — no embedding and no Jev.
+
+    Pass up to five `ref` values from a compact `atlas_search` response. Each ref
+    identifies a chunk in the current index (not a historical snapshot).
+    Legacy Base64 references are also supported. If the file changed or the
+    chunk is gone, the item is marked obsolete without returning stale lines.
+    Content comes from the original symbol's indexed line range, including text
+    truncated during indexing. If content_complete is false, pass next_ref to
+    atlas_expand again and concatenate content in content_range order (character
+    offsets, exclusive end). Continue until content_complete is true. Continuations
+    are tied to the file hash and need no session cache.
+
+    Args:
+        refs: Search refs or next_ref continuations from expansion (max 5).
+        include_content: When true (default), include symbol content when it fits
+            the search response budget.
+
+    Returns:
+        JSON with `results` (location, optional content, optional obsolescence
+        warnings) and `budget`.
+    """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_expand_impl(refs, include_content, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error(
+            "atlas_expand",
+            _obs_start,
+            e,
+            extra={"refs_count": len(refs) if isinstance(refs, list) else 0},
+        )
+        raise
+
+
+def prepare_expand_delivery(
+    storage: StorageBackend, workspace: Path, refs: list[str], *, include_content: bool = True,
+    budget: Optional[response_budget.ResponseBudget] = None,
+) -> tuple[str, response_budget.ResponseMeasurement]:
+    """Mesma validação e serialização para expansões no MCP e no benchmark."""
+    from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
+
+    validate_expand_refs(refs)
+    workspace = workspace.resolve()
+    manifest = storage.get_manifest()
+    items: list[dict] = []
+    warnings: list[str] = []
+
+    for ref in refs:
+        decoded = decode_expand_ref(ref)
+        if decoded is None:
+            items.append({"ref": ref, "status": "invalid_ref"})
+            warnings.append("expand_invalid_ref")
+            continue
+        chunk = storage.get_chunk_by_id(decoded["chunk_id"])
+        if chunk is None:
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "obsolete",
+                    "reason": "chunk_missing",
+                }
+            )
+            warnings.append("expand_obsolete")
+            continue
+        rel_path = chunk["file_path"]
+        abs_path = (workspace / rel_path).resolve()
+        if not abs_path.is_relative_to(workspace):
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "forbidden",
+                    "reason": "path_outside_workspace",
+                }
+            )
+            warnings.append("expand_path_outside_workspace")
+            continue
+        try:
+            source_bytes = abs_path.read_bytes()
+        except OSError:
+            source_bytes = None
+        current_hash = hashlib.sha256(source_bytes).hexdigest() if source_bytes is not None else None
+        expected = manifest.files.get(rel_path)
+        legacy_mismatch = (
+            decoded["file_hash"] is not None
+            and (decoded["file_hash"] != current_hash
+                 or (decoded["repo"] is not None and decoded["repo"] != chunk.get("repo")))
+        )
+        if not expected or current_hash != expected or legacy_mismatch:
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "obsolete",
+                    "reason": "file_changed",
+                    "file_path": rel_path,
+                    "lines": [chunk["start_line"], chunk["end_line"]],
+                    "symbol": chunk["scope_name"],
+                }
+            )
+            warnings.append("expand_obsolete")
+            continue
+
+        entry: dict[str, Any] = {
+            "ref": ref,
+            "status": "ok",
+            "file_path": rel_path,
+            "lines": [chunk["start_line"], chunk["end_line"]],
+            "symbol": chunk["scope_name"],
+            "type": chunk["scope_type"],
+            "repo": chunk.get("repo"),
+        }
+        if include_content:
+            # Hash e conteúdo vêm dos mesmos bytes; não há segunda leitura sujeita a corrida.
+            assert source_bytes is not None
+            try:
+                source_lines = source_bytes.decode("utf-8").splitlines(keepends=True)
+            except UnicodeDecodeError:
+                items.append({"ref": ref, "status": "unavailable", "reason": "invalid_encoding"})
+                warnings.append("expand_invalid_encoding")
+                continue
+            start, end = chunk["start_line"], chunk["end_line"]
+            # Tree-sitter pode terminar no início da linha vazia após a última quebra.
+            if source_bytes.endswith(b"\n"):
+                source_lines.append("")
+            if start < 1 or end < start or end > len(source_lines):
+                items.append({"ref": ref, "status": "obsolete", "reason": "invalid_line_range"})
+                warnings.append("expand_obsolete")
+                continue
+            content = "".join(source_lines[start - 1:end])
+            offset = decoded.get("offset", 0)
+            if offset > len(content) or (offset and offset == len(content)):
+                items.append({"ref": ref, "status": "invalid_ref", "reason": "invalid_offset"})
+                warnings.append("expand_invalid_ref")
+                continue
+            entry["content"] = content[offset:]
+            entry["content_range"] = [offset, len(content)]
+            entry["content_complete"] = True
+
+        refs_json = chunk.get("references_json")
+        if refs_json:
+            rationale_refs = []
+            for raw_ref in decode_references_json(refs_json):
+                rationale_ref = deserialize_rationale_ref(raw_ref)
+                if rationale_ref is None:
+                    continue
+                if rationale_ref.kind == "annotation":
+                    rationale_refs.append(
+                        {
+                            "kind": "annotation",
+                            "key": rationale_ref.key,
+                            "text": rationale_ref.text,
+                        }
+                    )
+                else:
+                    rationale_refs.append(
+                        {"kind": rationale_ref.kind, "key": rationale_ref.key}
+                    )
+            if rationale_refs:
+                entry["rationale_refs"] = rationale_refs
+        items.append(entry)
+
+    payload: dict[str, Any] = {"results": items}
+    if warnings:
+        payload["warnings"] = sorted(set(warnings))
+
+    budget = budget or response_budget.ResponseBudget(
+        "search",
+        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+    )
+    def cut_page(payload: dict) -> bool:
+        candidates = [item for item in payload["results"] if len(item.get("content", "")) > 1]
+        if not candidates:
+            return _search_cut_once(payload)
+        item = max(candidates, key=lambda item: len(item["content"]))
+        content = item["content"]
+        stop = len(content) // 2
+        # Prefere uma quebra de linha; linhas gigantes continuam por caracteres Unicode.
+        newline = content.rfind("\n", 0, stop)
+        if newline >= stop // 2:
+            stop = newline + 1
+        item["content"] = content[:stop]
+        item["content_range"][1] = item["content_range"][0] + stop
+        item["content_complete"] = False
+        decoded = decode_expand_ref(item["ref"])
+        assert decoded is not None
+        file_hash = manifest.files[item["file_path"]]
+        item["next_ref"] = f'{decoded["chunk_id"]}:{file_hash}:{item["content_range"][1]}'
+        payload["warnings"] = sorted(set(payload.get("warnings", [])) | {"expand_more_available"})
+        return True
+
+    text, _measurement = response_budget.finalize_response(
+        payload,
+        budget,
+        cut_once=cut_page,
+        minimal_envelope=_search_minimal_envelope,
+    )
+    return text, _measurement
+
+
+def _atlas_expand_impl(
+    refs: list[str],
+    include_content: bool,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
+    _resolve_index_dir_via_roots(ctx)
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+    text, _measurement = prepare_expand_delivery(
+        storage, _index_workspace_root(), refs, include_content=include_content,
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_expand",
+        _obs_start,
+        text,
+        extra={
+            "refs_count": len(refs),
+            "include_content": include_content,
+            "results_returned": len(final.get("results") or []),
+            "warnings": final.get("warnings") or [],
         },
     )
 

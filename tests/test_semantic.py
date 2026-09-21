@@ -118,7 +118,7 @@ def test_origin_api_com_model_usa_contrato_openai_compativel(monkeypatch):
         captured["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr("codesteer_atlas.origin.urlopen", fake_urlopen)
+    monkeypatch.setattr("codesteer_atlas.http_transport.urlopen", fake_urlopen)
     resolver = OriginResolver(
         environ={
             "ATLAS_SEMANTIC_API_URL": "https://openrouter.ai/api/v1/chat/completions",
@@ -157,7 +157,7 @@ def test_origin_api_sem_model_preserva_payload_legado(monkeypatch):
         captured["payload"] = json.loads(request.data)
         return FakeResponse()
 
-    monkeypatch.setattr("codesteer_atlas.origin.urlopen", fake_urlopen)
+    monkeypatch.setattr("codesteer_atlas.http_transport.urlopen", fake_urlopen)
     resolver = OriginResolver(environ={"ATLAS_SEMANTIC_API_URL": "https://api.example"})
     payload = {"prompt": "p", "content": "c", "scope_name": "run"}
 
@@ -166,6 +166,39 @@ def test_origin_api_sem_model_preserva_payload_legado(monkeypatch):
     assert result is not None
     assert result.text == "proposito legado"
     assert captured["payload"] == payload
+
+
+def test_origin_preserva_resposta_textual_nao_json(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"proposito em texto puro"
+
+    monkeypatch.setattr("codesteer_atlas.http_transport.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    resolver = OriginResolver(environ={"ATLAS_SEMANTIC_API_URL": "https://api.example"})
+    result = resolver.generate({"prompt": "p", "content": "c"})
+    assert result is not None
+    assert result.text == "proposito em texto puro"
+
+
+def test_origin_http_nao_restringe_redirect_nem_teto_de_resposta(monkeypatch):
+    captured = {}
+
+    def fake_post(url, payload, **kwargs):
+        captured.update(kwargs)
+        return '{"text":"ok"}'
+
+    monkeypatch.setattr("codesteer_atlas.origin.post_json", fake_post)
+    resolver = OriginResolver(environ={"ATLAS_SEMANTIC_API_URL": "https://api.example"})
+    resolver.generate({"content": "c"})
+    assert captured.get("allow_redirects", True) is True
+    assert captured.get("max_response_bytes") is None
+    assert captured["timeout_s"] == 30.0
 
 
 def test_sidecar_acumula_origins_e_egresses_dos_sumarios(tmp_path):

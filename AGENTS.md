@@ -61,6 +61,13 @@ Para APIs OpenAI-compatible, `ATLAS_SEMANTIC_MODEL` troca o request para `model`
 `messages`; OpenRouter usa `ATLAS_SEMANTIC_API_URL`, `ATLAS_SEMANTIC_API_KEY` e o
 slug explícito do modelo, sem provider default.
 
+## Avaliador de relevância Jev e perfil compacto
+
+`ATLAS_RELEVANCE=1` opt-in (default off). Reordena o pool pós-RRF via OpenRouter
+System One; lotes ≤24 KB (máx. 2 chamadas). `ATLAS_CONTEXT_OPTIMIZATION=1`
+(opt-in, independente) faz `response_profile=default` resolver para compacto;
+`atlas_expand` recupera refs. Detalhes em [CLAUDE.md](CLAUDE.md).
+
 ## Cursor Cloud specific instructions
 
 Pure-Python package managed by `uv` (Python 3.11–3.13). Standard commands live in `CLAUDE.md`; the startup update script already runs `uv sync --group dev`, so deps are ready.
@@ -71,3 +78,12 @@ Pure-Python package managed by `uv` (Python 3.11–3.13). Standard commands live
 - First `atlas-index` run downloads the fastembed ONNX model (`all-MiniLM-L6-v2`) and needs one-time network access; subsequent runs are fully offline.
 - Point a running server at an existing index with `ATLAS_INDEX_DIR=/workspace/.code-index` (or `--index-dir`); otherwise it falls back to `.code-index` relative to CWD (see `resolve_index_dir()` in `server.py`).
 - Lint: `uv run --with ruff ruff check` pulls an unpinned ruff. Newer ruff (0.16.x) flags many pre-existing style findings that the pinned CI ruff (see `.github/workflows/ci.yml`) does not; treat lint drift as pre-existing, not something you introduced.
+
+
+<!-- atlas:response-profile -->
+Em `atlas_search` e `atlas_context`, **omita `response_profile`** normalmente
+(ou use `default`) para respeitar `ATLAS_CONTEXT_OPTIMIZATION` do operador.
+Não envie `full` por rotina: ele sobrescreve a flag mesmo quando está ligada.
+Use `full` apenas se solicitado ou se precisar de campos ausentes no compacto;
+para obter conteúdo de um resultado compacto, prefira `atlas_expand(refs)`.
+<!-- /atlas:response-profile -->
