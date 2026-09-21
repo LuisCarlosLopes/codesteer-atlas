@@ -14,7 +14,7 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 ## Funcionalidades
 
 - **Indexação por AST (Tree-sitter)**: chunks por classe/função/método, não por blocos arbitrários de linhas.
-- **Busca híbrida**: similaridade vetorial + BM25, fundidas via RRF.
+- **Busca híbrida**: similaridade vetorial + BM25, fundidas via [RRF](#rrf-e-mrr).
 - **Indexação incremental**: só arquivos novos/alterados (hash sha256).
 - **Embeddings locais**: `all-MiniLM-L6-v2` (384 dims) via `fastembed`, com lazy loading.
 - **Grafo de conhecimento**: `.code-index/graph.json` + visualizador `graph.html` (abre via `file://`).
@@ -25,6 +25,7 @@ Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embe
 - **Rationale em código**: `NOTE`/`WHY`, cites `DEC`/`ADR`/`RFC` e wikilinks nos resultados de busca.
 - **Multi-linguagem**: Python, JS/TS, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
 - **Observabilidade de tokens opt-in**: `ATLAS_OBSERVABILITY=1` mede a resposta de cada tool (chars/bytes/tokens) e aplica teto global em `atlas_search` (as demais já tinham teto de caracteres). Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional).
+- **Avaliador Jev opt-in**: `ATLAS_RELEVANCE=1` reordena o pool pós-RRF e, no perfil compacto, descarta só irrelevantes de alta confiança. A queda de tokens medida vem da entrega compacta. Detalhes e números: [Avaliador de relevância Jev](#avaliador-de-relevância-jev-opcional).
 
 ### Camada semântica opcional
 
@@ -133,6 +134,111 @@ tokenizer da observabilidade nem o custo de indexação F4. `ATLAS_OBSERVABILITY
 só copia o ledger para o evento JSONL já existente. Logs nunca incluem query,
 código, paths ou a chave.
 
+#### Como o Jev atua na resposta
+
+O Jev recebe a consulta e os candidatos do pool pós-RRF e devolve, por
+candidato, um score de relevância e uma confiança. Isso acontece antes do
+corte `top_k` e do merge com commits. O `score` que a tool devolve continua
+sendo o RRF.
+
+1. **Reordena o que já foi recuperado.** Avaliação confiante ocupa as posições
+   livres, da maior para a menor. Correspondência exata de símbolo permanece
+   na frente, na ordem RRF. Avaliação incerta ou ausente fica onde o ranking
+   local a colocou.
+2. **Descarta só o irrelevante inequívoco, e só no perfil compacto.** Sai o
+   candidato com score ≤ 0,25 e confiança ≥ 0,90. O restante permanece. Se a
+   seleção esvaziar o pool, volta o primeiro candidato do ranking local, com
+   o aviso `relevance_unconfirmed_fallback`.
+3. **Falha devolve o ranking local** daquele lote (timeout, HTTP ou schema
+   inválido). `ATLAS_RERANK=0` impede a chamada.
+
+O agente passa a ver primeiro o trecho que o Jev julgou mais útil para a
+consulta. `ranking_changed` registra mudança de ordem e
+`removed_by_relevance` conta os descartes. `status=success` significa que o
+contrato da resposta foi aceito.
+
+#### RRF e MRR
+
+**RRF** (Reciprocal Rank Fusion) junta as duas listas da busca híbrida: a do
+vetor (cosseno dos embeddings) e a do BM25 (texto). Os scores dessas listas
+estão em escalas diferentes, então a fusão usa só a posição de cada trecho:
+
+```text
+RRF(trecho) = soma, em cada lista, de 1 / (60 + posição)
+```
+
+A posição começa em 0: o 1º lugar de uma lista vale 1/60, o 2º vale 1/61.
+Um trecho em 1º nas duas listas soma as duas contribuições; um que aparece
+só numa lista recebe só a dela. O 60 é a constante `RRF_K`. O `score` que
+`atlas_search` devolve é esse valor. O Jev reordena o pool depois da fusão.
+
+**MRR** (Mean Reciprocal Rank) mede se o trecho certo apareceu perto do topo.
+Para cada consulta do conjunto de teste, a contribuição é `1 / posição` do
+primeiro acerto:
+
+| Posição do acerto | Contribuição |
+| --- | ---: |
+| 1º | 1,00 |
+| 2º | 0,50 |
+| 5º | 0,20 |
+| ausente | 0 |
+
+O MRR é a média dessas contribuições. **1,0** significa que o alvo foi sempre
+o primeiro. **0,43**, como nas 28 consultas abaixo, significa que o alvo
+costuma aparecer, em geral fora do topo. O **recall@5** registra só se o alvo
+entrou nos cinco primeiros; o MRR também penaliza quando ele entra tarde.
+
+#### Evidência: ordem da resposta e tamanho do contexto
+
+A queda de tokens reproduzida no golden set é da **projeção compacta**, com
+o Jev desligado. O Jev muda a ordem (e, no compacto, pode tirar um irrelevante
+de alta confiança). As duas coisas se medem separadas.
+
+**Contexto, Jev desligado.** 28 consultas, 2.480 chunks, mesma recuperação,
+`relevance.requests = 0`. Fonte:
+[`tests/eval/context_delivery_20260921.json`](tests/eval/context_delivery_20260921.json).
+
+| Entrega de `atlas_search` | Tokens | MRR | Recall@5 |
+| --- | ---: | ---: | ---: |
+| Metadados, perfil full | 32.336 | 0,4307 | 0,5714 |
+| Metadados, projeção compacta | 21.977 | 0,4307 | 0,5714 |
+| Conteúdo incluso, perfil full | 79.784 | 0,4307 | 0,5714 |
+| Conteúdo incluso, projeção compacta | 69.403 | 0,4307 | 0,5714 |
+
+A projeção compacta em metadados entregou **32,0% menos tokens** (32.336 →
+21.977) com MRR e recall@5 iguais. Deduplicação e seleção ficaram ambas em
+22.100 tokens: sem chamada ao Jev, a seleção não cortou candidato além da
+deduplicação. O menor contexto é metadados compactos mais `atlas_expand` só
+no símbolo que falta.
+
+**Jev ligado, mesma avaliação para todas as variantes.** Modelo
+`typesafe/jev-1.13-20260917`, rubrica `jev-relevance-score-v1`. Fonte:
+[`tests/eval/context_policy_20260921.md`](tests/eval/context_policy_20260921.md).
+Nas 28 consultas e nos 12 cenários, baseline e gate tiveram o mesmo MRR e o
+mesmo recall@5:
+
+| Classe | MRR | Recall@5 |
+| --- | ---: | ---: |
+| Linguagem natural | 0,1292 | 0,375 |
+| Símbolo exato | 1,0000 | 1,000 |
+| Identificador parcial | 0,4345 | 0,750 |
+| Entre arquivos | 0,0000 | 0,000 |
+
+O gate evita a chamada quando a consulta já é um símbolo exato único no pool:
+14 de 56 chamadas nas 28 consultas, US$ 0,003150882 contrafactuais (25,5% do
+custo dessa rodada). MRR e recall permaneceram os da tabela. Linguagem natural
+e relação entre arquivos continuam as classes fracas. A mediana do estágio
+remoto foi 1,26 s (p50 1.264,666 ms; p95 1.371,144 ms).
+
+Nessa mesma rodada, o encolhimento adicional veio do lote de expansão. Em
+metadados, abrir dois símbolos por vez em vez de cinco passou de 42.268 para
+39.260 tokens (−7,12%), com expansões de 16 para 31 e os mesmos 6/12 cenários
+completos. Três execuções somaram 106 chamadas e **US$ 0,023391144**, com
+todos os custos conhecidos.
+
+A comparação publicada é gate contra Jev sempre ligado, no mesmo ranking.
+MRR do Jev contra o rerank local, no mesmo índice, continua por medir.
+
 ### Dispensa de Jev para símbolo exato (opcional)
 
 `ATLAS_RELEVANCE_GATE=1` dispensa a chamada remota quando a consulta é um nome
@@ -229,8 +335,10 @@ compactação local; o benchmark respeita a configuração do avaliador.
 
 #### Resultado observado com expansão progressiva
 
-Em duas execuções da mesma tarefa no Cursor, o agente passou a abrir dois símbolos e depois mais um,
-em vez de cinco de uma vez:
+Em duas execuções da mesma tarefa no Cursor, o agente passou a abrir dois
+símbolos e depois mais um, em vez de cinco de uma vez. A medição controlada
+das 28 consultas está em
+[Evidência: ordem da resposta e tamanho do contexto](#evidência-ordem-da-resposta-e-tamanho-do-contexto).
 
 | Métrica | Execução anterior | Expansão progressiva |
 | --- | ---: | ---: |
@@ -248,7 +356,7 @@ tokenizador do Atlas e medem respostas das ferramentas, não o consumo total ou
 o faturamento do agente. Não é uma comparação controlada nem uma economia
 garantida: consultas, candidatos e operações podem variar entre execuções.
 
-A execução  custou **US$ 0,000553644** em Jev, com todos os custos
+A execução custou **US$ 0,000553644** em Jev, com todos os custos
 conhecidos e três símbolos entregues completos, sem truncamento ou referências
 obsoletas. A anterior teve uma tentativa com custo desconhecido, portanto não
 permite calcular a redução percentual do custo total. Nenhuma busca registrou
@@ -465,7 +573,7 @@ leitura pontual; para entender seu contexto e relações, prefira `atlas_context
 
 ## Como funciona
 
-O Atlas divide cada arquivo em `CodeChunk`s no nível de símbolo via Tree-sitter, gera embeddings locais e indexa em LanceDB (vetorial + BM25 / RRF):
+O Atlas divide cada arquivo em `CodeChunk`s no nível de símbolo via Tree-sitter, gera embeddings locais e indexa em LanceDB (vetorial + BM25, fundidos por [RRF](#rrf-e-mrr)):
 
 ```
 src/auth/service.py
