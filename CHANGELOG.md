@@ -7,8 +7,73 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Changed
+
+- `AGENTS.md` é a única fonte das instruções de agente e da arquitetura;
+  `CLAUDE.md` apenas importa esse arquivo.
+
+### Fixed
+
+- Orientação de expansão começa com uma ou duas refs e exige lacuna de evidência
+  para abrir mais; continuações deixam de recomendar leitura integral automática.
+
+- `atlas_expand` recupera o intervalo original do símbolo, inclusive conteúdo
+  truncado no índice, validando hash e caminho. Respostas grandes oferecem
+  `next_ref` sem cache, vinculado ao hash, e offsets de conteúdo; continuações
+  após alteração do arquivo são rejeitadas. O harness segue as páginas e só
+  contabiliza evidência completa após receber a cadeia inteira.
+- [Avaliação pareada de expansão](tests/eval/expansion_delivery_20260921.md):
+  6/12 cenários completos contra 2/12 com conteúdo indexado; comparação inclui
+  busca e expansões, sem chamadas Jev.
+
+- Orientação de ferramentas e agentes esclarece que `response_profile=full`
+  sobrescreve a flag de compactação; chamadas normais devem omitir o parâmetro.
+
+- Perfil compacto usa `chunk_id` curto e mantém expansão de referências Base64
+  antigas, validando manifesto, hash atual e isolamento do workspace. A seleção
+  considera o pool antes do `top_k`, preserva incertos e exatos e usa fallback
+  local quando tudo é rejeitado. Defaults e limiares Jev permanecem iguais.
+- Servidor e harness compartilham montagem e finalização; contadores de omissão
+  entram antes do corte definitivo. Telemetria mede o texto retornado e distingue
+  sucesso de processamento de mudança de ranking. Benchmark separa projeção,
+  deduplicação e seleção e contabiliza expansões e evidências incompletas.
+- [Medição em 28 consultas](tests/eval/context_delivery_20260921.md): perfil
+  compacto final reduziu 31,66% dos tokens de metadados e 12,21% com conteúdo,
+  mantendo MRR/recall por classe sobre os mesmos candidatos (Jev desligado).
+
 ### Added
 
+- `ATLAS_RELEVANCE_GATE` opt-in (default off) evita Jev para função, método ou
+  classe de nome exato único no pool, mantendo promoção determinística do alvo.
+  Configuração aparece no status e motivo de dispensa no ledger sem custo remoto.
+- Orientação de expansão seletiva (um ou dois símbolos por necessidade) e harness
+  pareado de gate/expansão em lotes de 5, 2 e 1. Uma avaliação remota por consulta;
+  custos contrafactuais separados dos reais, com parada em custo desconhecido.
+  [Avaliação pareada](tests/eval/context_policy_20260921.md): 7,63% menos tokens
+  em metadados com gate e lote dois, com mais chamadas de expansão; métricas
+  de qualidade iguais entre variantes, com lacunas explicitadas por classe.
+
+- **Perfil compacto de contexto** (`ATLAS_CONTEXT_OPTIMIZATION`, default False):
+  `atlas_search` e `atlas_context` aceitam `response_profile`
+  (`default`|`compact`|`full`). No compacto: projeção enxuta com `ref` de
+  expansão, deduplicação conservadora por cobertura de conteúdo, orçamento a
+  70% do teto vigente e, com Jev ligado, seleção que só remove candidatos com
+  score ≤ 0,25 e confiança ≥ 0,90. Nova tool `atlas_expand` resolve até 5 refs
+  por id no índice (sem embedding/Jev), valida hash do arquivo e path no
+  workspace. Independente de `ATLAS_RELEVANCE`. Exemplo MCP default OFF.
+- **Avaliador opcional de relevância Jev** (`ATLAS_RELEVANCE`, default False):
+  quando ligado, `atlas_search` envia a consulta e os candidatos do pool
+  pós-RRF à API System One do OpenRouter e reordena por evidência antes do
+  `top_k` e do orçamento existentes. Lotes de até 24 KB (máx. 2 chamadas,
+  timeout compartilhado de 3 s); baixa confiança isola o candidato sem
+  invalidar o lote. Falha de contrato ou timeout volta ao reranker local
+  para o lote afetado. Cada busca emite uma linha JSON de custo em stderr
+  (conhecido, parcialmente conhecido, zero sem chamada, ou desconhecido);
+  `atlas_status.relevance` declara configuração sem rede.
+  `ATLAS_RERANK=0` continua desligando toda reordenação.
+  Modelo via `ATLAS_RELEVANCE_MODEL` (default `~typesafe/jev-latest`; pin
+  versionado `typesafe/jev-1.13` permanece aceito). `probabilities` de Score
+  segue o contrato TypeSafe (chaves `"0"`..`"n-1"` + `legend`).
 - Guia de primeiros passos em português, com configuração por editor, primeira
   busca e ajuda com erros comuns, acessível pelo README e pela documentação visual.
 - **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):

@@ -467,3 +467,29 @@ def test_last_by_tool_limited_to_known_tools(tmp_path, monkeypatch):
         "atlas_brief",
         "atlas_graph",
     }
+
+
+def test_log_relevance_cost_nunca_propaga_e_nao_grava_jsonl(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("ATLAS_OBSERVABILITY", raising=False)
+    from codesteer_atlas.relevance import new_usage
+
+    usage = new_usage()
+    usage.cost_status = "reported"
+    usage.cost_usd = 0.01
+    obs.log_relevance_cost(usage)
+    err = capsys.readouterr().err
+    assert "relevance_cost" in err
+    assert not (tmp_path / OBSERVABILITY_DIRNAME).exists()
+
+
+def test_log_relevance_cost_falha_de_sink_nao_substitui_negocio(monkeypatch, capsys):
+    from codesteer_atlas.relevance import new_usage
+
+    usage = new_usage()
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("print falhou")
+
+    monkeypatch.setattr("codesteer_atlas.observability.json.dumps", boom)
+    obs.log_relevance_cost(usage)
+    assert "Falha ao registrar custo de relevância" in capsys.readouterr().err

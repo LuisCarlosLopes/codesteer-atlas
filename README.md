@@ -1,161 +1,57 @@
 # CodeSteer Atlas
 
-Servidor MCP local para busca semântica em código. Usa Tree-sitter (AST), embeddings locais (`fastembed`/ONNX) e LanceDB. Tudo roda **100% offline** — o código-fonte nunca sai da sua máquina.
+O assistente do seu editor encontra o trecho certo do seu projeto, na sua máquina. O Atlas indexa o código uma vez e entrega ao agente o símbolo, o contexto da tarefa e o alcance de uma mudança.
 
-### Documentação
+Na configuração padrão, indexação e busca acontecem no seu computador. O código permanece local. A instalação vem do GitHub pelo [uv](https://github.com/astral-sh/uv); clonar este repositório fica para quem desenvolve o Atlas.
 
-**Primeira vez por aqui?** Siga o [guia de primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html): prepare o Atlas, conecte seu editor e faça a primeira busca, com exemplos para copiar. [Abrir a versão local](docs/primeiros-passos.html) no navegador.
+**Primeira vez?** O [guia de primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html) acompanha a preparação, a conexão e a primeira busca, com exemplos para copiar. [Abrir a versão local](docs/primeiros-passos.html).
 
-| Recurso | Descrição |
-| -------- | ---------- |
-| 📖 [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/) | Conceitos MCP, busca híbrida e indexação |
-| 📘 [Guia didático — Indexação, Grafo e MCP](docs/guia-indexacao-grafo-mcp.md) | Pipeline, diagramas, multi-repo e `graph.html` |
+| Recurso | Para quê |
+| --- | --- |
+| [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/) | Conceitos, busca e indexação |
+| [Guia de indexação, grafo e MCP](docs/guia-indexacao-grafo-mcp.md) | Pipeline, diagramas e o mapa `graph.html` |
 
-## Funcionalidades
+## O que você ganha
 
-- **Indexação por AST (Tree-sitter)**: chunks por classe/função/método, não por blocos arbitrários de linhas.
-- **Busca híbrida**: similaridade vetorial + BM25, fundidas via RRF.
-- **Indexação incremental**: só arquivos novos/alterados (hash sha256).
-- **Embeddings locais**: `all-MiniLM-L6-v2` (384 dims) via `fastembed`, com lazy loading.
-- **Grafo de conhecimento**: `.code-index/graph.json` + visualizador `graph.html` (abre via `file://`).
-- **Pacote da tarefa**: `atlas_context` (`edit`/`debug`/`review`/`understand`) e raio de impacto `atlas_graph(mode="affected")`.
-- **Watcher opt-in**: `ATLAS_WATCH=1` (extra `[watch]`) reindexa em subprocesso após debounce.
-- **SCIP opt-in**: `ATLAS_SCIP=1` produz arestas `calls` (`origin: "scip"`) quando o toolchain está instalado.
-- **História local de Git**: sem flag — a indexação publica `history.json`; a busca pode devolver hits `type="commit"`; `atlas_context(intent="debug")` traz `recent_history`.
-- **Rationale em código**: `NOTE`/`WHY`, cites `DEC`/`ADR`/`RFC` e wikilinks nos resultados de busca.
-- **Multi-linguagem**: Python, JS/TS, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e mais.
-- **Observabilidade de tokens opt-in**: `ATLAS_OBSERVABILITY=1` mede a resposta de cada tool (chars/bytes/tokens) e aplica teto global em `atlas_search` (as demais já tinham teto de caracteres). Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional).
+Varrer o repositório com busca textual gasta o contexto do agente e ainda pode abrir o arquivo errado. O Atlas muda esse caminho.
 
-### Camada semântica opcional
+- **O trecho é um símbolo.** Classe, função e método entram no índice como unidades. Um arquivo vira um mapa, não uma fatia de linhas:
 
-Para gerar propósito por símbolo e sumários hierárquicos, habilite explicitamente
-`ATLAS_SEMANTIC=1`. A cadeia usa sampling apenas no caminho MCP síncrono, depois um
-endpoint local configurado por `ATLAS_SEMANTIC_LOCAL_URL` e, por último, uma API cujo URL
-foi declarado em `ATLAS_SEMANTIC_API_URL`. Sem origem, o índice estrutural continua completo.
+  ```text
+  src/auth/service.py
+    ├── class AuthService
+    ├── AuthService.login
+    └── AuthService.logout
+  ```
 
-APIs OpenAI-compatible, incluindo OpenRouter, usam também `ATLAS_SEMANTIC_MODEL`.
-Exemplo: `ATLAS_SEMANTIC_API_URL=https://openrouter.ai/api/v1/chat/completions`,
-`ATLAS_SEMANTIC_API_KEY=sk-or-v1-...` e
-`ATLAS_SEMANTIC_MODEL=openai/gpt-4.1-mini`. Com o modelo definido, o Atlas envia
-`model` + `messages`; sem ele, preserva o payload genérico legado para endpoints customizados.
+- **A busca junta sentido e texto.** Uma pergunta em linguagem natural e o nome exato de uma função usam o mesmo índice.
+- **A tarefa cabe em poucas chamadas.** Um briefing apresenta o projeto. Um pacote reúne o que importa para editar, depurar, revisar ou entender um símbolo. O grafo mostra o que uma mudança alcança.
+- **A atualização acompanha o que mudou.** A primeira passagem lê o projeto; as seguintes reindexam arquivos novos ou alterados. Ao reabrir o editor, se o índice já existir, essa atualização roda em segundo plano.
+- **Várias linguagens no mesmo índice.** Python, JavaScript, TypeScript, Go, Java, C#, Dart, Pascal, VB6, Razor, XML, Markdown e outras. Notas `NOTE`/`WHY`, decisões e a história recente do Git do próprio projeto também entram na busca.
 
-O índice novo usa formato `2.3.0` e grava `purpose`, `purpose_hash`, `purpose_vector` e o
-sidecar `.code-index/semantic.json`; o vetor estrutural não muda. Índices `2.0.x`–`2.2.x`
-continuam buscáveis como legados. Para convertê-los, use somente `atlas-index --full` sem
-`--paths`; recortes incrementais não fazem migration nem misturam schemas. Consulte
-`atlas_status` para auditar `origin`, `egress`, `index` e `last_generation`.
+## Começar
 
-Uma busca degradada inclui `warnings`: `semantic_layer_unavailable` indica camada ligada
-sem índice pronto e `semantic_arm_unavailable` indica falha do vetor semântico; em ambos
-os casos vector+FTS continuam disponíveis, mas a recuperação semântica está incompleta.
+Pré-requisitos: Python 3.11–3.13 e [uv](https://github.com/astral-sh/uv).
 
-### Observabilidade de tokens por consulta (opcional)
-
-`ATLAS_OBSERVABILITY=1` liga o registro local da string JSON final devolvida por
-`atlas_search`, `atlas_context`, `atlas_brief` e `atlas_graph`: chars/bytes e tokens
-exatos segundo o **tokenizer padrão do Atlas**, já incluído no pacote.
-**Isto mede o texto retornado pela tool, não o prompt inteiro do cliente MCP,
-geração do modelo ou faturamento.**
-
-O padrão é o tokenizer de **HuggingFaceTB/SmolLM2-135M**, Apache-2.0, revisão
-`93efa2f097d58c2a74874c7e644dbc9b0cee75a2`. O arquivo (~2,1 MB) vem no wheel/sdist,
-com licença, origem e SHA-256 fixos em [assets](src/codesteer_atlas/assets/README.md).
-Não há download na primeira consulta nem acesso à rede para contar tokens.
-O carregamento acontece apenas quando a primeira medição precisar dele.
-
-Para ativar, acrescente ao ambiente do servidor MCP e reinicie-o:
-
-```json
-"env": {
-  "ATLAS_OBSERVABILITY": "1"
-}
-```
-
-Desligado (padrão): nenhum arquivo de eventos ou histórico em memória é criado,
-e o bloco `observability` fica ausente de `atlas_status`. O contador continua
-sendo usado pelos limites de resposta. Ligado: cada tool grava o último evento
-em memória (`atlas_status.observability.last_by_tool`) e tenta persistir em
-`.code-index/observability/events.jsonl` (rotação em até 3 arquivos de 1 MiB,
-~3 MiB no total). Contenção do lock ou falha de E/S descarta a persistência
-**daquele** evento (nunca a consulta), incrementa `dropped_events` e avisa uma
-vez por transição em stderr.
-
-Para substituir o padrão, configure também `ATLAS_TOKENIZER_PATH` com o caminho
-para um `tokenizer.json` compatível com a lib
-[`tokenizers`](https://huggingface.co/docs/tokenizers). Variável ausente ou vazia
-seleciona o embarcado. Os eventos identificam `tokenizer_source` (`bundled` ou
-`custom`), `tokenizer_name`, `tokenizer_revision` e `tokenizer_sha256`. No override,
-nome é `custom`, revisão é `null` e o hash identifica o arquivo sem expor o path.
-**O tokenizer escolhido não é necessariamente o do cliente MCP**: mantenha a
-mesma revisão para comparar medições reproduzíveis.
-
-Arquivo ausente/inválido, recurso embarcado com hash incorreto ou biblioteca
-indisponível: degrada para estimativa `ceil(chars/4)`, com
-`tokenizer_status: "unavailable"`, e informa o motivo em stderr (`[atlas]`).
-Um override inválido não é substituído silenciosamente pelo embarcado.
-A falha é memorizada; reinicie o servidor após corrigir ou trocar o arquivo.
-
-O teto de resposta é aplicado **independentemente** da observabilidade.
-Search corta resultados inteiros da cauda; context/brief/graph mantêm suas
-prioridades de corte. O bloco `budget` declara `mode`, `max_chars`, `max_bytes`,
-`max_tokens`, `tokenizer_sha256` e `used_chars`. Com o padrão carregado,
-`mode="tokenizer_exact"` e os tetos de tokens passam a valer sem configuração
-manual. Isso pode cortar respostas que antes cabiam apenas em chars/bytes.
-Se o contador estiver indisponível, o limite passa a chars/bytes:
-`mode="byte_bpe_upper_bound"`, `max_tokens=null`, sem garantia de tokens exatos.
-
-Exemplo de evento (JSONL, um por linha, sanitizado — nunca contém query, paths retornados,
-código-fonte ou texto de exceção):
-
-```json
-{"schema_version":"1.0","event_id":"…","timestamp":"2026-09-05T12:00:00.000Z","tool":"atlas_search","outcome":"success","scope":"tool_json_text","duration_ms":8.42,"response_chars":14,"response_bytes":14,"response_tokens":5,"estimated_tokens":null,"count_method":"tokenizer","tokenizer_sha256":"9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c","tokenizer_status":"ok","tokenizer_source":"bundled","tokenizer_name":"HuggingFaceTB/SmolLM2-135M","tokenizer_revision":"93efa2f097d58c2a74874c7e644dbc9b0cee75a2","truncated":false,"warnings":[]}
-```
-
-Com o tokenizer embarcado ou custom disponível, `response_tokens` é um inteiro, `estimated_tokens` fica
-`null`, `count_method` vira `"tokenizer"` e `tokenizer_status` vira `"ok"`. Em erro da tool
-(ex.: `top_k` inválido), `outcome` vira `"error"`, as medidas de resposta ficam `null` e
-`error_class` traz só o **nome da classe** da exceção (nunca a mensagem, que poderia
-carregar dado sensível).
-
-`duration_ms` cobre do início da tool até a serialização/medição finais — **não** inclui a
-escrita do evento em disco nem o transporte MCP, e é uma métrica **separada** de
-`query_time_ms` (que continua medindo só a recuperação, sem mudança de semântica).
-
-Avaliação de qualidade pós-orçamento: `uv run python scripts/eval_search.py --delivery`
-mede MRR/recall da resposta **realmente entregue** (metadados e conteúdo) sobre os mesmos
-candidatos do ranking, sem alterar a medição de ranking histórica. `--benchmark` roda o
-custo de overhead (observabilidade desligada / embarcado / estimativa degradada / custom) sobre payloads
-sintéticos fixos, sem precisar de índice.
-
-## Começar (3 passos)
-
-Para um percurso guiado e ajuda com erros comuns, veja [Primeiros passos](https://luiscarloslopes.github.io/codesteer-atlas/primeiros-passos.html). Abaixo está a referência rápida de instalação.
-
-Pré-requisitos: Python 3.11–3.13 e [uv](https://github.com/astral-sh/uv) (fornece o `uvx`).
-
-Você **não precisa clonar** este repositório para usar o Atlas. O índice fica em `.code-index/` na **raiz do seu projeto** (adicione essa pasta ao `.gitignore`).
+O índice fica em `.code-index/` na raiz **do projeto que você quer consultar**. Acrescente essa pasta ao `.gitignore`.
 
 ### 1. Conectar o MCP no seu projeto
 
-> **Importante — não instale o plugin em escopo global (user).**
+> **Instale no projeto atual.**
 >
-> Plugins/MCP globais costumam iniciar o servidor com CWD = `$HOME`, sem a raiz do projeto aberto. Nesse caso o Atlas **não consegue inferir** de forma confiável a pasta `.code-index` do workspace (e pode criar ou achar um índice no lugar errado).
+> Um MCP global inicia na pasta pessoal, sem a raiz do projeto aberto, e pode gravar ou achar o índice no lugar errado.
 >
-> Use sempre uma destas opções:
->
-> 1. **Plugin no projeto atual** (escopo *project* ou *local*), ou
-> 2. **Configuração manual** via `mcp.json` / `.mcp.json` **na raiz do projeto**.
+> Use o plugin no projeto atual (escopo *project* ou *local*) ou um `mcp.json` / `.mcp.json` **na raiz do projeto**.
 
 #### Opção A — Plugin no projeto atual (Claude Code)
 
 ```text
 /plugin marketplace add LuisCarlosLopes/codesteer-atlas
-# ou pasta local: /plugin marketplace add /caminho/para/codesteer-atlas
 
 /plugin install codesteer-atlas
 ```
 
-Quando o Claude Code pedir o escopo, escolha **Project** (compartilhado no repo) ou **Local** (só neste workspace). **Não escolha User.**
+Quando o Claude Code pedir o escopo, escolha **Project** (compartilhado no repo) ou **Local** (só neste workspace).
 
 Pela CLI:
 
@@ -164,199 +60,21 @@ claude plugin install codesteer-atlas --scope project
 # ou: --scope local
 ```
 
-#### Opção B — `mcp.json` manual (recomendado para Cursor, VS Code, Kiro, OpenCode…)
+#### Opção B — `mcp.json` na raiz do projeto
 
-Copie o manifest **para a raiz do seu projeto** (não para a config global do editor) e reinicie o cliente:
+Recomendado para Cursor, VS Code, Kiro e OpenCode. Copie o manifest para o projeto e reinicie o cliente.
 
 | Cliente | Copiar de | Para |
-| ------- | --------- | ---- |
+| --- | --- | --- |
 | Cursor | [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json) | `.cursor/mcp.json` |
 | GitHub Copilot (VS Code) | [`examples/clients/vscode/mcp.json`](examples/clients/vscode/mcp.json) | `.vscode/mcp.json` |
 | Kiro | [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) | `.kiro/settings/mcp.json` |
 | OpenCode | [`examples/clients/opencode/opencode.json`](examples/clients/opencode/opencode.json) | `opencode.json` |
 | Claude Code | [`.mcp.json`](.mcp.json) | `.mcp.json` na raiz do projeto |
 
-Exemplo mínimo (Claude Code / vários clientes com chave `mcpServers`):
+O `atlas-index` grava `.code-index` na raiz do repositório. Ao abrir, o servidor procura essa pasta subindo a partir da pasta em que o processo nasceu.
 
-```json
-{
-  "mcpServers": {
-    "codesteer-atlas": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/LuisCarlosLopes/codesteer-atlas.git",
-        "atlas-serve"
-      ]
-    }
-  }
-}
-```
-
-Detalhes por cliente e modo instalado (`uv tool install`): [`examples/clients/`](examples/clients/) e [CONTRIBUTING.md](CONTRIBUTING.md#configuração-manual-em-outros-clientes).
-
-#### Outros canais (também por projeto)
-
-- **Kiro Power**: Add Custom Power → Import from GitHub → `https://github.com/LuisCarlosLopes/codesteer-atlas.git`, e associe ao workspace atual.
-- **Copilot CLI plugin**: prefira instalar no contexto do repositório em que você vai trabalhar; se o índice não for encontrado, use a Opção B (`.vscode/mcp.json` ou equivalente).
-
-```bash
-copilot plugin install LuisCarlosLopes/codesteer-atlas
-```
-
-### 2. Indexar o projeto
-
-Na raiz do **seu** projeto (não do repositório do Atlas, a menos que seja esse o alvo):
-
-```bash
-cd /caminho/para/seu-projeto
-
-# Uma vez: instala atlas-index / atlas-serve no PATH
-uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git
-
-atlas-index --workspace .
-```
-
-Sem instalar no PATH (baixa o pacote a cada execução):
-
-```bash
-uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
-```
-
-Ao terminar: mensagem `Indexação Concluída com Sucesso!` e pasta `.code-index/` com `manifest.json`, `lancedb/`, `graph.json` e `graph.html`.
-
-Atualizar o Atlas depois: `uv tool upgrade codesteer-atlas`.
-
-### 3. Usar
-
-Com o MCP conectado e o índice criado, o agente passa a ter as tools `atlas_*`. Nas próximas vezes:
-
-```bash
-atlas-index --workspace .            # incremental (padrão)
-atlas-index --workspace . --full     # rebuild completo
-atlas-index --workspace . --paths src --paths docs
-```
-
-Ou peça ao agente para usar a tool `atlas_index`.
-
-> **Reindex automático:** ao iniciar o `atlas-serve` (abrir/reiniciar o editor), se `.code-index/` já existir, roda uma reindexação incremental em background. A **primeira** indexação (passo 2) continua manual. Log: `.code-index/background_reindex.log`.
-
-## Uso
-
-| Tool | Descrição |
-|---|---|
-| `atlas_search` | Busca híbrida. Por padrão retorna só metadados; use `include_content=true` ou `Read` nas linhas. Filtros: `repo`, `language`, `path_prefix`. Opt-in: `structural=true` (braço do grafo). Hits de Git vêm como `type="commit"`. |
-| `atlas_brief` | Briefing do projeto (identidade, camadas, entrypoints, hubs). Chame primeiro em projeto desconhecido. `level=0` ou `1`. |
-| `atlas_context` | Pacote da tarefa (`target` + `intent`: `edit`/`debug`/`review`/`understand`) numa chamada, com teto de tokens. Só `debug` inclui `recent_history`. |
-| `atlas_graph` | Grafo: `hubs`, `path`, `explain`, `affected`. |
-| `atlas_index` | Indexa/reindexa; regenera `graph.json` / `graph.html`. Suporta `dry_run`. |
-| `atlas_status` | Diagnóstico (`is_stale`, `graph_available`, `index_resolution`, `watch`, `semantic`, `resolution_coverage`, e `observability` só com `ATLAS_OBSERVABILITY=1`). |
-
-Recurso somente leitura: `atlas://status`.
-
-Após indexar, abra `.code-index/graph.html` no navegador (`file://`) para inspecionar o grafo.
-
-### Rationale e grafo
-
-Em resultados de código, `atlas_search` pode incluir `rationale_refs` (`DECISAO-002`, `ADR-001`, `[[wikilinks]]`, `# NOTE:` / `# WHY:`).
-
-```text
-atlas_graph(mode="hubs", top_n=10)
-atlas_graph(mode="path", source="src/app.py", target="dec-002")
-atlas_graph(mode="explain", target="AuthService.login")
-atlas_graph(mode="affected", target="AuthService.login")
-atlas_context(target="AuthService.login", intent="edit")
-```
-
-> **Upgrade:** `atlas_graph` / `graph.html` exigem reindex em índices antigos (&lt; `2.1.0`).
-
-## Instruções para agentes de IA (AGENTS.md / CLAUDE.md)
-
-Copie o bloco abaixo para as instruções do seu projeto:
-
-| Cliente / IDE | Arquivo |
-|---|---|
-| Cursor, Copilot (VS Code), genérico | [`AGENTS.md`](AGENTS.md) |
-| Claude Code | [`CLAUDE.md`](CLAUDE.md) |
-| Kiro | regras do Power / instruções do agente |
-| GitHub Copilot CLI | instruções do plugin ou regras do projeto |
-
-```markdown
-# Busca de código com `codesteer-atlas`
-
-Este repositório é indexado pelo MCP `codesteer-atlas`. Para entender, planejar, pesquisar ou explorar código, use Atlas antes de `grep`, `rg`, `find`, glob ou leitura em massa.
-
-## Use assim
-
-- `atlas_brief`: orientar-se num projeto desconhecido — chame primeiro, uma vez
-- `atlas_context`: quando o símbolo/arquivo da tarefa já é conhecido (`intent` = edit/debug/review/understand)
-- `atlas_search`: localizar função, classe, método, símbolo ou conceito
-- `atlas_graph`: hubs, paths, conexões e `mode="affected"` (raio de impacto)
-- `atlas_status`: só se houver suspeita de índice ausente ou desatualizado
-- `atlas_index`: reindexar após mudanças grandes ou índice stale
-
-## Fluxo padrão
-
-1. `atlas_search` para descoberta (metadados).
-2. Restrinja com `path_prefix` e `language` quando fizer sentido.
-3. Leia os hits com `Read`, ou repita com `include_content=true`.
-
-## Quando pode pular o Atlas
-
-- o usuário já informou o caminho exato
-- confirmação de string literal exata
-- edição, diff, commit, git, CI, testes ou instalação de deps
-- MCP indisponível ou índice vazio/desatualizado
-
-## Índice desatualizado
-
-1. `atlas_status`
-2. Se necessário, `atlas_index`
-3. Fallback local só se o problema persistir
-```
-
-## Como funciona
-
-O Atlas divide cada arquivo em `CodeChunk`s no nível de símbolo via Tree-sitter, gera embeddings locais e indexa em LanceDB (vetorial + BM25 / RRF):
-
-```
-src/auth/service.py
-  ├── class AuthService          (linhas 10–45)
-  ├── AuthService.login          (linhas 20–35)
-  └── AuthService.logout         (linhas 37–44)
-```
-
-Detalhes do pipeline: [CONTRIBUTING.md](CONTRIBUTING.md#pipeline-de-indexação-detalhado).
-
-### Excluindo arquivos com `.atlasignore`
-
-Na raiz do workspace (sintaxe igual à do `.gitignore`):
-
-```gitignore
-*.log
-fixtures/
-/dist
-**/*.generated.py
-!important.log
-```
-
-É um filtro **adicional** — `.git`, `node_modules`, `.venv`, `__pycache__` e `.code-index` continuam sempre ignorados.
-
-## Onde fica o `.code-index`?
-
-Ordem de resolução:
-
-1. `--index-dir` (CLI)
-2. `ATLAS_INDEX_DIR` (env)
-3. Busca ascendente a partir do CWD
-4. Busca a partir da raiz do editor (`CLAUDE_PROJECT_DIR`, `WORKSPACE_FOLDER_PATHS`)
-5. Fallback `.code-index` relativo à raiz conhecida (ou ao CWD)
-
-Com MCP ligado **ao projeto** (plugin project/local ou `mcp.json` na raiz), o item 3 ou 4 costuma bastar após `atlas-index --workspace .`.
-
-Se o servidor nascer com CWD errado (caso típico de instalação **global**), o Atlas tenta recuperar via MCP `roots/list` quando o cliente suporta. Mesmo assim, **prefira instalação por projeto** — é o caminho estável.
-
-Para forçar um caminho explícito no `mcp.json` do projeto:
+No Cursor esse processo nasce na pasta pessoal. A subida a partir dali não alcança o `.code-index` do repositório aberto, e o servidor não recebe a raiz do projeto por conta própria. A linha `ATLAS_INDEX_DIR` fecha esse caminho: o Cursor troca `${workspaceFolder}` pela pasta que contém o `.cursor/mcp.json`, a raiz do repositório. Sem essa linha, as ferramentas olham outro índice, ou nenhum.
 
 ```json
 {
@@ -376,32 +94,104 @@ Para forçar um caminho explícito no `mcp.json` do projeto:
 }
 ```
 
-> No Cursor, `${workspaceFolder}` é a forma mais segura de amarrar o índice ao projeto aberto. Veja [CONTRIBUTING.md — Cursor](CONTRIBUTING.md#cursor).
+O manifest pronto está em [`examples/clients/cursor/mcp.json`](examples/clients/cursor/mcp.json). Copie-o para `.cursor/mcp.json` e reinicie o Cursor. A linha que amarra o índice é `ATLAS_INDEX_DIR`.
 
-Diagnóstico: `atlas_status` → `index_resolution`.
+No Claude Code, com o plugin no escopo do projeto, o editor informa a raiz e o bloco sem `ATLAS_INDEX_DIR` basta. Se `atlas_status` apontar o índice para fora do repositório, use a mesma variável com o caminho absoluto de `.code-index`. Outros editores: [CONTRIBUTING.md](CONTRIBUTING.md#configuração-manual-em-outros-clientes).
 
-## Configuração e variáveis de ambiente
+#### Outros canais, também por projeto
 
-Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, busca e serve o grafo 100% local — igual à `main` 2.1.x, mais as tools F1.
+- **Kiro Power**: Add Custom Power → Import from GitHub → `https://github.com/LuisCarlosLopes/codesteer-atlas.git`, associado ao workspace atual.
+- **Copilot CLI**: instale no repositório em que você vai trabalhar.
 
-| Variável | Default | Efeito |
-|---|---|---|
-| `ATLAS_INDEX_DIR` | discovery / fallback `.code-index` | Caminho explícito do índice (prioridade 2 da resolução). |
-| `ATLAS_RERANK` | ligado | `0` desliga **toda** reordenação pós-RRF (lexical e cross-encoder). |
-| `ATLAS_RERANK_MODEL` | ausente | Presente → cross-encoder ONNX (o valor é o slug do modelo; default `Xenova/ms-marco-MiniLM-L-6-v2`). Falha de carga: `warnings: cross_encoder_unavailable`. |
-| `ATLAS_WATCH` | desligado | `1` observa o workspace e dispara reindex incremental em subprocesso após 2 s. Extra: `pip install "codesteer-atlas[watch]"` (`watchdog`). Sem o extra: `watch: "unavailable"`. |
-| `ATLAS_SCIP` | desligado | `1` invoca o indexador SCIP da linguagem (`scip-python`, `scip-typescript`, `scip-go`, `rust-analyzer`) e produz arestas `calls`. Sem toolchain: `scip_status: "toolchain_missing"`. |
-| `ATLAS_SEMANTIC` | desligado | `1` liga a camada de propósito por símbolo. Sem origem configurada, o índice estrutural continua completo. Detalhes: [Camada semântica opcional](#camada-semântica-opcional). |
-| `ATLAS_SEMANTIC_LOCAL_URL` | ausente | Endpoint local (segunda origem, depois do sampling MCP). |
-| `ATLAS_SEMANTIC_API_URL` | ausente | URL explícita de API (terceira origem). Sem host default. |
-| `ATLAS_SEMANTIC_API_KEY` | ausente | Só no header da API. |
-| `ATLAS_SEMANTIC_MODEL` | ausente | Contrato OpenAI-compatible (`model` + `messages`). Sem ele, payload genérico legado. |
-| `ATLAS_OBSERVABILITY` | desligado | `1` grava eventos de medição de resposta (chars/bytes/tokens) em memória + `.code-index/observability/events.jsonl` e expõe `atlas_status.observability`. Sem ele, nada é criado. Detalhes: [Observabilidade de tokens por consulta](#observabilidade-de-tokens-por-consulta-opcional). |
-| `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem EXATA de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal — `max_tokens` fica `null` em qualquer SO; isso é esperado, não um bug. |
+```bash
+copilot plugin install LuisCarlosLopes/codesteer-atlas
+```
 
-História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses). Extra opcional: `codesteer-atlas[watch]`.
+### 2. Indexar o projeto
 
-No `mcp.json` do projeto:
+Na raiz do **seu** projeto:
+
+```bash
+cd /caminho/para/seu-projeto
+
+uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git
+
+atlas-index --workspace .
+```
+
+Sem instalar no PATH, o mesmo comando baixa o pacote a cada execução:
+
+```bash
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
+```
+
+Ao terminar, a mensagem é `Indexação Concluída com Sucesso!`. A pasta `.code-index/` passa a ter o índice, o grafo e o mapa `graph.html`, que abre no navegador.
+
+A primeira indexação baixa o modelo de busca. As seguintes, na configuração padrão, seguem sem rede.
+
+Para atualizar o programa depois: `uv tool upgrade codesteer-atlas`.
+
+### 3. Usar
+
+Com o MCP conectado e o índice criado, peça ao agente para procurar no projeto. Nas próximas vezes, a atualização incremental basta:
+
+```bash
+atlas-index --workspace .
+atlas-index --workspace . --full
+atlas-index --workspace . --paths src --paths docs
+```
+
+O agente também pode chamar a ferramenta `atlas_index`. A primeira indexação continua manual. A partir daí, abrir o editor dispara uma atualização incremental em segundo plano. O registro fica em `.code-index/background_reindex.log`.
+
+## Como a indexação funciona
+
+O `atlas-index` percorre o projeto, separa cada arquivo em trechos, gera um vetor local para cada trecho e grava tudo em `.code-index/`. A primeira passagem lê o que é elegível. As seguintes comparam o hash de cada arquivo e só refazem o que mudou ou foi apagado. `--full` reconstrói o índice inteiro.
+
+O resultado é a pasta com o índice de busca, o grafo (`graph.json` e `graph.html`) e a história recente do Git do próprio repositório (`history.json`).
+
+### Código
+
+Arquivos com parser (Python, JavaScript, TypeScript, Go, Java, C# e outras linguagens da lista) são lidos pela árvore sintática. Cada classe, função e método vira um trecho com nome, como `AuthService.login`, e com as linhas de origem. Se o arquivo não tem símbolo reconhecido, ele entra inteiro como um módulo.
+
+Um trecho grande demais guarda o começo (assinatura) e o fim, e marca o miolo como cortado.
+
+### SQL
+
+Cada comando vira um trecho: `CREATE TABLE`, `CREATE VIEW`, `SELECT` e os demais. O nome segue a tabela, a view ou a função. Um `SELECT` sem nome próprio usa a tabela do `FROM`. Comando longo demais é partido por linhas.
+
+### Markdown
+
+Cada título (`#`, `##`, …) abre uma seção. Seção longa é partida em parágrafos, em blocos de cerca de 1000 caracteres.
+
+### Texto e formatos sem símbolo
+
+XML, Razor, texto puro e os demais formatos sem classe ou função entram por parágrafo, nos mesmos blocos de cerca de 1000 caracteres. O nome do trecho é o do arquivo, com um índice quando há mais de um bloco.
+
+### O que fica de fora
+
+A varredura ignora `.git`, `node_modules`, `.venv`, `__pycache__`, a própria pasta `.code-index`, arquivos ocultos, extensões que o Atlas não lê e arquivos acima de 2 MB. Um `.atlasignore` na raiz soma regras no formato do `.gitignore`.
+
+## O que o agente passa a fazer
+
+| Ferramenta | Para que serve |
+| --- | --- |
+| `atlas_brief` | Apresentar um projeto ainda desconhecido: linguagens, camadas e pontos de entrada. Uma vez basta. |
+| `atlas_search` | Localizar onde uma ideia ou um nome está implementado. A resposta traz arquivo e linhas. |
+| `atlas_context` | Montar o pacote de um símbolo ou arquivo para editar, depurar, revisar ou entender. |
+| `atlas_expand` | Abrir o código de um resultado compacto, um ou dois símbolos por vez. |
+| `atlas_graph` | Ver conexões, o caminho entre dois pontos e o que uma mudança alcança. |
+| `atlas_index` | Criar ou atualizar o índice e o mapa. |
+| `atlas_status` | Conferir se o índice está em dia. |
+
+Há também o recurso somente leitura `atlas://status`.
+
+## Configuração do MCP
+
+As variáveis ficam em `env` no `mcp.json` do projeto. Reinicie o editor depois de salvar. O valor `1` liga as flags abaixo; onde a coluna de exemplo diz outra coisa, use esse texto.
+
+### Menor contexto, com logs
+
+Este bloco entrega a busca e o pacote da tarefa no perfil compacto e grava, na sua máquina, o tamanho de cada resposta. O perfil compacto foi o que reduziu cerca de 32% dos tokens de metadados nas 28 consultas (32.336 para 21.977). Os logs ficam em `.code-index/observability/events.jsonl` e medem o texto devolvido pela ferramenta, não o faturamento do editor.
 
 ```json
 {
@@ -415,16 +205,135 @@ No `mcp.json` do projeto:
       ],
       "env": {
         "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
-        "ATLAS_WATCH": "1"
+        "ATLAS_CONTEXT_OPTIMIZATION": "1",
+        "ATLAS_OBSERVABILITY": "1"
       }
     }
   }
 }
 ```
 
+O Jev fica de fora: ele reordena e pode retirar um irrelevante, e também envia a pergunta e os trechos para fora da máquina. Para ligá-lo, use as três variáveis da seção [Jev](#jev-o-trecho-mais-útil-na-frente).
+
+### Parâmetros
+
+| Variável | Exemplo | Função |
+| --- | --- | --- |
+| `ATLAS_INDEX_DIR` | `${workspaceFolder}/.code-index` | Pasta do índice. No Cursor, amarra o servidor ao `.code-index` da raiz do repositório. |
+| `ATLAS_CONTEXT_OPTIMIZATION` | `1` | Resposta compacta em `atlas_search` e `atlas_context`. Também aceita `true`. É o que reduz o contexto. |
+| `ATLAS_OBSERVABILITY` | `1` | Log local de caracteres, bytes e tokens por resposta. Só o valor `1` liga. |
+| `ATLAS_TOKENIZER_PATH` | `/caminho/para/tokenizer.json` | Troca o contador de tokens. Vazio usa o tokenizer que já vem no pacote. |
+| `ATLAS_RELEVANCE` | `1` | Liga o Jev. Sozinha não basta: a URL e a chave abaixo também entram. Também aceita `true`. |
+| `ATLAS_RELEVANCE_GATE` | `1` | Dispensa o Jev quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. |
+| `ATLAS_RELEVANCE_API_URL` | `https://openrouter.ai/api/v1/systemone` | Endpoint do Jev. Só essa URL HTTPS. |
+| `ATLAS_RELEVANCE_API_KEY` | a chave do OpenRouter | Credencial do Jev. Se vazia, reutiliza `ATLAS_SEMANTIC_API_KEY` quando a URL semântica é o chat HTTPS do OpenRouter. |
+| `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Modelo do Jev. Não herda `ATLAS_SEMANTIC_MODEL`. |
+| `ATLAS_RERANK` | `0` | Desliga toda reordenação, inclusive o Jev e o cross-encoder. Ausente, a reordenação local fica ligada. |
+| `ATLAS_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Cross-encoder local no lugar da reordenação por texto. Ausente, permanece a reordenação local. |
+| `ATLAS_WATCH` | `1` | Reindexa sozinho depois que você salva. Exige o extra `codesteer-atlas[watch]`. Só o valor `1` liga. |
+| `ATLAS_SCIP` | `1` | Registra quem chama quem, se o indexador da linguagem estiver instalado. Só o valor `1` liga. |
+| `ATLAS_SEMANTIC` | `1` | Gera o propósito de cada símbolo. Sem URL configurada, o índice estrutural segue completo. Só o valor `1` liga. Envia conteúdo para a origem configurada. |
+| `ATLAS_SEMANTIC_LOCAL_URL` | `http://127.0.0.1:8080/v1/chat/completions` | Endpoint local de propósito. Entra depois do sampling do MCP. |
+| `ATLAS_SEMANTIC_API_URL` | `https://openrouter.ai/api/v1/chat/completions` | API de propósito. Não há host padrão. |
+| `ATLAS_SEMANTIC_API_KEY` | a chave da API | Vai somente no header. Não entra em log. |
+| `ATLAS_SEMANTIC_MODEL` | `openai/gpt-4.1-mini` | Liga o contrato `model` + `messages`. Sem ele, a API recebe o payload genérico. |
+
+## Jev: o trecho mais útil na frente
+
+O Jev é o avaliador de relevância da OpenRouter (System One). Ele vem **desligado**. Com ele desligado, busca e índice continuam na sua máquina.
+
+Ligado, o Jev lê a pergunta e os candidatos que o Atlas já recuperou. Coloca na frente o trecho que julgou mais útil para aquela pergunta. No perfil compacto, pode retirar um candidato claramente irrelevante. Quem encontra os candidatos continua sendo a busca local.
+
+A entrega compacta, com o Jev desligado, reduziu cerca de **32%** dos tokens de metadados nas 28 consultas de avaliação (32.336 para 21.977), com o alvo na mesma posição. Numa sessão no Cursor, abrir menos símbolos por vez levou o total das ferramentas de 8.433 para 5.712 tokens. O Jev muda a ordem desses resultados. A comparação da qualidade dele com o ranking local ainda está por medir.
+
+### O que precisa estar no `env`
+
+Três variáveis ligam o Jev. Com a flag sozinha, sem URL e sem chave, o avaliador permanece desconfigurado.
+
+| Variável | Valor |
+| --- | --- |
+| `ATLAS_RELEVANCE` | `1` (ou `true`) |
+| `ATLAS_RELEVANCE_API_URL` | `https://openrouter.ai/api/v1/systemone` |
+| `ATLAS_RELEVANCE_API_KEY` | a chave da sua conta no OpenRouter |
+
+```json
+"env": {
+  "ATLAS_INDEX_DIR": "${workspaceFolder}/.code-index",
+  "ATLAS_RELEVANCE": "1",
+  "ATLAS_RELEVANCE_API_URL": "https://openrouter.ai/api/v1/systemone",
+  "ATLAS_RELEVANCE_API_KEY": "sua-chave-openrouter"
+}
+```
+
+`ATLAS_INDEX_DIR` aponta o índice no Cursor; não faz parte do Jev. Reinicie o editor depois de salvar.
+
+Se `ATLAS_SEMANTIC_API_URL` já for exatamente `https://openrouter.ai/api/v1/chat/completions`, a URL do Jev sai dessa e a chave pode ser a mesma `ATLAS_SEMANTIC_API_KEY`. Fora desse caso, URL e chave do Jev são obrigatórias.
+
+O modelo padrão é `~typesafe/jev-latest`. `ATLAS_RELEVANCE_MODEL` só entra para trocar por um pin `typesafe/jev-…`. `ATLAS_RELEVANCE_GATE=1` é opcional: dispensa a chamada quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. `ATLAS_RERANK` precisa continuar ausente ou diferente de `0`; com `0`, o Jev não roda.
+
+Nesse modo, a consulta e os trechos candidatos seguem para o OpenRouter. Cada busca escreve uma linha de custo no log do servidor, sem a pergunta, o código ou a chave. Na rodada medida, o gasto ficou em frações de centavo.
+
+## Menos contexto na conversa
+
+`ATLAS_CONTEXT_OPTIMIZATION=1` faz a resposta padrão de `atlas_search` e `atlas_context` vir compacta: menos campos, sem repetir o mesmo símbolo, e um identificador para abrir só o que faltar com `atlas_expand`. Funciona com ou sem o Jev. A redução de tokens citada acima veio dessa entrega. O bloco pronto, já com os logs, está em [Menor contexto, com logs](#menor-contexto-com-logs).
+
+## Instruções para agentes de IA (AGENTS.md / CLAUDE.md)
+
+Copie o bloco para as instruções do projeto em que o Atlas está conectado.
+
+| Cliente | Onde colar |
+| --- | --- |
+| Cursor, Copilot (VS Code), Codex e editores genéricos | `AGENTS.md` na raiz do projeto |
+| Claude Code | `CLAUDE.md`, que pode importar o `AGENTS.md` |
+| Kiro | regras do Power ou instruções do agente |
+| GitHub Copilot CLI | instruções do plugin ou regras do projeto |
+
+O [AGENTS.md](AGENTS.md) deste repositório é o das pessoas que desenvolvem o Atlas. No seu projeto, o bloco abaixo é o suficiente:
+
+```markdown
+# Busca de código com o Atlas
+
+Use o Atlas antes de varrer o repositório para entender, planejar ou investigar
+código e documentos deste projeto.
+
+- Símbolo ou arquivo já conhecido: `atlas_context(target, intent)` com
+  `edit`, `debug`, `review` ou `understand`.
+- Projeto desconhecido: `atlas_brief` uma vez.
+- Localizar uma implementação: `atlas_search` com metadados e `top_k` baixo.
+- Abrir o código de um resultado compacto: `atlas_expand` com uma ou duas
+  refs ligadas à pergunta. Leia a resposta antes de pedir mais.
+- Alcance de uma mudança: `atlas_graph` com `mode="affected"`.
+- Índice ausente ou desatualizado: `atlas_index`.
+
+Omita `response_profile` para respeitar a configuração do projeto. Pare quando
+a evidência bastar. Se o MCP estiver indisponível, use as ferramentas do editor
+e registre essa limitação.
+```
+
+## Quando quiser ir além
+
+- **Mapa visual.** Abra `.code-index/graph.html` no navegador.
+- **Reindexar ao salvar.** `ATLAS_WATCH=1` observa o projeto e atualiza o índice depois de uma pausa curta. Requer o extra `codesteer-atlas[watch]`.
+- **Quem chama quem.** `ATLAS_SCIP=1` usa o indexador da linguagem, quando ele está instalado, e registra chamadas entre símbolos.
+- **Resumo do propósito de cada símbolo.** `ATLAS_SEMANTIC=1` consulta uma API que você configurar. Sem essa origem, o índice estrutural segue completo. Esse modo também envia conteúdo para fora da máquina.
+- **Medir o tamanho das respostas.** `ATLAS_OBSERVABILITY=1` grava, na sua máquina, caracteres, bytes e tokens do que cada ferramenta devolveu.
+- **Deixar pastas de fora.** Um `.atlasignore` na raiz do projeto usa a mesma sintaxe do `.gitignore`. Pastas como `.git`, `node_modules`, `.venv` e o próprio `.code-index` já ficam de fora.
+
+```gitignore
+*.log
+fixtures/
+/dist
+```
+
+## Detalhe técnico
+
+Contrato do Jev, medições, tokenizer e a ordem de resolução de `.code-index` estão na [referência do operador](docs/referencia.md). Os valores para colar no `mcp.json` estão na [configuração](#configuração-do-mcp).
+
+O pipeline de indexação, para quem altera o Atlas, está em [CONTRIBUTING.md](CONTRIBUTING.md#pipeline-de-indexação-detalhado).
+
 ## Contribuindo
 
-Clonar o repo, testes, lint e configuração avançada: [CONTRIBUTING.md](CONTRIBUTING.md) e [CLAUDE.md](CLAUDE.md).
+Clonar o repositório, testes e lint: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licença
 

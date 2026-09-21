@@ -1,11 +1,14 @@
 # Guia didático — Indexação, Grafo e MCP no CodeSteer Atlas
 
-> **Para quem é este guia:** desenvolvedores e agentes de IA que querem entender
-> *como* o Atlas transforma código em índice pesquisável, *como* consultar via MCP
-> e *como* usar o grafo de conectividade.
+> **Para quem é este guia:** quem usa o Atlas no editor e quem desenvolve o
+> servidor. Aqui está *como* o código e os documentos viram índice, *como* o
+> agente consulta via MCP e *como* ler o grafo.
 >
-> **Pré-requisito:** Python 3.11+ com [uv](https://github.com/astral-sh/uv) e o
-> workspace indexado ao menos uma vez.
+> Instalação, variáveis do `mcp.json` e o que liga o Jev estão no
+> [README](../README.md). Este guia explica o mecanismo.
+>
+> **Pré-requisito:** Python 3.11–3.13 com [uv](https://github.com/astral-sh/uv)
+> e o projeto indexado ao menos uma vez.
 
 ---
 
@@ -29,8 +32,9 @@
 
 ## 1. Visão geral em 30 segundos
 
-O **CodeSteer Atlas** é um servidor **MCP** (Model Context Protocol) que roda **100%
-local**. Ele:
+O **CodeSteer Atlas** é um servidor **MCP** (Model Context Protocol). Na
+configuração padrão, indexação e busca ficam na sua máquina. O Jev e a camada
+semântica são opt-in e enviam trechos para uma API. Ele:
 
 1. **Indexa** seu código e documentos → gera chunks + embeddings + grafo.
 2. **Busca** semanticamente (`atlas_search`) combinando vetores e BM25.
@@ -81,6 +85,7 @@ flowchart TB
         T1[atlas_search]
         T2[atlas_brief]
         T3[atlas_context]
+        T7[atlas_expand]
         T4[atlas_graph]
         T5[atlas_index]
         T6[atlas_status]
@@ -104,8 +109,10 @@ flowchart TB
     CURSOR <-->|stdio JSON-RPC| MCP
     T5 --> IDX
     T1 --> STO
-    T2 --> STO
+    T2 --> MAN
+    T2 --> GJ
     T3 --> GJ
+    T7 --> MAN
     T4 --> GJ
     T6 --> MAN
 
@@ -122,7 +129,7 @@ flowchart TB
 | Módulo | Papel |
 |--------|-------|
 | `indexer.py` | Orquestra varredura, hash, chunk, embed e persistência |
-| `chunker.py` | Parse AST (Tree-sitter) → chunks por símbolo |
+| `chunker.py` | Divide código por símbolo, SQL por comando, Markdown por título e o resto por parágrafo |
 | `embeddings.py` | Vetores 384d com `all-MiniLM-L6-v2` (fastembed/ONNX) |
 | `storage.py` | LanceDB + índice FTS (BM25) + manifest |
 | `graph.py` | Deriva `graph.json` a partir do índice |
@@ -139,7 +146,7 @@ flowchart TD
     A[1. Scan<br/>Varredura do workspace] --> B[2. Hash<br/>Detectar alterações]
     B --> C{Arquivo<br/>mudou?}
     C -->|Não| SKIP[Pula — reutiliza chunk existente]
-    C -->|Sim| D[3. Chunk<br/>Parse AST Tree-sitter]
+    C -->|Sim| D[3. Chunk<br/>Código, SQL, Markdown ou texto]
     D --> E[4. Embed<br/>Vetores fastembed]
     E --> F[5. Persist<br/>LanceDB + manifest]
     F --> G[6. Graph<br/>graph.json + graph.html]
@@ -149,10 +156,10 @@ flowchart TD
 ### Fase 1 — Scan
 
 - Percorre o workspace (ou subpastas informadas em `--paths`).
-- Ignora: `node_modules`, `.git`, `__pycache__`, arquivos ocultos, entradas em `.atlasignore`.
-- Aceita extensões suportadas (Python, JS/TS, Go, Markdown, SQL, etc.).
-- Descarta arquivos **> 2 MB**.
-- Captura `mtime` e `size` de cada arquivo (otimização incremental).
+- Ignora: `node_modules`, `.git`, `.venv`, `__pycache__`, a própria pasta `.code-index`, arquivos ocultos e o que estiver no `.atlasignore`.
+- Aceita extensões suportadas (Python, JS/TS, Go, Markdown, SQL, XML, Razor e outras).
+- Descarta arquivos **acima de 2 MB**.
+- Captura `mtime` e `size` de cada arquivo (atalho da indexação incremental).
 
 ### Fase 2 — Hash
 
@@ -163,10 +170,15 @@ flowchart TD
 
 ### Fase 3 — Chunk
 
-- `ASTChunker` faz parse Tree-sitter e extrai **classes, funções, métodos**.
-- Markdown vira chunks por **seção (heading)**.
-- Sem símbolos AST → fallback para chunk `module` (arquivo inteiro).
-- Extrai **imports** e **rationale refs** (`DECISAO-005`, `NOTE:`, wikilinks).
+O mesmo passe produz trechos diferentes conforme o formato. Imports e referências (`DECISAO-005`, `NOTE:` / `WHY:`, wikilinks) saem junto com o trecho de código ou de documento.
+
+**Código** (Python, JS/TS, Go, Java, C# e as outras linguagens com parser). A árvore sintática extrai classe, função e método, com nome hierárquico (`AuthService.login`) e linhas de origem. Arquivo sem símbolo reconhecido entra inteiro como `module`. Trecho grande demais guarda a assinatura e o fim, e marca o miolo como cortado.
+
+**SQL.** Cada comando (`CREATE TABLE`, `CREATE VIEW`, `SELECT`, …) é um trecho. O nome segue a tabela, a view ou a função. Um `SELECT` usa a tabela do `FROM` (`select_pedidos`). Comando longo é partido por linhas, em blocos de cerca de 1000 caracteres.
+
+**Markdown.** Cada título (`#`, `##`, …) abre uma seção. Seção longa se parte em parágrafos, nos mesmos blocos de cerca de 1000 caracteres.
+
+**Texto e formatos sem símbolo** (XML, Razor, `.txt` e o restante). Parágrafos agrupados até cerca de 1000 caracteres. O nome do trecho é o do arquivo mais um índice (`readme_chunk_1`).
 
 ### Fase 4 — Embed
 
@@ -186,16 +198,26 @@ flowchart TD
 
 ### Como disparar a indexação
 
+Na raiz do projeto que você quer consultar:
+
 ```bash
 # Incremental (padrão) — só processa o que mudou
-uv run atlas-index --workspace .
+atlas-index --workspace .
 
-# Rebuild completo — ignora cache de hashes
-uv run atlas-index --workspace . --full
+# Rebuild completo — ignora o cache de hashes
+atlas-index --workspace . --full
 
 # Subpastas específicas
-uv run atlas-index --workspace . --paths src --paths docs
+atlas-index --workspace . --paths src --paths docs
 ```
+
+Sem o comando no PATH:
+
+```bash
+uvx --from git+https://github.com/LuisCarlosLopes/codesteer-atlas.git atlas-index --workspace .
+```
+
+Dentro do clone deste repositório, o equivalente é `uv run atlas-index --workspace .`.
 
 Via MCP: tool `atlas_index` (com opções `paths`, `full`, `dry_run`).
 
@@ -210,6 +232,7 @@ flowchart LR
         L[lancedb/]
         G[graph.json]
         H[graph.html]
+        HI[history.json]
         R[background_reindex.log]
     end
 
@@ -225,9 +248,17 @@ flowchart LR
 | `lancedb/` | Tabela `chunks` com vetores e texto | `atlas_search` |
 | `graph.json` | Nós (arquivos, símbolos, docs) e arestas (imports, cites…) | `atlas_graph` |
 | `graph.html` | Viewer offline com pan/zoom e filtros | Humano (duplo-clique) |
+| `history.json` | Ponteiro da história local de Git já indexada | busca com hits `type="commit"`; `atlas_context` em `debug` |
 
-> **Versão mínima:** grafo exige índice `2.1.0+`. Índices `2.0.0` ainda buscam,
-> mas não têm `graph.json`.
+Com `ATLAS_SEMANTIC=1` e a origem configurada, aparece também `semantic.json`. Com `ATLAS_OBSERVABILITY=1`, o tamanho de cada resposta vai para `observability/events.jsonl`.
+
+> **Versão mínima do grafo:** índice `2.1.0+`. Índices `2.0.x` ainda buscam, mas não têm `graph.json`. O formato atual do índice novo é `2.3.0`; índices `2.0.x`–`2.2.x` continuam buscáveis. A conversão integral é `atlas-index --full` sem `--paths`.
+
+### Onde o servidor acha `.code-index`
+
+Na abertura, o processo sobe a partir da pasta em que nasceu até achar uma pasta `.code-index`. Se o editor informar a raiz (`CLAUDE_PROJECT_DIR` ou `WORKSPACE_FOLDER_PATHS`), a busca recomeça dali. A primeira ferramenta ainda pode perguntar as raízes do workspace ao cliente MCP, quando a partida caiu no fallback.
+
+No Cursor o processo nasce na pasta pessoal e essa variável de workspace não entra no ambiente. A subida não alcança o `.code-index` da raiz do repositório. O `mcp.json` do projeto precisa de `ATLAS_INDEX_DIR=${workspaceFolder}/.code-index`. O detalhe da cadeia está na [referência do operador](referencia.md#onde-fica-o-code-index).
 
 ---
 
@@ -269,7 +300,7 @@ manifest. Só funciona se a **raiz do workspace** for um repositório git.
 **Sim** — repita `--paths`:
 
 ```bash
-uv run atlas-index -w . -p frontend -p backend -p shared
+atlas-index --workspace . --paths frontend --paths backend --paths shared
 ```
 
 ```mermaid
@@ -331,6 +362,7 @@ mindmap
       atlas_brief
     Tarefa
       atlas_context
+      atlas_expand
     Conectividade
       atlas_graph
     Operação
@@ -343,11 +375,12 @@ mindmap
 | `atlas_search` | "Onde está X?" / "Como funciona Y?" | `file_path`, linhas, símbolo, score; `structural=true` e hits `type="commit"` |
 | `atlas_brief` | Orientar-se num projeto desconhecido | identidade, camadas, entrypoints, hubs |
 | `atlas_context` | Símbolo/arquivo da tarefa já conhecido | pacote por `intent` (`edit`/`debug`/`review`/`understand`) |
+| `atlas_expand` | Abrir o código de um resultado compacto | até poucos símbolos por chamada, pelo `ref` |
 | `atlas_graph` | Conectividade, hubs, caminhos, impacto | Nós, arestas, vizinhança, `affected` |
 | `atlas_status` | Diagnóstico do índice | stale?, `watch`, `semantic`, `resolution_coverage` |
 | `atlas_index` | Criar/atualizar índice | stats ou job em background |
 
-Variáveis de ambiente (`ATLAS_*`): veja a tabela em [README — Configuração](../README.md#configuração-e-variáveis-de-ambiente) e no [site](index.html#config).
+Variáveis do `mcp.json`, com exemplo de preenchimento: [README — Configuração](../README.md#configuração-do-mcp). Contrato e medições: [referência do operador](referencia.md#configuração-e-variáveis-de-ambiente). O que liga o Jev: [README — Jev](../README.md#o-que-precisa-estar-no-env).
 
 ### Fluxo recomendado para agentes
 
@@ -355,24 +388,25 @@ Variáveis de ambiente (`ATLAS_*`): veja a tabela em [README — Configuração]
 sequenceDiagram
     participant Agente
     participant Search as atlas_search
+    participant Expand as atlas_expand
     participant Graph as atlas_graph
-    participant Read as Read (editor)
 
-    Agente->>Search: query + path_prefix
-    Search-->>Agente: metadados (file, lines, symbol)
-    Agente->>Read: linhas exatas
-    opt Pergunta sobre conexões
-        Agente->>Graph: mode=explain, target=symbol
-        Graph-->>Agente: docs citados, imports, rationale
+    Agente->>Search: query, só metadados
+    Search-->>Agente: arquivo, linhas, símbolo
+    Agente->>Expand: uma ou duas refs
+    Expand-->>Agente: código do símbolo
+    opt Alcance de uma mudança
+        Agente->>Graph: mode=affected, target=symbol
+        Graph-->>Agente: o que depende do símbolo
     end
 ```
 
 1. **`atlas_brief`** uma vez, se o projeto for desconhecido.
-2. **`atlas_context`** quando o símbolo/arquivo da tarefa já é conhecido.
-3. **`atlas_search`** com metadados only (`include_content=false`) para descoberta.
-4. **`Read`** nas linhas retornadas.
-5. **`atlas_graph(explain|affected)`** se precisar de vizinhança ou raio de impacto.
-6. **`grep`** só para confirmar string literal exata.
+2. **`atlas_context`** quando o símbolo ou o arquivo da tarefa já é conhecido.
+3. **`atlas_search`** com metadados para localizar. Omita `response_profile` para respeitar `ATLAS_CONTEXT_OPTIMIZATION`.
+4. **`atlas_expand`** em uma ou duas refs ligadas à pergunta. Leia antes de abrir mais.
+5. **`atlas_graph`** com `affected` para o alcance de uma mudança, ou `explain` para a vizinhança.
+6. **`grep`** só para confirmar uma string literal.
 
 ---
 
@@ -393,10 +427,10 @@ quadrantChart
     title Escolha da ferramenta
     x-axis Semântica --> Estrutural
     y-axis Localizar código --> Entender relações
-    atlas_search: [0.25, 0.75]
-    atlas_context: [0.55, 0.45]
-    atlas_graph: [0.70, 0.25]
-    graph.html: [0.85, 0.15]
+    atlas_search: [0.22, 0.25]
+    atlas_context: [0.48, 0.55]
+    atlas_graph: [0.78, 0.82]
+    graph.html: [0.88, 0.70]
 ```
 
 ---
@@ -458,6 +492,8 @@ erDiagram
 | `links_to` | Link/wikilink em markdown | `index.md` → `dec-002.md` |
 | `cites` | Referência `DECISAO-005` no código | função → doc de decisão |
 | `annotates` | Comentário rationale no símbolo | `# WHY: …` → nó rationale |
+| `calls` | Quem chama quem | só com `ATLAS_SCIP=1` e o indexador da linguagem instalado; `origin` é `scip` |
+| `touches` | Commit do Git que tocou o arquivo | história local; `affected` ignora essa aresta |
 
 ### Tool `atlas_graph` — quatro modos
 
@@ -593,13 +629,15 @@ Consulte [indexação incremental](../decisions/dec-003-indexacao-incremental.md
 
 ### Imports (automático)
 
+O grafo resolve o arquivo de destino em Python, JavaScript, TypeScript, Go, Java, C#, Kotlin, Scala, Rust, PHP, Ruby e Swift. Nas outras linguagens o import pode aparecer no trecho, mas não vira aresta: ausência de aresta não significa ausência de dependência.
+
 - **Python:** `from codesteer_atlas.storage import StorageBackend`
 - **JS/TS:** imports relativos `./utils` ou `../lib`
 
 Após adicionar referências, reindexe:
 
 ```bash
-uv run atlas-index --workspace .
+atlas-index --workspace .
 ```
 
 ---
@@ -610,12 +648,15 @@ uv run atlas-index --workspace .
 
 ```mermaid
 flowchart TD
-    S1[./setup.sh ou uv sync] --> S2[uv run atlas-index --workspace .]
-    S2 --> S3[uv run python deploy_mcp.py]
-    S3 --> S4[Reiniciar editor MCP]
-    S4 --> S5[atlas_status — confirmar index_exists]
-    S5 --> S6[Opcional: open .code-index/graph.html]
+    S1[mcp.json na raiz do projeto] --> S2["atlas-index --workspace ."]
+    S2 --> S3[Reiniciar o editor]
+    S3 --> S4["atlas_status — index_exists"]
+    S4 --> S5[Opcional: abrir graph.html]
 ```
+
+No Cursor, o `mcp.json` leva `ATLAS_INDEX_DIR=${workspaceFolder}/.code-index`. O passo a passo de instalação está no [README](../README.md#começar).
+
+Quem altera o servidor, dentro deste clone, usa `./setup.sh` e `uv run atlas-index --workspace .`.
 
 ### Explorar uma feature desconhecida
 
@@ -627,13 +668,13 @@ flowchart TD
 ### Atualizar após mudanças grandes
 
 1. `atlas_status` → se `is_stale: true`, rodar `atlas_index`.
-2. Ou direto: `uv run atlas-index --workspace .`
+2. Ou direto: `atlas-index --workspace .`
 3. Reindex completo raro: `--full` apenas se manifest corrompido ou upgrade de versão.
 
 ### Workspace multi-repo
 
 1. Abrir a **pasta pai** no editor (não multi-root com índices separados).
-2. `uv run atlas-index --workspace /caminho/meu-workspace`
+2. `atlas-index --workspace /caminho/meu-workspace`
 3. Buscar com `path_prefix="nome-do-repo/"`.
 
 ---
@@ -648,11 +689,14 @@ Use `atlas_status` ou reindexe quando a busca parecer desatualizada.
 Sim: `--paths src`. O restante do índice permanece intacto.
 
 **O MCP funciona offline?**
-Sim. Embeddings e LanceDB são 100% locais. Nenhum código sai da máquina.
+Na configuração padrão, sim: embeddings e LanceDB ficam na máquina. O Jev (`ATLAS_RELEVANCE=1`) e a camada semântica (`ATLAS_SEMANTIC=1`) enviam a consulta e trechos para a API que você configurou. O bloco mínimo do Jev está no [README](../README.md#o-que-precisa-estar-no-env).
+
+**Por que o Cursor não acha o `.code-index` da raiz?**
+O processo do MCP nasce na pasta pessoal. Defina `ATLAS_INDEX_DIR` como `${workspaceFolder}/.code-index` no `.cursor/mcp.json` do projeto e reinicie o editor.
 
 **Por que `atlas_graph` falha com "graph.json não encontrado"?**
 O índice foi criado antes da versão `2.1.0` ou a indexação não completou a fase
-Graph. Rode `uv run atlas-index --workspace . --full`.
+Graph. Rode `atlas-index --workspace . --full`.
 
 **Posso ter dois `.code-index` ativos no MCP?**
 Não na mesma instância. O servidor resolve **um** índice por processo. Use índice
@@ -668,11 +712,12 @@ grep para confirmar literais.
 
 ## Referências
 
-- [README](../README.md) — instalação e início rápido
+- [README](../README.md) — instalação, configuração do MCP e Jev
+- [Referência do operador](referencia.md) — contrato, medições e resolução do índice
 - [Documentação visual](index.html) — conceitos MCP e busca híbrida
-- [CLAUDE.md](../CLAUDE.md) — arquitetura técnica para agentes
-- Código-fonte: `src/codesteer_atlas/indexer.py`, `graph.py`, `server.py`
+- [AGENTS.md](../AGENTS.md) — arquitetura para quem desenvolve o Atlas
+- Código-fonte: `src/codesteer_atlas/indexer.py`, `chunker.py`, `graph.py`, `server.py`
 
 ---
 
-*Última atualização: julho/2026 · CodeSteer Atlas 2.1.0+*
+*Atualizado em setembro/2026.*

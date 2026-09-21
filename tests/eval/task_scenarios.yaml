@@ -1,0 +1,107 @@
+# Cenários de tarefa para medição de contexto acumulado
+#
+# Usado pelo harness experimental (não entra no índice — ver `.atlasignore`).
+# Cada cenário declara evidências necessárias antes de medir tokens acumulados
+# (resposta inicial + expansões). Tokenizer reportado pelo harness; contagem
+# local ≠ faturamento do agente.
+#
+# Distribuição: localização / entendimento / depuração / revisão (3 cada).
+
+scenarios:
+  - id: locate-resolve-index-dir
+    intent: locate
+    query: "como o diretório do índice é resolvido no startup do servidor"
+    required_evidence:
+      - file_path: src/codesteer_atlas/server.py
+        scope_name: resolve_index_dir
+    relations: []
+
+  - id: locate-search-hybrid
+    intent: locate
+    query: "search_hybrid"
+    required_evidence:
+      - file_path: src/codesteer_atlas/storage.py
+        scope_name: StorageBackend.search_hybrid
+    relations: []
+
+  - id: locate-embedding-lazy
+    intent: locate
+    query: "carregar o modelo de embedding só na primeira chamada"
+    required_evidence:
+      - file_path: src/codesteer_atlas/embeddings.py
+        scope_name: EmbeddingEngine
+    relations: []
+
+  - id: understand-rrf-fusion
+    intent: understand
+    query: "fusão dos rankings vetorial e textual em uma lista só"
+    required_evidence:
+      - file_path: src/codesteer_atlas/storage.py
+        scope_name: StorageBackend.search_hybrid
+    relations: []
+
+  - id: understand-response-budget
+    intent: understand
+    query: "finalize_response"
+    required_evidence:
+      - file_path: src/codesteer_atlas/response_budget.py
+        scope_name: finalize_response
+    relations: []
+
+  - id: understand-context-pack
+    intent: understand
+    query: "build_context"
+    required_evidence:
+      - file_path: src/codesteer_atlas/context.py
+        scope_name: build_context
+    relations: []
+
+  - id: debug-index-lock
+    intent: debug
+    query: "impedir que duas reindexações rodem ao mesmo tempo"
+    required_evidence:
+      - file_path: src/codesteer_atlas/locking.py
+        scope_name: reindex_lock
+    relations: []
+
+  - id: debug-fts-unavailable
+    intent: debug
+    query: "fts_unavailable"
+    required_evidence:
+      - file_path: src/codesteer_atlas/storage.py
+        scope_name: StorageBackend.search_hybrid
+    relations: []
+
+  - id: debug-relevance-fallback
+    intent: debug
+    query: "try_rerank"
+    required_evidence:
+      - file_path: src/codesteer_atlas/relevance.py
+        scope_name: try_rerank
+    relations: []
+
+  - id: review-chunker-truncate
+    intent: review
+    query: "_truncate_content"
+    required_evidence:
+      - file_path: src/codesteer_atlas/chunker.py
+        scope_name: ASTChunker._truncate_content
+    relations: []
+
+  - id: review-manifest-atomic
+    intent: review
+    query: "gravar o manifesto sem risco de leitura parcial"
+    required_evidence:
+      - file_path: src/codesteer_atlas/storage.py
+        scope_name: _write_manifest_atomic
+    relations: []
+
+  - id: review-graph-affected
+    intent: review
+    query: "affected"
+    required_evidence:
+      - file_path: src/codesteer_atlas/graph.py
+        scope_name: affected
+    relations:
+      - kind: tests
+        note: "cobertura em tests/test_graph.py quando presente"

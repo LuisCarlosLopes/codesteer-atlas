@@ -272,6 +272,42 @@ SEMANTIC_FILENAME = "semantic.json"
 SEMANTIC_MAX_TEXT_CHARS = 4000
 SEMANTIC_MAX_SUMMARY_CHARS = 1200
 
+# ---------------------------------------------------------------------------
+# Avaliador de relevância Jev (opt-in, desligado por padrão)
+# ---------------------------------------------------------------------------
+
+RELEVANCE_ENV_FLAG = "ATLAS_RELEVANCE"
+RELEVANCE_GATE_ENV_FLAG = "ATLAS_RELEVANCE_GATE"
+RELEVANCE_API_URL_ENV = "ATLAS_RELEVANCE_API_URL"
+RELEVANCE_API_KEY_ENV = "ATLAS_RELEVANCE_API_KEY"
+RELEVANCE_MODEL_ENV = "ATLAS_RELEVANCE_MODEL"
+RELEVANCE_DEFAULT_MODEL = "~typesafe/jev-latest"
+RELEVANCE_TIMEOUT_S = 3.0
+RELEVANCE_MAX_CANDIDATES = 50
+RELEVANCE_MAX_CONTENT_CHARS = 2000
+RELEVANCE_MAX_REQUEST_BYTES = 24000
+RELEVANCE_MAX_RESPONSE_BYTES = 256 * 1024
+RELEVANCE_MIN_CONFIDENCE = 0.70
+RELEVANCE_MAX_BATCH_CALLS = 2
+RELEVANCE_RUBRIC_VERSION = "jev-relevance-score-v1"
+# Seleção semântica conservadora (perfil compacto): score ≤ limiar e confiança
+# ≥ limiar. Escala Jev 0–2; 0,25 cobre só o nível `irrelevant` (0).
+RELEVANCE_DROP_SCORE_MAX = 0.25
+RELEVANCE_DROP_CONFIDENCE_MIN = 0.90
+OPENROUTER_CHAT_COMPLETIONS_PATH = "/api/v1/chat/completions"
+OPENROUTER_SYSTEMONE_PATH = "/api/v1/systemone"
+OPENROUTER_HOST = "openrouter.ai"
+
+# ---------------------------------------------------------------------------
+# Otimização de contexto (opt-in, desligada por padrão; independente do Jev)
+# ---------------------------------------------------------------------------
+
+CONTEXT_OPTIMIZATION_ENV_FLAG = "ATLAS_CONTEXT_OPTIMIZATION"
+# Fração do teto vigente aplicada no perfil compacto (busca e contexto).
+CONTEXT_OPTIMIZATION_BUDGET_RATIO = 0.70
+CONTEXT_EXPAND_MAX_REFS = 5
+CHUNK_TRUNCATION_MARKER = "# ... [conteúdo truncado para respeitar limites do modelo] ..."
+
 # Tier de resolução de import por linguagem (DECISÃO-005). Cada linguagem de
 # SUPPORTED_EXTENSIONS aparece em EXATAMENTE um tier — `tests/test_resolution_coverage.py`
 # falha quando uma extensão nova entra sem decisão de tier, que é o modo de falha
@@ -359,7 +395,13 @@ BUNDLED_TOKENIZER_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
 BUNDLED_TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
 
 OBSERVABILITY_EVENT_SCHEMA_VERSION = "1.0"
-OBSERVABILITY_TOOLS = ("atlas_search", "atlas_context", "atlas_brief", "atlas_graph")
+OBSERVABILITY_TOOLS = (
+    "atlas_search",
+    "atlas_context",
+    "atlas_brief",
+    "atlas_graph",
+    "atlas_expand",
+)
 
 OBSERVABILITY_DIRNAME = "observability"
 OBSERVABILITY_EVENTS_FILENAME = "events.jsonl"
@@ -382,6 +424,22 @@ RESPONSE_BUDGET_SEARCH_MAX_TOKENS = 6000
 
 RESPONSE_BUDGET_CONTEXT_MAX_BYTES = CONTEXT_RESPONSE_MAX_CHARS
 RESPONSE_BUDGET_CONTEXT_MAX_TOKENS = 4000
+
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS = int(
+    RESPONSE_BUDGET_SEARCH_MAX_CHARS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES = int(
+    RESPONSE_BUDGET_SEARCH_MAX_BYTES * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS = int(
+    RESPONSE_BUDGET_SEARCH_MAX_TOKENS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES = int(
+    CONTEXT_RESPONSE_MAX_CHARS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS = int(
+    RESPONSE_BUDGET_CONTEXT_MAX_TOKENS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
 
 RESPONSE_BUDGET_GRAPH_MAX_BYTES = GRAPH_RESPONSE_MAX_CHARS
 RESPONSE_BUDGET_GRAPH_MAX_TOKENS = 2000

@@ -56,6 +56,43 @@ EVAL_TOP_K = 10
 RECALL_AT = 5
 
 DELIVERY_MODES = ("metadata", "content")
+DELIVERY_VARIANTS = (("full", "projection"), ("compact", "projection"),
+                     ("compact", "dedup"), ("compact", "selection"))
+
+# Estratos de warning: só degradação de índice exclui a linha das métricas
+# comparáveis de ranking. Jev/orçamento/cobrança aparecem como estrato.
+INDEX_DEGRADATION_WARNINGS = frozenset(
+    {
+        "fts_unavailable",
+        "vector_search_unavailable",
+        "cross_encoder_unavailable",
+        "structural_arm_unavailable",
+        "semantic_layer_unavailable",
+        "semantic_arm_unavailable",
+        "git_history_unavailable",
+    }
+)
+JEV_FALLBACK_WARNINGS = frozenset(
+    {
+        "relevance_unavailable",
+        "relevance_invalid_response",
+        "relevance_low_confidence",
+        "relevance_budget_exceeded",
+        "relevance_unconfirmed_fallback",
+    }
+)
+BUDGET_OMISSION_WARNINGS = frozenset({"truncated_for_budget"})
+COST_UNKNOWN_WARNINGS = frozenset({"relevance_cost_unknown"})
+
+
+def classify_warning_strata(warnings: List[str]) -> Dict[str, bool]:
+    codes = set(warnings or [])
+    return {
+        "index_degraded": bool(codes & INDEX_DEGRADATION_WARNINGS),
+        "jev_fallback": bool(codes & JEV_FALLBACK_WARNINGS),
+        "budget_omission": bool(codes & BUDGET_OMISSION_WARNINGS),
+        "cost_unknown": bool(codes & COST_UNKNOWN_WARNINGS),
+    }
 
 
 def _import_server_and_restore_console():
@@ -125,11 +162,92 @@ def _first_hit_rank(results: List[Any], targets: List[Dict[str, str]]) -> Option
 def _active_reranker() -> Dict[str, Any]:
     """Registra qual reordenador está ativo — sem isso o A/B de 2.1 fica opaco."""
     if os.environ.get(RERANK_ENV_FLAG, "1") == "0":
-        return {"reranker": "none", "rerank_model": None}
+        return {"reranker": "none", "rerank_model": None, "rubric": None}
+    from codesteer_atlas.config import RELEVANCE_RUBRIC_VERSION
+    from codesteer_atlas.relevance import resolve_config
+
+    cfg = resolve_config()
+    if cfg.enabled:
+        return {"reranker": "jev", "rerank_model": cfg.model, "rubric": RELEVANCE_RUBRIC_VERSION}
     model = os.environ.get(RERANK_MODEL_ENV_FLAG)
     if model:
-        return {"reranker": "cross_encoder", "rerank_model": model}
-    return {"reranker": "lexical", "rerank_model": None}
+        return {"reranker": "cross_encoder", "rerank_model": model, "rubric": None}
+    return {"reranker": "lexical", "rerank_model": None, "rubric": None}
+
+
+def new_relevance_tracker() -> Dict[str, Any]:
+    from codesteer_atlas.config import RELEVANCE_RUBRIC_VERSION
+
+    return {
+        "requests": 0,
+        "valid_evaluations": 0,
+        "fallbacks": 0,
+        "cost_usd_known": 0.0,
+        "cost_known_n": 0,
+        "cost_unknown_count": 0,
+        "stage_ms": [],
+        "complete": True,
+        "stop_reason": None,
+        "model": None,
+        "rubric": RELEVANCE_RUBRIC_VERSION,
+    }
+
+
+def observe_relevance_usage(tracker: Dict[str, Any], usage: Any, max_cost_usd: float) -> bool:
+    """Atualiza o tracker. True = parar antes da próxima chamada remota."""
+    if usage is None:
+        return False
+    tracker["model"] = usage.resolved_model or usage.requested_model or tracker["model"]
+    tracker["requests"] += usage.request_count
+    if usage.status == "success":
+        tracker["valid_evaluations"] += 1
+    elif usage.status == "fallback":
+        tracker["fallbacks"] += 1
+    if usage.duration_ms is not None:
+        tracker["stage_ms"].append(usage.duration_ms)
+    if usage.cost_status == "reported" and usage.cost_usd is not None:
+        tracker["cost_usd_known"] += usage.cost_usd
+        tracker["cost_known_n"] += 1
+        if tracker["cost_usd_known"] >= max_cost_usd:
+            tracker["complete"] = False
+            tracker["stop_reason"] = "max_cost"
+            return True
+    elif usage.request_count > 0 and usage.cost_status in {"unknown", "partially_known"}:
+        if usage.cost_usd is not None:
+            tracker["cost_usd_known"] += usage.cost_usd
+            tracker["cost_known_n"] += 1
+        tracker["cost_unknown_count"] += 1
+        tracker["complete"] = False
+        tracker["stop_reason"] = "unknown_cost"
+        return True
+    return False
+
+
+def finalize_relevance_report(tracker: Dict[str, Any]) -> Dict[str, Any]:
+    known = (
+        round(tracker["cost_usd_known"], 6) if tracker["cost_known_n"] else None
+    )
+    experimental_success = bool(
+        tracker["complete"]
+        and tracker["valid_evaluations"] > 0
+        and tracker["fallbacks"] < max(tracker["requests"], 1)
+    )
+    if tracker["requests"] > 0 and tracker["valid_evaluations"] == 0:
+        experimental_success = False
+    return {
+        "model": tracker["model"],
+        "rubric": tracker["rubric"],
+        "requests": tracker["requests"],
+        "valid_evaluations": tracker["valid_evaluations"],
+        "fallbacks": tracker["fallbacks"],
+        "cost_usd_known": known,
+        "cost_unknown_count": tracker["cost_unknown_count"],
+        "complete": tracker["complete"],
+        "stop_reason": tracker["stop_reason"],
+        "experimental_success": experimental_success,
+        "stage_ms_p50": _percentile(tracker["stage_ms"], 50),
+        "stage_ms_p95": _percentile(tracker["stage_ms"], 95),
+    }
 
 
 def _percentile(values: List[float], pct: float) -> Optional[float]:
@@ -141,12 +259,20 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     return ordered[k - 1]
 
 
-def _delivery_rank(final_payload: dict, targets: List[Dict[str, str]]) -> Optional[int]:
+def _delivery_rank(final_payload: dict, targets: List[Dict[str, str]], candidates=()) -> Optional[int]:
     """Mesma semântica de `_first_hit_rank`, mas sobre os itens JÁ serializados
     (e possivelmente cortados pelo orçamento), não sobre `SearchResult` cru."""
     wanted = {(t["file_path"], t["scope_name"]) for t in targets}
+    by_id = {r.chunk_id: r for r in candidates if r.chunk_id}
     for position, item in enumerate(final_payload.get("results") or [], start=1):
         if (item.get("file_path"), item.get("symbol")) in wanted:
+            return position
+        for ref in item.get("covered_refs", []):
+            covered = by_id.get(ref)
+            if covered is None or (covered.file_path, covered.scope_name) not in wanted:
+                continue
+            if "content" in item and (not covered.content or covered.content not in item["content"]):
+                continue
             return position
     return None
 
@@ -160,6 +286,9 @@ def _delivery_for_query(
     targets: List[Dict[str, str]],
     *,
     mode: str,
+    profile: str = "full",
+    query: str = "",
+    optimization_stage: str = "selection",
 ) -> Dict[str, Any]:
     """
     Monta e finaliza a resposta de `atlas_search` para os MESMOS candidatos já
@@ -168,35 +297,34 @@ def _delivery_for_query(
     observabilidade-tokens-consultas).
     """
     include_content = mode == "content"
-    payload = atlas_server.assemble_search_payload(
-        storage,
-        outcome.results,
-        manifest,
-        include_content=include_content,
-        query_time_ms=0.0,
-        warnings=outcome.warnings,
+    budget = None
+    if profile == "full":
+        budget = response_budget_mod.ResponseBudget(
+            "search", RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+            RESPONSE_BUDGET_SEARCH_MAX_BYTES, RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+        )
+    started = time.perf_counter()
+    text, measurement = atlas_server.prepare_search_delivery(
+        storage, manifest, outcome, query=query, top_k=EVAL_TOP_K,
+        include_content=include_content, profile=profile, budget=budget,
+        optimization_stage=optimization_stage,
     )
-    budget = response_budget_mod.ResponseBudget(
-        "search",
-        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
-        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
-        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
-    )
-    text, measurement = response_budget_mod.finalize_response(
-        payload,
-        budget,
-        cut_once=atlas_server._search_cut_once,
-        minimal_envelope=atlas_server._search_minimal_envelope,
-    )
+    delivery_ms = (time.perf_counter() - started) * 1000
     final = json.loads(text)
-    rank = _delivery_rank(final, targets)
-    degraded = bool(outcome.warnings)
+    rank = _delivery_rank(final, targets, getattr(outcome, "candidate_pool", None) or outcome.results)
+    strata = classify_warning_strata(final.get("warnings", []))
+    # Só degradação de índice tira a linha do estrato comparável de ranking.
+    degraded = strata["index_degraded"]
     return {
         "mode": mode,
+        "profile": profile,
+        "optimization_stage": optimization_stage,
+        "delivery_ms": delivery_ms,
         "rank": rank,
         "rr": (1.0 / rank) if rank else 0.0,
         "hit_at_5": bool(rank and rank <= RECALL_AT),
         "degraded": degraded,
+        "strata": strata,
         "response_chars": measurement.chars,
         "response_bytes": measurement.bytes,
         "response_tokens": measurement.tokens,
@@ -210,26 +338,39 @@ def _delivery_for_query(
 
 def _agg_delivery(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Agrega delivery por classe/modo. `mrr`/`recall_at_5` excluem consultas
-    degradadas (braço da busca falhou) — misturá-las mediria a degradação, não
-    o corte de orçamento. `None` (nunca 0) quando não há linha comparável.
+    Agrega delivery por classe/modo. Métricas globais incluem todos os casos;
+    `comparable` exclui só degradação de índice. Estratos Jev/orçamento/cobrança
+    são reportados ao lado, sem exclusão silenciosa.
     """
     n = len(rows)
     comparable = [r for r in rows if not r["degraded"]]
     chars = [r["response_chars"] for r in rows if r["response_chars"] is not None]
     tokens = [r["response_tokens"] for r in rows if r["response_tokens"] is not None]
+    strata_counts = {
+        "index_degraded": sum(1 for r in rows if (r.get("strata") or {}).get("index_degraded")),
+        "jev_fallback": sum(1 for r in rows if (r.get("strata") or {}).get("jev_fallback")),
+        "budget_omission": sum(1 for r in rows if (r.get("strata") or {}).get("budget_omission")),
+        "cost_unknown": sum(1 for r in rows if (r.get("strata") or {}).get("cost_unknown")),
+    }
     return {
         "n": n,
         "comparable": len(comparable),
         "degraded": n - len(comparable),
+        "strata": strata_counts,
         "mrr": round(sum(r["rr"] for r in comparable) / len(comparable), 4) if comparable else None,
+        "mrr_all": round(sum(r["rr"] for r in rows) / n, 4) if n else None,
         "recall_at_5": (
             round(sum(1 for r in comparable if r["hit_at_5"]) / len(comparable), 4)
             if comparable
             else None
         ),
+        "recall_at_5_all": round(sum(1 for r in rows if r["hit_at_5"]) / n, 4) if n else None,
         "truncated_ratio": round(sum(1 for r in rows if r["truncated"]) / n, 4) if n else 0.0,
         "results_omitted_total": sum(r["results_omitted"] for r in rows),
+        "response_tokens_total": sum(tokens) if len(tokens) == n else None,
+        "response_bytes_total": sum(r.get("response_bytes", 0) for r in rows),
+        "delivery_ms_p50": _percentile([r.get("delivery_ms", 0) for r in rows], 50),
+        "delivery_ms_p95": _percentile([r.get("delivery_ms", 0) for r in rows], 95),
         "response_chars_p50": _percentile(chars, 50),
         "response_chars_p95": _percentile(chars, 95),
         "response_tokens_p50": _percentile(tokens, 50),
@@ -239,9 +380,135 @@ def _agg_delivery(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _complete_expansion_items(items):
+    """Só recompõe cadeias contíguas iniciadas no offset zero, sem pular páginas."""
+    by_ref = {item.get("ref"): item for item in items if item.get("status") == "ok"}
+    complete = [item for item in items if "content_range" not in item]
+    for first in items:
+        if first.get("status") != "ok" or first.get("content_range", [-1])[0] != 0:
+            continue
+        item = first
+        parts = []
+        offset = 0
+        seen = set()
+        while item and item.get("ref") not in seen:
+            seen.add(item.get("ref"))
+            bounds = item.get("content_range", [])
+            content = item.get("content")
+            if (len(bounds) != 2 or bounds[0] != offset or not isinstance(content, str)
+                    or bounds[1] - bounds[0] != len(content)
+                    or (item.get("file_path"), item.get("symbol"), item.get("lines"))
+                    != (first.get("file_path"), first.get("symbol"), first.get("lines"))):
+                break
+            parts.append(content)
+            offset = bounds[1]
+            if item.get("content_complete"):
+                complete.append({**first, "content": "".join(parts), "content_complete": True})
+                break
+            item = by_ref.get(item.get("next_ref"))
+    return complete
+
+
+def measure_task_delivery(atlas_server, storage, manifest, outcome, scenario, *,
+                          workspace, profile, mode, optimization_stage="selection",
+                          max_expansion_calls=100, expansion_batch_size=5):
+    """Política reproduzível: expande em ordem, até cobrir evidências ou esgotar refs.
+
+    Não simula decisões de um agente; relações ainda não verificáveis ficam pendentes.
+    """
+    from codesteer_atlas.config import CHUNK_TRUNCATION_MARKER
+
+    if not 1 <= expansion_batch_size <= 5:
+        raise ValueError("expansion_batch_size deve estar entre 1 e 5")
+
+    started = time.perf_counter()
+    text, measurement = atlas_server.prepare_search_delivery(
+        storage, manifest, outcome, query=scenario["query"], top_k=EVAL_TOP_K,
+        profile=profile, include_content=mode == "content",
+        optimization_stage=optimization_stage,
+    )
+    initial = json.loads(text)
+    candidates = getattr(outcome, "candidate_pool", None) or outcome.results
+    by_identity = {(r.file_path, r.scope_name, r.start_line, r.end_line): r.chunk_id for r in candidates}
+    measurements = [measurement]
+    evidence = list(initial.get("results", []))
+    content_required = scenario["intent"] != "locate"
+
+    def covered(target):
+        for item in _complete_expansion_items(evidence):
+            if item.get("status") not in (None, "ok"):
+                continue
+            if content_required and (not item.get("content") or (
+                    not item.get("content_complete") and CHUNK_TRUNCATION_MARKER in item["content"])):
+                continue
+            if _delivery_rank({"results": [item]}, [target], candidates):
+                return True
+        return False
+
+    refs = list(dict.fromkeys(
+        ref for item in initial.get("results", [])
+        if (ref := item.get("ref") or by_identity.get((item.get("file_path"), item.get("symbol"), *item.get("lines", []))))
+        and (not item.get("content") or CHUNK_TRUNCATION_MARKER in item["content"])
+    ))
+    expansion_calls = 0
+    obsolete = 0
+    coverage_by_ref = {item.get("ref"): item.get("covered_refs", []) for item in evidence}
+    seen_refs = set()
+    continuation_count = 0
+    while refs and expansion_calls < max_expansion_calls:
+        if all(covered(t) for t in scenario["required_evidence"]):
+            break
+        batch, refs = refs[:expansion_batch_size], refs[expansion_batch_size:]
+        seen_refs.update(batch)
+        expanded, measured = atlas_server.prepare_expand_delivery(
+            storage, workspace, batch, include_content=True,
+        )
+        expansion_calls += 1
+        measurements.append(measured)
+        items = json.loads(expanded).get("results", [])
+        for item in items:
+            coverage = coverage_by_ref.get(item.get("ref"), [])
+            if coverage:
+                item["covered_refs"] = coverage
+            if item.get("next_ref"):
+                coverage_by_ref[item["next_ref"]] = coverage
+        evidence.extend(items)
+        continuations = [item["next_ref"] for item in items
+                         if item.get("next_ref") and item["next_ref"] not in seen_refs]
+        continuation_count += len(continuations)
+        refs = list(dict.fromkeys(continuations + refs))
+        obsolete += sum(item.get("status") == "obsolete" for item in items)
+    missing = [t for t in scenario["required_evidence"] if not covered(t)]
+    return {
+        "scenario_id": scenario["id"], "intent": scenario["intent"],
+        "profile": profile, "mode": mode, "optimization_stage": optimization_stage,
+        "evidence_complete": not missing,
+        "complete": not missing and not scenario.get("relations"),
+        "missing_evidence": missing, "unverified_relations": scenario.get("relations", []),
+        "expansion_calls": expansion_calls, "obsolete_refs": obsolete,
+        "expansion_batch_size": expansion_batch_size,
+        "continuations": continuation_count,
+        "expansion_limit_reached": bool(missing and refs and expansion_calls >= max_expansion_calls),
+        "search_tokens": measurement.tokens,
+        "total_tokens": sum(m.tokens for m in measurements) if all(m.tokens is not None for m in measurements) else None,
+        "estimated_tokens_total": sum(m.estimated_tokens or 0 for m in measurements),
+        "total_bytes": sum(m.bytes for m in measurements),
+        "delivery_and_expansion_ms": (time.perf_counter() - started) * 1000,
+    }
+
+
 def run_eval(
-    index_dir: Path, golden_path: Path, *, structural: bool = False, delivery: bool = False
+    index_dir: Path,
+    golden_path: Path,
+    *,
+    structural: bool = False,
+    delivery: bool = False,
+    max_cost_usd: float = 1.0,
+    repeats: int = 1,
+    tasks_path: Optional[Path] = None,
+    workspace: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    delivery = delivery or tasks_path is not None
     storage = StorageBackend(index_dir=index_dir)
     if not storage.exists():
         raise SystemExit(
@@ -267,45 +534,81 @@ def run_eval(
         lambda: defaultdict(list)
     )
     manifest = storage.get_manifest()
+    relevance_tracker = new_relevance_tracker()
+    stopped_early = False
 
-    for entry in queries:
-        query = entry["query"]
-        started = time.perf_counter()
-        outcome = storage.search_hybrid(
-            query_vector=engine.encode_single(query),
-            query_text=query,
-            filters={},
-            top_k=EVAL_TOP_K,
-            structural=structural,
-        )
-        query_times_ms.append((time.perf_counter() - started) * 1000)
-        # Ranking pré-budget: mede exatamente como antes, sobre TODOS os
-        # candidatos recuperados — `--delivery` nunca altera esta medição.
-        rank = _first_hit_rank(outcome.results, entry["targets"])
-        per_query.append(
-            {
-                "query": query,
-                "klass": entry["klass"],
-                "rank": rank,
-                "rr": (1.0 / rank) if rank else 0.0,
-                "hit_at_5": bool(rank and rank <= RECALL_AT),
-                "warnings": outcome.warnings,
-            }
-        )
+    for _repeat in range(max(1, repeats)):
+        for entry in queries:
+            query = entry["query"]
+            started = time.perf_counter()
+            outcome = storage.search_hybrid(
+                query_vector=engine.encode_single(query),
+                query_text=query,
+                filters={},
+                top_k=EVAL_TOP_K,
+                structural=structural,
+                include_candidates=delivery,
+            )
+            query_times_ms.append((time.perf_counter() - started) * 1000)
+            if observe_relevance_usage(
+                relevance_tracker, getattr(outcome, "relevance_usage", None), max_cost_usd
+            ):
+                stopped_early = True
+            # Ranking pré-budget: mede exatamente como antes, sobre TODOS os
+            # candidatos recuperados — `--delivery` nunca altera esta medição.
+            rank = _first_hit_rank(outcome.results, entry["targets"])
+            per_query.append(
+                {
+                    "query": query,
+                    "klass": entry["klass"],
+                    "rank": rank,
+                    "rr": (1.0 / rank) if rank else 0.0,
+                    "hit_at_5": bool(rank and rank <= RECALL_AT),
+                    "warnings": outcome.warnings,
+                }
+            )
 
-        if delivery:
-            for mode in DELIVERY_MODES:
-                row = _delivery_for_query(
-                    atlas_server,
-                    response_budget_mod,
-                    storage,
-                    manifest,
-                    outcome,
-                    entry["targets"],
-                    mode=mode,
-                )
-                row["query"] = query
-                delivery_by_class_mode[entry["klass"]][mode].append(row)
+            if delivery:
+                for profile, stage in DELIVERY_VARIANTS:
+                    for mode in DELIVERY_MODES:
+                        row = _delivery_for_query(
+                            atlas_server, response_budget_mod, storage, manifest, outcome,
+                            entry["targets"], mode=mode, profile=profile,
+                            query=query, optimization_stage=stage,
+                        )
+                        row["query"] = query
+                        row["scenario_id"] = f"golden-{_repeat}-{len(per_query):02d}"
+                        key = mode if profile == "full" else f"compact_{stage}_{mode}"
+                        delivery_by_class_mode[entry["klass"]][key].append(row)
+            if stopped_early:
+                break
+        if stopped_early:
+            break
+
+    task_rows = []
+    if tasks_path and not stopped_early:
+        scenarios = yaml.safe_load(tasks_path.read_text(encoding="utf-8"))["scenarios"]
+        for scenario in scenarios:
+            started = time.perf_counter()
+            outcome = storage.search_hybrid(
+                query_vector=engine.encode_single(scenario["query"]),
+                query_text=scenario["query"], filters={}, top_k=EVAL_TOP_K,
+                structural=structural, include_candidates=True,
+            )
+            retrieval_ms = (time.perf_counter() - started) * 1000
+            stop = observe_relevance_usage(relevance_tracker, outcome.relevance_usage, max_cost_usd)
+            for profile, stage in DELIVERY_VARIANTS:
+                for mode in DELIVERY_MODES:
+                    row = measure_task_delivery(
+                        atlas_server, storage, manifest, outcome, scenario,
+                        workspace=workspace or index_dir.resolve().parent,
+                        profile=profile, mode=mode, optimization_stage=stage,
+                    )
+                    row["retrieval_ms"] = retrieval_ms
+                    task_rows.append(row)
+            if stop:
+                stopped_early = True
+                break
 
     by_class: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in per_query:
@@ -321,6 +624,8 @@ def run_eval(
 
     reranker_info = _active_reranker()
     report: Dict[str, Any] = {
+        "task_scenarios": task_rows,
+        "stopped_early": stopped_early,
         "top_k": EVAL_TOP_K,
         "overall": _agg(per_query),
         "by_class": {k: _agg(v) for k, v in sorted(by_class.items())},
@@ -328,10 +633,16 @@ def run_eval(
         "structural": structural,
         "reranker": reranker_info["reranker"],
         "rerank_model": reranker_info["rerank_model"],
+        "rubric": reranker_info.get("rubric"),
         "total_chunks": manifest.total_chunks,
         "query_time_ms": round(sum(query_times_ms) / len(query_times_ms), 2)
         if query_times_ms
         else 0.0,
+        "query_time_ms_p50": _percentile(query_times_ms, 50),
+        "query_time_ms_p95": _percentile(query_times_ms, 95),
+        "relevance": finalize_relevance_report(relevance_tracker),
+        "repeats": repeats,
+        "max_cost_usd": max_cost_usd,
     }
 
     if delivery:
@@ -340,12 +651,13 @@ def run_eval(
             for mode, rows in modes.items():
                 all_rows_by_mode[mode].extend(rows)
         report["delivery"] = {
+            "per_query": dict(all_rows_by_mode),
             "budget": {
                 "max_chars": RESPONSE_BUDGET_SEARCH_MAX_CHARS,
                 "max_bytes": RESPONSE_BUDGET_SEARCH_MAX_BYTES,
                 "max_tokens": RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
             },
-            "overall": {mode: _agg_delivery(all_rows_by_mode.get(mode, [])) for mode in DELIVERY_MODES},
+            "overall": {mode: _agg_delivery(all_rows_by_mode.get(mode, [])) for mode in all_rows_by_mode},
             "by_class": {
                 klass: {mode: _agg_delivery(rows) for mode, rows in modes.items()}
                 for klass, modes in sorted(delivery_by_class_mode.items())
@@ -390,6 +702,22 @@ def print_report(report: Dict[str, Any], baseline: Optional[Dict[str, Any]]) -> 
         f"  total_chunks={report.get('total_chunks', '?')}"
         f"  query_time_ms={report.get('query_time_ms', '?')}"
     )
+    relevance = report.get("relevance")
+    if relevance:
+        print(
+            "\nrelevância: "
+            f"model={relevance.get('model') or '-'} "
+            f"rubric={relevance.get('rubric') or '-'} "
+            f"requests={relevance.get('requests')} "
+            f"valid={relevance.get('valid_evaluations')} "
+            f"fallback={relevance.get('fallbacks')} "
+            f"cost_known={relevance.get('cost_usd_known')} "
+            f"cost_unknown={relevance.get('cost_unknown_count')} "
+            f"complete={relevance.get('complete')} "
+            f"experimental_success={relevance.get('experimental_success')}"
+        )
+        if relevance.get("stop_reason"):
+            print(f"  execução incompleta: {relevance['stop_reason']}")
 
     misses = [r for r in report["per_query"] if r["rank"] is None]
     if misses:
@@ -397,10 +725,23 @@ def print_report(report: Dict[str, Any], baseline: Optional[Dict[str, Any]]) -> 
         for r in misses:
             print(f"  [{r['klass']}] {r['query']}")
 
-    degraded = [r for r in report["per_query"] if r["warnings"]]
-    if degraded:
-        print("\nBuscas degradadas (a métrica abaixo NÃO é comparável):")
-        for r in degraded:
+    index_degraded = []
+    other_warnings = []
+    for r in report["per_query"]:
+        if not r["warnings"]:
+            continue
+        strata = classify_warning_strata(r["warnings"])
+        if strata["index_degraded"]:
+            index_degraded.append(r)
+        else:
+            other_warnings.append(r)
+    if index_degraded:
+        print("\nDegradação de índice (métrica comparável exclui estas):")
+        for r in index_degraded:
+            print(f"  {r['query']!r}: {', '.join(r['warnings'])}")
+    if other_warnings:
+        print("\nAvisos não-índice (incluídos nas métricas globais):")
+        for r in other_warnings:
             print(f"  {r['query']!r}: {', '.join(r['warnings'])}")
 
     delivery = report.get("delivery")
@@ -630,6 +971,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=1.0,
+        help="Teto de custo conhecido por execução (default: 1.0). Custo desconhecido interrompe.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Repetições do golden set (use 3 para expor variância do Jev).",
+    )
+    parser.add_argument(
         "--benchmark",
         action="store_true",
         help=(
@@ -638,6 +991,8 @@ def main() -> int:
             "tokenizer embarcado/custom, carga fria separada do estado quente."
         ),
     )
+    parser.add_argument("--tasks", help="YAML de cenários; conta busca e expansões.")
+    parser.add_argument("--workspace", help="Workspace para validar hashes das expansões.")
     args = parser.parse_args()
 
     if args.benchmark:
@@ -656,6 +1011,10 @@ def main() -> int:
         Path(args.golden),
         structural=args.structural,
         delivery=args.delivery,
+        max_cost_usd=args.max_cost_usd,
+        repeats=args.repeats,
+        tasks_path=Path(args.tasks) if args.tasks else None,
+        workspace=Path(args.workspace) if args.workspace else None,
     )
 
     baseline = None

@@ -119,6 +119,8 @@ class SearchResult(BaseModel):
     score: float
     repo: str
     references: List[str] = Field(default_factory=list)
+    # Identidade LanceDB do chunk; usada por expansão e dedup, sem alterar o schema.
+    chunk_id: Optional[str] = None
     # @MindDecision: extensão aditiva para a variante histórica (F5.1); em type="commit"
     # os campos de localização ficam em sentinela e a associação vem de commit.files_touched.
     type: str = Field("code", description="Tipo do resultado: 'code' | 'commit'")
@@ -132,6 +134,60 @@ class SearchResult(BaseModel):
         " só quando structural=True). Um resultado presente em mais de um"
         " braço teve consenso entre eles",
     )
+    # Identidades cobertas por deduplicação (refs curtas); não serializadas no full.
+    covered_ids: List[str] = Field(default_factory=list)
+
+
+class CandidateEvaluation(BaseModel):
+    """Avaliação interna Jev por candidato; não vai integral à resposta compacta."""
+
+    candidate_id: str
+    score: Optional[float] = None
+    confidence: Optional[float] = None
+    state: str = Field(
+        "unevaluated",
+        description="evaluated | uncertain | unevaluated | batch_failed",
+    )
+    chunk_id: Optional[str] = None
+    file_path: Optional[str] = None
+    scope_name: Optional[str] = None
+
+
+class RelevanceUsage(BaseModel):
+    """
+    Ledger request-local do avaliador Jev. Não entra no payload MCP de resultados.
+    """
+
+    search_id: str
+    status: str = Field("disabled", description="disabled | skipped | success | fallback | partial")
+    reason: Optional[str] = None
+    requested_model: Optional[str] = None
+    resolved_model: Optional[str] = None
+    resolved_models: List[str] = Field(default_factory=list)
+    provider: Optional[str] = None
+    request_id: Optional[str] = None
+    request_count: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_usd: Optional[float] = 0.0
+    cost_status: str = Field(
+        "not_incurred",
+        description="not_incurred | unknown | reported | partially_known",
+    )
+    duration_ms: Optional[float] = None
+    ranking_changed: bool = False
+    confident_evaluations: int = 0
+    candidates_evaluated: int = 0
+    candidates_uncertain: int = 0
+    candidates_unevaluated: int = 0
+    removed_by_relevance: int = 0
+    removed_by_redundancy: int = 0
+    removed_by_budget: int = 0
+    bytes_recovered: int = 0
+    bytes_selected: int = 0
+    bytes_delivered: int = 0
+    expansions: int = 0
+    evaluations: List[CandidateEvaluation] = Field(default_factory=list)
 
 
 class SearchOutcome(BaseModel):
@@ -149,10 +205,25 @@ class SearchOutcome(BaseModel):
         description="Códigos de degradação: 'vector_search_unavailable' |"
         " 'fts_unavailable' | 'cross_encoder_unavailable' |"
         " 'structural_arm_unavailable' | 'semantic_layer_unavailable' |"
-        " 'semantic_arm_unavailable' | 'git_history_unavailable'. Os resultados estruturais"
+        " 'semantic_arm_unavailable' | 'git_history_unavailable' |"
+        " 'relevance_unavailable' | 'relevance_invalid_response' |"
+        " 'relevance_low_confidence' | 'relevance_budget_exceeded' |"
+        " 'relevance_cost_unknown' | 'relevance_unconfirmed_fallback'."
+        " Os resultados estruturais"
         " continuam disponíveis"
         " quando um aviso semântico aparece.",
     )
+    relevance_usage: Optional[RelevanceUsage] = Field(
+        None,
+        description="Ledger interno da avaliação Jev desta busca; não serializado no MCP.",
+    )
+    candidate_pool: Optional[List[SearchResult]] = None
+    pool_evaluations: List[CandidateEvaluation] = Field(default_factory=list)
+    local_fallback: List[SearchResult] = Field(default_factory=list)
+    history_candidates: List[SearchResult] = Field(default_factory=list)
+
+    # Avaliações alinhadas à ordem de `results` (após rerank); usadas só no compacto.
+    evaluations: List[CandidateEvaluation] = Field(default_factory=list)
 
 
 class IndexStats(BaseModel):

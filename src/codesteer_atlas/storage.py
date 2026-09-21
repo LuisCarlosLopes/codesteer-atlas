@@ -27,11 +27,13 @@ from codesteer_atlas.models import (
     CodeChunk,
     CommitRecord,
     IndexManifest,
+    RelevanceUsage,
     SearchOutcome,
     SearchResult,
 )
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
+from codesteer_atlas.relevance import new_usage, order_by_relevance, try_rerank
 from codesteer_atlas.semantic import semantic_enabled, semantic_index_state
 from codesteer_atlas.structural import node_id_for, spreading_activation
 
@@ -510,6 +512,8 @@ class StorageBackend:
         top_k: int,
         *,
         structural: bool = False,
+        relevance_usage: Optional[RelevanceUsage] = None,
+        include_candidates: bool = False,
     ) -> SearchOutcome:
         """
         Executa uma busca híbrida combinando busca vetorial (cosseno) e léxica (BM25 FTS)
@@ -520,10 +524,15 @@ class StorageBackend:
         quando existem matches suficientes (DECISAO-003).
 
         A reordenação pós-RRF roda sobre um pool maior que `top_k`, e a regra veio de
-        medição no golden set, não de intuição. Veja CLAUDE.md (DECISAO-007).
+        medição no golden set, não de intuição. Veja AGENTS.md (DECISAO-007).
 
         `structural=True` acrescenta o braço de grafo à fusão (opt-in por chamada).
         Sem `ATLAS_RERANK_MODEL`, a reordenação permanece a lexical de `ranking.rerank`.
+        `ATLAS_RELEVANCE=1` substitui essa reordenação por Jev quando a busca é elegível;
+        em falha, cai no reranker local anteriormente configurado.
+
+        `relevance_usage` é o ledger request-local do custo Jev; chamadas diretas
+        sem ledger (harness) criam um local e o devolvem em `SearchOutcome`.
 
         A falha de um braço isolado degrada a busca em vez de derrubá-la, mas é
         reportada em `SearchOutcome.warnings` — degradação silenciosa aqui significa
@@ -535,6 +544,8 @@ class StorageBackend:
             raise FileNotFoundError(
                 "Índice não encontrado. É necessário executar o indexer.py antes de realizar buscas."
             )
+
+        usage = relevance_usage if relevance_usage is not None else new_usage()
 
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
@@ -658,14 +669,53 @@ class StorageBackend:
                     repo=item["repo"],
                     references=decode_references_json(item.get("references_json")),
                     match_arms=arms_by_id.get(chunk_id, []),
+                    chunk_id=chunk_id,
                 )
             )
 
+        evaluations = []
+        local_fallback = list(pool)
         if _rerank_enabled():
-            pool = self._rerank_pool(pool, query_text, warnings)
+            reranked = try_rerank(pool, query_text, warnings, usage)
+            if reranked is None:
+                pool = self._rerank_pool(pool, query_text, warnings)
+                if usage.reason == "unique_exact_symbol":
+                    # Preserva a promoção de exatos do Jev usando apenas evidência local.
+                    pool = order_by_relevance(pool, query_text, {})
+                    usage.ranking_changed = [
+                        (r.chunk_id, r.file_path, r.scope_name) for r in pool
+                    ] != [(r.chunk_id, r.file_path, r.scope_name) for r in local_fallback]
+            else:
+                pool = reranked
+                evaluations = list(usage.evaluations)
+            if include_candidates:
+                local_fallback = (self._rerank_pool(local_fallback, query_text, warnings)
+                                  if reranked is not None else list(pool))
+        else:
+            usage.status = "skipped"
+            usage.reason = "rerank_disabled"
 
         history = self._search_history_arm(query_vector, query_text, filters, top_k, warnings)
-        return SearchOutcome(results=self._merge_typed(pool, history, top_k), warnings=warnings)
+        merged = self._merge_typed(pool, history, top_k)
+        eval_by_key = {}
+        for ev in evaluations:
+            key = ev.chunk_id or f"{ev.file_path}:{ev.scope_name}"
+            eval_by_key[key] = ev
+        aligned = []
+        for result in merged:
+            key = result.chunk_id or f"{result.file_path}:{result.scope_name}"
+            if key in eval_by_key:
+                aligned.append(eval_by_key[key])
+        return SearchOutcome(
+            results=merged,
+            warnings=warnings,
+            relevance_usage=usage,
+            evaluations=aligned,
+            candidate_pool=list(pool) if include_candidates else None,
+            pool_evaluations=evaluations if include_candidates else [],
+            local_fallback=local_fallback if include_candidates else [],
+            history_candidates=history if include_candidates else [],
+        )
 
     def _fuse_structural_arm(
         self,
@@ -806,6 +856,39 @@ class StorageBackend:
         except Exception:
             return None
         return rows[0].get("purpose") if rows else None
+
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
+        """Consulta direta por id do chunk — sem embedding nem Jev."""
+        if not self.exists() or not chunk_id:
+            return None
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        escaped = chunk_id.replace("'", "''")
+        try:
+            rows = (
+                table.search()
+                .where(f"id = '{escaped}'", prefilter=True)
+                .select(
+                    [
+                        "id",
+                        "file_path",
+                        "repo",
+                        "start_line",
+                        "end_line",
+                        "scope_type",
+                        "scope_name",
+                        "language",
+                        "content",
+                        "references_json",
+                    ]
+                )
+                .limit(1)
+                .to_arrow()
+                .to_pylist()
+            )
+        except Exception:
+            return None
+        return rows[0] if rows else None
 
     def get_sections_by_file_path(self, file_path: str) -> List[Dict[str, Any]]:
         """

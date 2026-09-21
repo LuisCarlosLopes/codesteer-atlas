@@ -1800,3 +1800,156 @@ def test_commit_com_score_acima_do_codigo_nao_desloca_o_top_k(temp_storage):
     ]
     assert com_vaga.results[2].type == "commit"
     assert com_vaga.results[2].commit.id == "a" * 40
+
+
+def _openrouter_relevance_env(monkeypatch):
+    monkeypatch.setenv("ATLAS_RELEVANCE", "1")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+    monkeypatch.setenv("ATLAS_SEMANTIC_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("ATLAS_RERANK", raising=False)
+
+
+def test_jev_promove_candidato_e_nao_roda_cross_encoder(temp_storage, monkeypatch):
+    from codesteer_atlas.reranker import CrossEncoderReranker
+
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+    ce_calls = {"n": 0}
+
+    def _spy(self, query, results):
+        ce_calls["n"] += 1
+        return results
+
+    monkeypatch.setattr(CrossEncoderReranker, "rerank", _spy)
+
+    def fake_post(_url, payload, **_kwargs):
+        answers = {}
+        for candidate in payload["state"]["candidates"]:
+            score = 2.0 if candidate["symbol"] == "totalmente_diferente" else 0.0
+            answers[candidate["id"]] = {"type": "score", "score": score, "confidence": 0.9}
+        return json.dumps(
+            {
+                "id": "gen-dec-test",
+                "model": "typesafe/jev-1.13",
+                "provider": "TypeSafe",
+                "answers": answers,
+                "usage": {"input_tokens": 8, "output_tokens": 2, "cost": 0.0},
+            }
+        )
+
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json", fake_post)
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A,
+        query_text="trecho pouco relacionado ao identificador",
+        filters={},
+        top_k=1,
+    )
+    assert ce_calls["n"] == 0
+    assert outcome.results[0].scope_name == "totalmente_diferente"
+    assert outcome.relevance_usage is not None
+    assert outcome.relevance_usage.status == "success"
+    assert "jev" not in outcome.results[0].match_arms
+
+
+def test_jev_fallback_dispara_cross_encoder(temp_storage, monkeypatch):
+    from codesteer_atlas.reranker import CrossEncoderReranker
+
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+    ce_calls = {"n": 0}
+
+    def _spy(self, query, results):
+        ce_calls["n"] += 1
+        return results
+
+    monkeypatch.setattr(CrossEncoderReranker, "rerank", _spy)
+    monkeypatch.setattr(
+        "codesteer_atlas.relevance.post_json",
+        lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+    assert ce_calls["n"] == 1
+    assert "relevance_unavailable" in outcome.warnings
+
+
+def test_atlas_rerank_zero_vence_relevancia(temp_storage, monkeypatch):
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "codesteer_atlas.relevance.post_json",
+        lambda *_a, **_k: called.__setitem__("n", called["n"] + 1) or "{}",
+    )
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=5
+    )
+    assert called["n"] == 0
+    assert outcome.relevance_usage.reason == "rerank_disabled"
+    scores = [r.score for r in outcome.results]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_jev_preserva_filtros_e_commits(temp_storage, monkeypatch):
+    _seed_two_chunks(temp_storage)
+    _publish_history(temp_storage, [_commit_record(vector=VEC_A)])
+    _openrouter_relevance_env(monkeypatch)
+    captured = {}
+
+    def fake_post(_url, payload, **_kwargs):
+        captured["symbols"] = [item["symbol"] for item in payload["state"]["candidates"]]
+        ids = list(payload["questions"])
+        return json.dumps(
+            {
+                "id": "gen-dec-test",
+                "model": "typesafe/jev-1.13",
+                "provider": "TypeSafe",
+                "answers": {
+                    cid: {"type": "score", "score": 1.0, "confidence": 0.9} for cid in ids
+                },
+                "usage": {"input_tokens": 4, "output_tokens": 1, "cost": 0.0},
+            }
+        )
+
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json", fake_post)
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A,
+        query_text="main",
+        filters={},
+        top_k=5,
+    )
+    assert captured["symbols"]
+    assert "main" in captured["symbols"] or "helper" in captured["symbols"]
+    assert all(r.type == "code" or r.type == "commit" for r in outcome.results)
+    assert any(r.type == "commit" for r in outcome.results)
+
+
+def test_candidate_pool_preserves_results_and_local_order(temp_storage, monkeypatch):
+    _seed_two_chunks(temp_storage)
+    monkeypatch.setenv("ATLAS_RELEVANCE", "0")
+    query = {"query_vector": VEC_A, "query_text": "main", "filters": {}, "top_k": 1}
+    legacy = temp_storage.search_hybrid(**query)
+    extended = temp_storage.search_hybrid(**query, include_candidates=True)
+    assert extended.results == legacy.results
+    assert legacy.candidate_pool is None
+    assert len(extended.candidate_pool) == 2
+    assert extended.local_fallback == extended.candidate_pool
+
+
+def test_exact_gate_promotes_target_and_does_not_call_jev(temp_storage, monkeypatch):
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RELEVANCE_GATE", "1")
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json",
+                        lambda *args, **kwargs: pytest.fail("gate deve evitar rede"))
+    outcome = temp_storage.search_hybrid(query_vector=VEC_A, query_text="search_hybrid",
+                                         filters={}, top_k=1, include_candidates=True)
+    assert outcome.results[0].scope_name == "StorageBackend.search_hybrid"
+    assert outcome.relevance_usage.reason == "unique_exact_symbol"
+    assert outcome.relevance_usage.request_count == 0
+    assert outcome.pool_evaluations == []
+    assert len(outcome.candidate_pool) == 2
