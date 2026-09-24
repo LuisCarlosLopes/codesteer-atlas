@@ -54,6 +54,7 @@ from codesteer_atlas.config import (  # noqa: E402
     BRIEF_LEVEL0_MAX_CHARS,
     BRIEF_LEVEL1_MAX_CHARS,
     CONTEXT_RESPONSE_MAX_CHARS,
+    CURRENT_INDEX_VERSION,
     DEFAULT_INDEX_DIR,
     EXPAND_OUTLINE_MAX_MEMBERS,
     EXPAND_OUTLINE_MIN_CHARS,
@@ -131,7 +132,7 @@ from codesteer_atlas.semantic import (  # noqa: E402
     semantic_enabled,
     semantic_index_state,
 )
-from codesteer_atlas.storage import StorageBackend  # noqa: E402
+from codesteer_atlas.storage import StorageBackend, _version_tuple  # noqa: E402
 from codesteer_atlas.watcher import WATCH_DISABLED, start_watcher_if_enabled  # noqa: E402
 
 # 4. Patch defensivo no SDK do MCP: se um tool handler síncrono demorar o
@@ -2136,6 +2137,15 @@ def _spawn_index_subprocess(
     return {"status": "started", "pid": process.pid, "log_path": str(log_path)}
 
 
+def _index_needs_full_conversion() -> bool:
+    """Índice anterior a 2.3.0 só converte com full integral, sem paths."""
+    try:
+        manifest = StorageBackend(index_dir=INDEX_DIR_PATH).get_manifest()
+    except Exception:
+        return False
+    return _version_tuple(manifest.index_version) < _version_tuple(CURRENT_INDEX_VERSION)
+
+
 def _spawn_background_reindex() -> None:
     """
     Dispara uma reindexação incremental (full=False) em um processo separado no
@@ -2168,37 +2178,45 @@ def _spawn_background_reindex() -> None:
         )
         return
 
-    try:
-        manifest = storage.get_manifest()
-        indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
-        if indexed_at.tzinfo is None:
-            indexed_at = indexed_at.replace(tzinfo=timezone.utc)
-        age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
-        current_git_sha = get_git_head_sha(workspace_path)
-        if (
-            age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
-            and manifest.git_head_sha is not None
-            and current_git_sha is not None
-            and manifest.git_head_sha == current_git_sha
-        ):
-            print(
-                "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
-                file=sys.stderr,
-            )
-            return
-    except Exception:
-        # Falha em heurística de debounce nunca deve impedir o fallback seguro:
-        # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
-        pass
+    needs_full = _index_needs_full_conversion()
+    if not needs_full:
+        try:
+            manifest = storage.get_manifest()
+            indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
+            if indexed_at.tzinfo is None:
+                indexed_at = indexed_at.replace(tzinfo=timezone.utc)
+            age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
+            current_git_sha = get_git_head_sha(workspace_path)
+            if (
+                age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
+                and manifest.git_head_sha is not None
+                and current_git_sha is not None
+                and manifest.git_head_sha == current_git_sha
+            ):
+                print(
+                    "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
+                    file=sys.stderr,
+                )
+                return
+        except Exception:
+            # Falha em heurística de debounce nunca deve impedir o fallback seguro:
+            # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
+            pass
 
     log_path = INDEX_DIR_PATH / "background_reindex.log"
+    if needs_full:
+        print(
+            "[atlas] Índice legado não aceita atualização incremental; "
+            "reindex automático será integral (--full).",
+            file=sys.stderr,
+        )
     print(
         f"[atlas] Reindex automático em background iniciado em processo separado "
         f"(workspace={workspace_path}, log={log_path})...",
         file=sys.stderr,
     )
 
-    result = _spawn_index_subprocess(workspace_path, paths=None, full=False)
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=needs_full)
 
     if result["status"] == "error":
         print(
@@ -2221,7 +2239,13 @@ def _watch_spawn_reindex(workspace_path: Path) -> None:
     bug documentado em `_spawn_background_reindex` (o GIL retido pelas libs
     nativas deixaria o event loop do FastMCP sem CPU).
     """
-    result = _spawn_index_subprocess(workspace_path, paths=None, full=False)
+    full = _index_needs_full_conversion()
+    if full:
+        print(
+            "[atlas] Watcher: índice legado; reindexação integral (--full).",
+            file=sys.stderr,
+        )
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=full)
     if result["status"] == "error":
         print(
             f"[atlas] Watcher: erro ao iniciar a reindexação: {result['error']}",

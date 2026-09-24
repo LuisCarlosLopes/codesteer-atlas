@@ -1409,7 +1409,10 @@ def test_spawn_background_reindex_skips_recent_manifest_with_same_git_head(tmp_p
     index_dir = tmp_path / ".code-index"
     index_dir.mkdir()
     manifest = MOCK_MANIFEST.model_copy(
-        update={"last_indexed_at": datetime.now(timezone.utc).isoformat()}
+        update={
+            "index_version": "2.3.0",
+            "last_indexed_at": datetime.now(timezone.utc).isoformat(),
+        }
     )
 
     with (
@@ -1424,6 +1427,33 @@ def test_spawn_background_reindex_skips_recent_manifest_with_same_git_head(tmp_p
 
     assert "índice recente" in capsys.readouterr().err.lower()
     mock_spawn.assert_not_called()
+
+
+def test_spawn_background_reindex_converte_indice_legado_com_full(tmp_path, capsys):
+    """Índice 2.1.0 recente não pode incremental; a abertura sobe com --full."""
+    index_dir = tmp_path / ".code-index"
+    index_dir.mkdir()
+    manifest = MOCK_MANIFEST.model_copy(
+        update={
+            "index_version": "2.1.0",
+            "last_indexed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    with (
+        patch("codesteer_atlas.server.INDEX_DIR_PATH", index_dir),
+        patch("codesteer_atlas.storage.StorageBackend.exists", return_value=True),
+        patch("codesteer_atlas.storage.StorageBackend.get_manifest", return_value=manifest),
+        patch("codesteer_atlas.server._index_workspace_root", return_value=tmp_path),
+        patch("codesteer_atlas.server.get_git_head_sha", return_value="sha_98765"),
+        patch("codesteer_atlas.server._spawn_index_subprocess") as mock_spawn,
+    ):
+        mock_spawn.return_value = {"status": "started", "pid": 1, "log_path": "run.log"}
+        _spawn_background_reindex()
+
+    err = capsys.readouterr().err
+    assert "integral" in err
+    mock_spawn.assert_called_once_with(tmp_path, paths=None, full=True)
 
 
 def test_spawn_index_subprocess_started_with_full_and_paths(tmp_path):
@@ -2669,10 +2699,13 @@ def test_cli_e_watcher_delegam_sem_ctx_e_com_assinatura_exata(tmp_path):
         report_progress=False,
     )
 
-    with patch(
-        "codesteer_atlas.server._spawn_index_subprocess",
-        return_value={"status": "started", "pid": 42, "log_path": "run.log"},
-    ) as watcher_spawn:
+    with (
+        patch("codesteer_atlas.server._index_needs_full_conversion", return_value=False),
+        patch(
+            "codesteer_atlas.server._spawn_index_subprocess",
+            return_value={"status": "started", "pid": 42, "log_path": "run.log"},
+        ) as watcher_spawn,
+    ):
         _watch_spawn_reindex(workspace)
 
     watcher_spawn.assert_called_once_with(workspace, paths=None, full=False)
