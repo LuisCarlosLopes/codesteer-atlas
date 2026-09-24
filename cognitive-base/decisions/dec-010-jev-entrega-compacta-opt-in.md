@@ -4,7 +4,7 @@ type: adr
 title: "Jev e entrega compacta opt-in, com o ranking local de v3.0 como default"
 status: draft
 created: "2026-09-21"
-updated: "2026-09-21"
+updated: "2026-09-24"
 author: "@luiscarloslopes"
 links:
   - id: dec-004
@@ -40,11 +40,15 @@ host precisa continuar explícito, desligado e visível em `atlas_status`.
 O default de `v3.0` permanece. Três flags nascem desligadas e não se promovem
 nesta entrega:
 
-- **`ATLAS_RELEVANCE=1`** substitui a reordenação lexical ou cross-encoder pelo
-  modelo Jev (System One da TypeSafe, chamado pela API System One do
-  OpenRouter) no pool pós-[[meta/glossary#rrf|RRF]], antes do
-  merge tipado e do corte `top_k`. Lotes de até 24 KB, no máximo duas chamadas,
-  timeout compartilhado de 3 s. Confiança abaixo de 0,70 isola o candidato.
+- **`ATLAS_RELEVANCE=1`** faz o modelo Jev (System One da TypeSafe, chamado
+  pela API System One do OpenRouter) refinar a reordenação lexical, no lugar do
+  cross-encoder, no pool pós-[[meta/glossary#rrf|RRF]], antes do merge tipado e
+  do corte `top_k`. O pool chega ao Jev na ordem lexical. Uma chamada leva o
+  pool inteiro (lote ≤ 192 KB; duas chamadas só em overflow), timeout
+  compartilhado de 3 s. A rubrica default é a v2 (4 níveis concretos com
+  exemplos, `kind`/`language` no estado); `ATLAS_RELEVANCE_RUBRIC=v1` volta à
+  anterior, e os limiares valem como fração da escala. Confiança abaixo de
+  0,70 isola o candidato, que fica na ordem lexical.
   Falha de contrato ou timeout devolve o lote ao reranker local.
   `ATLAS_RERANK=0` desliga Jev e o rerank local. O score do resultado continua
   o do RRF; `match_arms` não ganha braço `jev`. Modelo default
@@ -54,16 +58,23 @@ nesta entrega:
 - **`ATLAS_RELEVANCE_GATE=1`** só dispensa o Jev quando a consulta é um nome
   exato único de função, método ou classe dentro do pool recuperado. O alvo
   sobe e o restante conserva a ordem local. A unicidade vale no pool, não no
-  repositório.
+  repositório. `ATLAS_RELEVANCE_GATE=identifier` dispensa para toda
+  consulta-identificador; fica fora do default porque essas consultas perdem o
+  corte e a reordenação da v2.
 
 - **`ATLAS_CONTEXT_OPTIMIZATION=1`** é independente do Jev. `response_profile=default`
   passa a `compact`: projeção enxuta, deduplicação por cobertura verificável,
-  orçamento a 70% do teto e `atlas_expand` por id. Com Jev ligado, a seleção
-  compacta só remove candidato com score ≤ 0,25 e confiança ≥ 0,90.
+  orçamento a 70% do teto e `atlas_expand` por id. Com Jev ligado, a entrega
+  compacta faz do `top_k` um teto: entre os `top_k` primeiros sai, sem repor,
+  quem tem score < 1,0. É o default (`ATLAS_RELEVANCE_CUT`); com
+  `ATLAS_RELEVANCE_CUT=0`, a seleção só remove candidato com score ≤ 0,25 e
+  confiança ≥ 0,90.
   `response_profile=full` mantém o formato de `v3.0`. `atlas_expand` lê o
   intervalo original do [[meta/glossary#simbolo|símbolo]], valida o hash e
   pagina com `next_ref` sem cache de sessão. A orientação ao agente é começar
-  por uma ou duas refs.
+  por uma ou duas refs. As respostas compactas só trazem o bloco `budget`
+  quando algo foi cortado, e classe acima de ~1.500 tokens abre como cabeçalho
+  + `outline` dos métodos (`ATLAS_EXPAND_OUTLINE=0` desliga).
 
 ## Alternativas Consideradas
 
@@ -105,14 +116,29 @@ chegou a 39.041 tokens, 7,63% abaixo do lote de cinco sem gate, com o dobro
 de chamadas de expansão (16 → 31). Três execuções pagas somaram 106 chamadas
 e US$ 0,023391144. O p50 do estágio remoto na primeira rodada foi 1.264,666 ms.
 
+Revisão de 24/09. A captura paga de 34 consultas gravou as notas por
+candidato, que depois foram reaplicadas sem rede no caminho de produção (28
+consultas, `top_k=10`, compacto). A queda de identificadores parciais vinha da
+ordem de base: o pool chegava ao Jev em ordem RRF, o rerank lexical não rodava
+e ~70% dos candidatos, incertos, ficavam na posição RRF. Nessa configuração, o
+MRR ficava em 0,375, contra 0,431 sem Jev. Com o Jev refinando a ordem lexical
+e o corte do `top_k`, o MRR vai a 0,500 e os metadados ficam 32% abaixo do
+compacto sem Jev (22.096 → 15.012 tokens), sem perder alvo. Com a rubrica v2
+no lugar da v1, o MRR vai a 0,613 (linguagem natural 0,073 → 0,312) com 14.163
+tokens, e os cenários completos passam de 7 para 8. O gate `identifier` cortaria
+as chamadas de 28 para 13, mas levaria o MRR a 0,569 e os tokens a 18.737. Fora
+da amostra (38 consultas novas, Jev chamado de verdade), a v2 com o corte teve MRR
+0,697 contra 0,507 do local e 0,558 da v1 (`top_k=10`), com 39% menos tokens. Dados em
+[`tests/eval/jev_curation_study_20260924.md`](../../tests/eval/jev_curation_study_20260924.md).
+
 ## Notas Relacionadas
 
 - [[dec-004-indice-100-local]] — o default continua local; o Jev só envia
   consulta e candidatos quando `ATLAS_RELEVANCE` está ligado
-- [[dec-007-rerank-pos-rrf]] — reordenação que o Jev substitui apenas com a
-  flag ligada, e que recebe o lote de volta em falha
-- [[dec-008-cross-encoder-rerank]] — o outro substituto opt-in do mesmo ponto
-  do pipeline; os dois permanecem fora do default
+- [[dec-007-rerank-pos-rrf]] — reordenação lexical que o Jev refina com a flag
+  ligada, e que recebe o lote de volta em falha
+- [[dec-008-cross-encoder-rerank]] — o cross-encoder, que o Jev substitui
+  quando ligado; os dois permanecem fora do default
 - [[sys-005-mcp-server]] — `atlas_search`, `atlas_context` e `atlas_expand`
   aplicam o perfil e a expansão
 
@@ -121,3 +147,6 @@ e US$ 0,023391144. O p50 do estágio remoto na primeira rodada foi 1.264,666 ms.
 | Versão | Data       | Autor            | Descrição |
 | ------ | ---------- | ---------------- | --------- |
 | 1.0.0  | 2026-09-21 | @luiscarloslopes | Criação a partir do diff `v3.0...feat/v3.0-jev` |
+| 1.1.0  | 2026-09-24 | @luiscarloslopes | Jev passa a refinar a ordem lexical em vez de substituí-la; corte do `top_k` vira default no compacto com Jev (`ATLAS_RELEVANCE_CUT=0` desliga) |
+| 1.2.0  | 2026-09-24 | @luiscarloslopes | Rubrica v2 default (`ATLAS_RELEVANCE_RUBRIC=v1` volta); uma chamada por busca; gate `identifier` opcional |
+| 1.3.0  | 2026-09-24 | @luiscarloslopes | Bloco `budget` só em corte nas respostas compactas; resumo de classe grande em `atlas_expand` |

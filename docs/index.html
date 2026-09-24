@@ -907,7 +907,7 @@ def encode(self, texts: list[str]) -> list[list[float]]:
           <div class="flow-step">
             <div class="step-badge">2</div>
             <h4>Reordenação</h4>
-            <p>Default: rerank lexical local. Com <code>ATLAS_RELEVANCE=1</code>, o Jev substitui essa etapa.</p>
+            <p>Default: rerank lexical local. Com <code>ATLAS_RELEVANCE=1</code>, o Jev refina essa ordem: move o que avaliou com confiança e deixa o resto onde o rerank lexical o pôs.</p>
           </div>
           <div class="flow-step">
             <div class="step-badge">3</div>
@@ -1166,12 +1166,27 @@ def encode(self, texts: list[str]) -> list[list[float]]:
               <tr>
                 <td><code>ATLAS_RELEVANCE_GATE</code></td>
                 <td>desligado</td>
-                <td><code>1</code> dispensa Jev quando a consulta é símbolo exato único no pool recuperado.</td>
+                <td><code>1</code> dispensa Jev quando a consulta é símbolo exato único no pool recuperado. <code>identifier</code> dispensa para toda consulta-identificador (menos chamadas, mais tokens).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_RUBRIC</code></td>
+                <td><code>v2</code></td>
+                <td>Rubrica do score Jev: <code>v2</code> (4 níveis com exemplos, default) ou <code>v1</code> (3 níveis, mais barata).</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_RELEVANCE_CUT</code></td>
+                <td>ligado</td>
+                <td>Com o Jev e o perfil compacto, faz do <code>top_k</code> um teto: remove, sem repor, quem tem score Jev abaixo da metade da escala entre os <code>top_k</code> primeiros; <code>omitted.relevance</code> conta os cortes. <code>0</code> volta à seleção conservadora.</td>
               </tr>
               <tr>
                 <td><code>ATLAS_CONTEXT_OPTIMIZATION</code></td>
                 <td>desligado</td>
                 <td><code>1</code> faz <code>response_profile=default</code> resolver para compacto em search/context. Independente do Jev.</td>
+              </tr>
+              <tr>
+                <td><code>ATLAS_EXPAND_OUTLINE</code></td>
+                <td>ligado</td>
+                <td>Classe acima de ~1.500 tokens abre em <code>atlas_expand</code> como cabeçalho + lista de métodos com <code>ref</code>. <code>0</code> volta à classe inteira paginada.</td>
               </tr>
               <tr>
                 <td><code>ATLAS_RERANK_MODEL</code></td>

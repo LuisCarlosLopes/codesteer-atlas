@@ -163,6 +163,7 @@ def finalize_response(
     *,
     cut_once: Callable[[dict], bool],
     minimal_envelope: Callable[[dict], dict],
+    budget_block: str = "always",
 ) -> tuple[str, ResponseMeasurement]:
     """
     Aplica `cut_once` (política específica de cada tool: remove um item por
@@ -174,9 +175,21 @@ def finalize_response(
     exatos, degrada a medição para a modalidade conservadora por bytes e
     memoriza a degradação no contador até reinício (D2/T2).
 
-    Retorna `(json_final, measurement)`. Nunca mede a string ANTES de embutir
-    o bloco `budget` nela — a medição final sempre inclui esse bloco.
+    `budget_block="on_cut"` (respostas compactas) só embute o bloco quando algo
+    precisou ser cortado; resposta que cabe inteira sai sem ele.
+
+    Retorna `(json_final, measurement)`. Quando há bloco, a medição final o inclui.
     """
+    if budget_block not in {"always", "on_cut"}:
+        raise ValueError(f"budget_block inválido: {budget_block!r}")
+    if budget_block == "on_cut":
+        # @MindWhy: ~121 tokens por resposta (26% de uma busca compacta de 5 itens)
+        # sem uso pelo agente quando nada foi cortado.
+        text = serialize(payload)
+        measurement = measure_response(text)
+        if _fits(measurement, budget):
+            return text, measurement
+
     reserve_chars, reserve_tokens = _reserve_for_budget_block(budget)
 
     attempts = 0

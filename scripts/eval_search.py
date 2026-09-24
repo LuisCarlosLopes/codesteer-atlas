@@ -163,12 +163,11 @@ def _active_reranker() -> Dict[str, Any]:
     """Registra qual reordenador está ativo — sem isso o A/B de 2.1 fica opaco."""
     if os.environ.get(RERANK_ENV_FLAG, "1") == "0":
         return {"reranker": "none", "rerank_model": None, "rubric": None}
-    from codesteer_atlas.config import RELEVANCE_RUBRIC_VERSION
-    from codesteer_atlas.relevance import resolve_config
+    from codesteer_atlas.relevance import resolve_config, resolve_rubric
 
     cfg = resolve_config()
     if cfg.enabled:
-        return {"reranker": "jev", "rerank_model": cfg.model, "rubric": RELEVANCE_RUBRIC_VERSION}
+        return {"reranker": "jev", "rerank_model": cfg.model, "rubric": resolve_rubric()[0].version}
     model = os.environ.get(RERANK_MODEL_ENV_FLAG)
     if model:
         return {"reranker": "cross_encoder", "rerank_model": model, "rubric": None}
@@ -176,7 +175,7 @@ def _active_reranker() -> Dict[str, Any]:
 
 
 def new_relevance_tracker() -> Dict[str, Any]:
-    from codesteer_atlas.config import RELEVANCE_RUBRIC_VERSION
+    from codesteer_atlas.relevance import resolve_rubric
 
     return {
         "requests": 0,
@@ -189,7 +188,7 @@ def new_relevance_tracker() -> Dict[str, Any]:
         "complete": True,
         "stop_reason": None,
         "model": None,
-        "rubric": RELEVANCE_RUBRIC_VERSION,
+        "rubric": resolve_rubric()[0].version,
     }
 
 
@@ -752,13 +751,16 @@ def print_report(report: Dict[str, Any], baseline: Optional[Dict[str, Any]]) -> 
             f"orçamento: max_chars={budget.get('max_chars')} "
             f"max_bytes={budget.get('max_bytes')} max_tokens={budget.get('max_tokens')}"
         )
-        for mode in DELIVERY_MODES:
+        # O perfil compacto com seleção é o que o agente recebe com ATLAS_CONTEXT_OPTIMIZATION
+        # (e, com Jev, o que passa pelo corte do top_k).
+        shown = list(DELIVERY_MODES) + [f"compact_selection_{mode}" for mode in DELIVERY_MODES]
+        for mode in shown:
             agg = delivery.get("overall", {}).get(mode)
             if not agg:
                 continue
             print(
                 f"\n[{mode}] n={agg['n']} comparável={agg['comparable']} "
-                f"degradado={agg['degraded']}"
+                f"degradado={agg['degraded']}  tokens_total={agg['response_tokens_total']}"
             )
             print(
                 f"  mrr={agg['mrr']}  recall@5={agg['recall_at_5']}  "
@@ -944,6 +946,8 @@ def run_overhead_benchmark(*, payload_bytes: int = 24 * 1024, iterations: int = 
 
 
 def main() -> int:
+    # Constante de módulo lida em tempo de chamada pela recuperação, entrega e cenários.
+    global EVAL_TOP_K
     # O console do Windows abre em cp1252 e transformaria as queries em pt-BR do
     # relatório em mojibake, escondendo justamente qual query regrediu.
     if isinstance(sys.stdout, io.TextIOWrapper):
@@ -956,6 +960,10 @@ def main() -> int:
     )
     parser.add_argument("--baseline", default=None, help="JSON de baseline para comparar.")
     parser.add_argument("--out", default=None, help="Grava o relatório JSON neste caminho.")
+    parser.add_argument(
+        "--top-k", type=int, default=EVAL_TOP_K,
+        help=f"top_k das buscas avaliadas (default: {EVAL_TOP_K}; o default da tool é 5).",
+    )
     parser.add_argument(
         "--structural",
         action="store_true",
@@ -994,6 +1002,9 @@ def main() -> int:
     parser.add_argument("--tasks", help="YAML de cenários; conta busca e expansões.")
     parser.add_argument("--workspace", help="Workspace para validar hashes das expansões.")
     args = parser.parse_args()
+    if not 1 <= args.top_k <= 50:
+        parser.error("--top-k deve estar entre 1 e 50")
+    EVAL_TOP_K = args.top_k
 
     if args.benchmark:
         bench = run_overhead_benchmark()

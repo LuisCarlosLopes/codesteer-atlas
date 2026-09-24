@@ -2,6 +2,7 @@
 
 from codesteer_atlas.config import CHUNK_TRUNCATION_MARKER
 from codesteer_atlas.context_optimization import (
+    build_class_outline,
     compact_context_payload,
     decode_expand_ref,
     deduplicate_results,
@@ -9,6 +10,7 @@ from codesteer_atlas.context_optimization import (
     project_compact_search_results,
     resolve_response_profile,
     select_conservative,
+    select_within_top_k,
 )
 from codesteer_atlas.models import CandidateEvaluation, SearchResult
 
@@ -142,6 +144,90 @@ def test_selecao_fallback_unconfirmed_quando_tudo_irrelevante():
     assert len(selected.results) == 1
     assert selected.unconfirmed is True
     assert "relevance_unconfirmed_fallback" in selected.warnings
+
+
+def _ev(name, score, *, confidence=0.9, state="evaluated"):
+    return CandidateEvaluation(
+        candidate_id=name,
+        score=score,
+        confidence=confidence,
+        state=state,
+        chunk_id=name,
+        file_path=f"src/{name}.py",
+        scope_name=name,
+    )
+
+
+def test_corte_top_k_remove_score_baixo_sem_repor():
+    results = [_hit("a"), _hit("b"), _hit("c"), _hit("d")]
+    evaluations = [_ev("a", 1.9), _ev("b", 0.4), _ev("c", 1.2), _ev("d", 1.8)]
+    selected = select_within_top_k(results, "q", evaluations, top_k=3)
+    assert [r.scope_name for r in selected.results] == ["a", "c"]
+    assert selected.removed_by_relevance == 1
+
+
+def test_corte_preserva_exato_e_sem_nota_mas_corta_incerto():
+    results = [_hit("alvo"), _hit("sem_nota"), _hit("falhou"), _hit("incerto")]
+    evaluations = [
+        _ev("alvo", 0.1),
+        _ev("falhou", None, confidence=None, state="batch_failed"),
+        _ev("incerto", 0.6, confidence=0.3, state="uncertain"),
+    ]
+    selected = select_within_top_k(results, "alvo", evaluations, top_k=4)
+    assert [r.scope_name for r in selected.results] == ["alvo", "sem_nota", "falhou"]
+    assert selected.removed_by_relevance == 1
+
+
+def test_limiares_seguem_a_escala_da_rubrica():
+    results = [_hit("a"), _hit("b")]
+    v2 = [_ev("a", 1.4).model_copy(update={"score_max": 3.0}),
+          _ev("b", 1.6).model_copy(update={"score_max": 3.0})]
+    assert [r.scope_name for r in select_within_top_k(results, "q", v2, top_k=2).results] == ["b"]
+    v1 = [_ev("a", 1.4), _ev("b", 1.6)]
+    assert [r.scope_name for r in select_within_top_k(results, "q", v1, top_k=2).results] == ["a", "b"]
+    drop = [_ev("a", 0.3, confidence=0.95).model_copy(update={"score_max": 3.0}),
+            _ev("b", 0.3, confidence=0.95)]
+    kept = select_conservative(results, "q", drop, top_k=2)
+    assert [r.scope_name for r in kept.results] == ["b"]
+    assert kept.removed_by_relevance == 1
+
+
+def _member(chunk_id, name, start, end, kind="method"):
+    return {"id": chunk_id, "scope_name": name, "scope_type": kind, "start_line": start, "end_line": end}
+
+
+def test_resumo_de_classe_lista_so_membros_diretos():
+    chunk = {"scope_type": "class", "scope_name": "C", "start_line": 1, "end_line": 50}
+    members = [
+        _member("c", "C", 1, 50, "class"),
+        _member("b", "C.b", 12, 20),
+        _member("a", "C.a", 5, 10),
+        _member("n", "C.a.inner", 6, 8, "function"),
+        _member("x", "D.x", 30, 31),
+    ]
+    header_end, outline = build_class_outline(chunk, members)
+    assert header_end == 4
+    assert [m["symbol"] for m in outline] == ["C.a", "C.b"]
+    assert outline[0] == {"ref": "a", "symbol": "C.a", "type": "method", "lines": [5, 10]}
+
+
+def test_resumo_de_classe_nao_se_aplica_sem_membros_ou_em_linha_unica():
+    chunk = {"scope_type": "class", "scope_name": "C", "start_line": 1, "end_line": 1}
+    assert build_class_outline(chunk, [_member("a", "C.a", 1, 1)]) is None
+    assert build_class_outline({**chunk, "end_line": 9}, []) is None
+    assert build_class_outline({**chunk, "scope_type": "function"}, [_member("a", "C.a", 2, 3)]) is None
+
+
+def test_corte_fallback_local_quando_tudo_sai():
+    results = [_hit("a"), _hit("b")]
+    evaluations = [_ev("a", 0.2), _ev("b", 0.3)]
+    selected = select_within_top_k(
+        results, "q", evaluations, top_k=2, local_fallback=[results[1], results[0]]
+    )
+    assert [r.scope_name for r in selected.results] == ["b"]
+    assert selected.unconfirmed is True
+    assert "relevance_unconfirmed_fallback" in selected.warnings
+    assert selected.removed_by_relevance == 1
 
 
 def test_expand_ref_roundtrip():

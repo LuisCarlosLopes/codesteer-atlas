@@ -1876,6 +1876,88 @@ def test_jev_fallback_dispara_cross_encoder(temp_storage, monkeypatch):
     assert "relevance_unavailable" in outcome.warnings
 
 
+def test_gate_identifier_dispensa_jev_e_promove_exato(temp_storage, monkeypatch):
+    _seed_identifier_chunks(temp_storage)
+    _openrouter_relevance_env(monkeypatch)
+    monkeypatch.setenv("ATLAS_RELEVANCE_GATE", "identifier")
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json",
+                        lambda *args, **kwargs: pytest.fail("gate identifier deve evitar rede"))
+    outcome = temp_storage.search_hybrid(
+        query_vector=VEC_A, query_text="search_hybrid", filters={}, top_k=2
+    )
+    assert outcome.results[0].scope_name == "StorageBackend.search_hybrid"
+    assert outcome.relevance_usage.status == "skipped"
+    assert outcome.relevance_usage.reason == "identifier_query"
+    assert outcome.relevance_usage.request_count == 0
+
+
+def _seed_rrf_vs_lexical(storage):
+    """Quem só chama o símbolo vence no RRF; a definição vence no rerank lexical."""
+    storage.store_chunks(
+        [
+            CodeChunk(
+                id="h1",
+                file_path="src/helper.py",
+                repo="test-project",
+                start_line=1,
+                end_line=5,
+                scope_type="function",
+                scope_name="usa_busca",
+                language="python",
+                content="def usa_busca():\n    search_hybrid()\n    search_hybrid()\n    search_hybrid()",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=VEC_A,
+            ),
+            CodeChunk(
+                id="d1",
+                file_path="src/storage.py",
+                repo="test-project",
+                start_line=1,
+                end_line=20,
+                scope_type="method",
+                scope_name="StorageBackend.search_hybrid",
+                language="python",
+                content="def search_hybrid(self): ...",
+                indexed_at="2026-06-05T12:00:00Z",
+                vector=VEC_B,
+            ),
+        ]
+    )
+
+
+def test_jev_incerto_fica_na_ordem_lexical_nao_na_rrf(temp_storage, monkeypatch):
+    from codesteer_atlas.ranking import rerank as lexical_rerank
+
+    _seed_rrf_vs_lexical(temp_storage)
+    monkeypatch.setenv("ATLAS_RERANK", "0")
+    rrf = temp_storage.search_hybrid(query_vector=VEC_A, query_text="hybrid", filters={}, top_k=5)
+    lexical = [r.scope_name for r in lexical_rerank(list(rrf.results), "hybrid")]
+    # Pré-condição: o seed separa as duas ordens; sem isso o teste não distingue nada.
+    assert [r.scope_name for r in rrf.results] != lexical
+
+    _openrouter_relevance_env(monkeypatch)
+
+    def fake_post(_url, payload, **_kwargs):
+        answers = {
+            candidate["id"]: {"type": "score", "score": 1.0, "confidence": 0.3}
+            for candidate in payload["state"]["candidates"]
+        }
+        return json.dumps(
+            {
+                "id": "gen-incerto",
+                "model": "typesafe/jev-1.13",
+                "provider": "TypeSafe",
+                "answers": answers,
+                "usage": {"input_tokens": 8, "output_tokens": 2, "cost": 0.0},
+            }
+        )
+
+    monkeypatch.setattr("codesteer_atlas.relevance.post_json", fake_post)
+    outcome = temp_storage.search_hybrid(query_vector=VEC_A, query_text="hybrid", filters={}, top_k=5)
+    assert outcome.relevance_usage.status == "success"
+    assert [r.scope_name for r in outcome.results] == lexical
+
+
 def test_atlas_rerank_zero_vence_relevancia(temp_storage, monkeypatch):
     _seed_identifier_chunks(temp_storage)
     _openrouter_relevance_env(monkeypatch)

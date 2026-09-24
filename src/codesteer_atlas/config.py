@@ -285,15 +285,31 @@ RELEVANCE_DEFAULT_MODEL = "~typesafe/jev-latest"
 RELEVANCE_TIMEOUT_S = 3.0
 RELEVANCE_MAX_CANDIDATES = 50
 RELEVANCE_MAX_CONTENT_CHARS = 2000
-RELEVANCE_MAX_REQUEST_BYTES = 24000
+# Uma chamada leva o pool inteiro (até 50 candidatos na rubrica v2), abaixo do
+# limite do modelo: 64 mil tokens por requisição, 32 mil para state + maior pergunta.
+# RELEVANCE_MAX_BATCH_CALLS fica como reserva para overflow.
+RELEVANCE_MAX_REQUEST_BYTES = 192_000
 RELEVANCE_MAX_RESPONSE_BYTES = 256 * 1024
 RELEVANCE_MIN_CONFIDENCE = 0.70
 RELEVANCE_MAX_BATCH_CALLS = 2
-RELEVANCE_RUBRIC_VERSION = "jev-relevance-score-v1"
-# Seleção semântica conservadora (perfil compacto): score ≤ limiar e confiança
-# ≥ limiar. Escala Jev 0–2; 0,25 cobre só o nível `irrelevant` (0).
-RELEVANCE_DROP_SCORE_MAX = 0.25
+# Rubrica do score: v2 (4 níveis concretos com exemplos, estado com kind/language)
+# é o default; v1 (3 níveis) segue selecionável.
+RELEVANCE_RUBRIC_ENV = "ATLAS_RELEVANCE_RUBRIC"
+RELEVANCE_DEFAULT_RUBRIC = "v2"
+RELEVANCE_RUBRIC_VERSIONS = {"v1": "jev-relevance-score-v1", "v2": "jev-relevance-score-v2"}
+RELEVANCE_RUBRIC_VERSION = RELEVANCE_RUBRIC_VERSIONS[RELEVANCE_DEFAULT_RUBRIC]
+# Limiares na escala normalizada (score / nível máximo da rubrica).
+# Seleção conservadora (ATLAS_RELEVANCE_CUT=0): score ≤ 1/8 da escala (0,25 na v1,
+# 0,375 na v2) e confiança ≥ 0,90.
+RELEVANCE_DROP_NORMALIZED_MAX = 0.125
 RELEVANCE_DROP_CONFIDENCE_MIN = 0.90
+# Corte do top_k no perfil compacto, ligado por padrão quando o Jev avalia (`0`
+# desliga): dentro dos top_k na ordem Jev, sai quem tem score abaixo da metade da
+# escala (1,0 na v1, onde equivale a p(irrelevante) > p(evidência direta); 1,5 na
+# v2), sem repor a vaga. Medição em tests/eval/jev_curation_study_20260924.md.
+RELEVANCE_CUT_ENV_FLAG = "ATLAS_RELEVANCE_CUT"
+RELEVANCE_CUT_POLICY = "top_k_no_refill_v1"
+RELEVANCE_CUT_NORMALIZED_BELOW = 0.5
 OPENROUTER_CHAT_COMPLETIONS_PATH = "/api/v1/chat/completions"
 OPENROUTER_SYSTEMONE_PATH = "/api/v1/systemone"
 OPENROUTER_HOST = "openrouter.ai"
@@ -306,6 +322,11 @@ CONTEXT_OPTIMIZATION_ENV_FLAG = "ATLAS_CONTEXT_OPTIMIZATION"
 # Fração do teto vigente aplicada no perfil compacto (busca e contexto).
 CONTEXT_OPTIMIZATION_BUDGET_RATIO = 0.70
 CONTEXT_EXPAND_MAX_REFS = 5
+# Classe grande expande como cabeçalho + lista de métodos com `ref` (default ligado;
+# `0` desliga). Abaixo do limiar (~1.500 tokens), ler a classe inteira sai mais barato.
+EXPAND_OUTLINE_ENV_FLAG = "ATLAS_EXPAND_OUTLINE"
+EXPAND_OUTLINE_MIN_CHARS = 6000
+EXPAND_OUTLINE_MAX_MEMBERS = 100
 CHUNK_TRUNCATION_MARKER = "# ... [conteúdo truncado para respeitar limites do modelo] ..."
 
 # Tier de resolução de import por linguagem (DECISÃO-005). Cada linguagem de

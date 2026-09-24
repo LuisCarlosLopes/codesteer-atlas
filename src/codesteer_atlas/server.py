@@ -55,6 +55,8 @@ from codesteer_atlas.config import (  # noqa: E402
     BRIEF_LEVEL1_MAX_CHARS,
     CONTEXT_RESPONSE_MAX_CHARS,
     DEFAULT_INDEX_DIR,
+    EXPAND_OUTLINE_MAX_MEMBERS,
+    EXPAND_OUTLINE_MIN_CHARS,
     GRAPH_FILENAME,
     GRAPH_HTML_FILENAME,
     GRAPH_PATH_MAX_HOPS,
@@ -80,15 +82,18 @@ from codesteer_atlas.context import (  # noqa: E402
     context_minimal_envelope,
 )
 from codesteer_atlas.context_optimization import (  # noqa: E402
+    build_class_outline,
     compact_context_payload,
     compact_search_envelope,
     context_optimization_status,
     decode_expand_ref,
     deduplicate_results,
+    expand_outline_enabled,
     project_compact_search_results,
     record_selection_usage,
     resolve_response_profile,
     select_conservative,
+    select_within_top_k,
     validate_expand_refs,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
@@ -115,7 +120,11 @@ from codesteer_atlas.markdown_links import (  # noqa: E402
 from codesteer_atlas.models import IndexManifest, RelevanceUsage, SearchOutcome  # noqa: E402
 from codesteer_atlas.origin import OriginResolver  # noqa: E402
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
-from codesteer_atlas.relevance import new_usage, public_usage_fields  # noqa: E402
+from codesteer_atlas.relevance import (  # noqa: E402
+    new_usage,
+    public_usage_fields,
+    relevance_cut_enabled,
+)
 from codesteer_atlas.relevance import status_block as relevance_status  # noqa: E402
 from codesteer_atlas.semantic import (  # noqa: E402
     load_semantic_sidecar,
@@ -699,8 +708,9 @@ def atlas_search(
         structural: When true, adds a graph spreading-activation arm to the RRF fusion
             for this call only. Defaults to false (opt-in; does not change default ranking).
         response_profile: `default` follows ATLAS_CONTEXT_OPTIMIZATION; `full` keeps the
-            current delivery format; `compact` applies deterministic compaction (and
-            conservative Jev selection when ATLAS_RELEVANCE is on).
+            current delivery format; `compact` applies deterministic compaction and,
+            when ATLAS_RELEVANCE is on, Jev's top_k cut (or the conservative selection
+            with ATLAS_RELEVANCE_CUT=0).
 
     Returns:
         JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
@@ -708,7 +718,10 @@ def atlas_search(
         `total_chunks_searched`, and `query_time_ms`.
 
         Compact profile omits score/match_arms/language/timing from results and adds
-        expansion `ref`s; use `atlas_expand` for omitted content.
+        expansion `ref`s; use `atlas_expand` for omitted content. When Jev evaluated the
+        hits, a compact response may hold fewer than top_k results: `omitted.relevance`
+        counts hits Jev judged more likely irrelevant than direct evidence. Pass
+        response_profile="full" only if you need those hits back.
 
         A commit message result has `type="commit"`, `language="git"`, a `commit`
         object (id, repo, subject, body, dates, files_touched, is_revert,
@@ -989,21 +1002,36 @@ def prepare_search_delivery(
         candidates = recovered if optimization_stage != "projection" else results
         results = list(candidates)
         evaluations = getattr(outcome, "pool_evaluations", None) or outcome.evaluations
-        if evaluations and optimization_stage == "selection":
-            selected = select_conservative(
-                results, query, evaluations, top_k=len(results),
+        history_slots = top_k
+        if evaluations and optimization_stage == "selection" and relevance_cut_enabled():
+            # top_k vira teto: dedup, janela na ordem Jev e corte sem repor; commits só
+            # ocupam vagas que o pool já não preenchia.
+            deduped = deduplicate_results(results)
+            omitted["redundancy"] = deduped.removed_by_redundancy
+            selected = select_within_top_k(
+                deduped.results, query, evaluations, top_k=top_k,
                 local_fallback=local_fallback,
             )
             results = selected.results
             omitted["relevance"] = selected.removed_by_relevance
             warnings.extend(selected.warnings)
-        if optimization_stage != "projection":
-            deduped = deduplicate_results(results)
-            results = deduped.results
-            omitted["redundancy"] = deduped.removed_by_redundancy
+            history_slots = max(len(results), top_k - selected.removed_by_relevance)
+        else:
+            if evaluations and optimization_stage == "selection":
+                selected = select_conservative(
+                    results, query, evaluations, top_k=len(results),
+                    local_fallback=local_fallback,
+                )
+                results = selected.results
+                omitted["relevance"] = selected.removed_by_relevance
+                warnings.extend(selected.warnings)
+            if optimization_stage != "projection":
+                deduped = deduplicate_results(results)
+                results = deduped.results
+                omitted["redundancy"] = deduped.removed_by_redundancy
         results = results[:top_k]
         if pool is not None and optimization_stage != "projection":
-            results = storage._merge_typed(results, outcome.history_candidates, top_k)
+            results = storage._merge_typed(results, outcome.history_candidates, history_slots)
         record_selection_usage(
             relevance_usage,
             recovered=recovered,
@@ -1050,6 +1078,7 @@ def prepare_search_delivery(
         budget,
         cut_once=_search_cut_once,
         minimal_envelope=_search_minimal_envelope,
+        budget_block="on_cut" if profile == "compact" else "always",
     )
     relevance_usage.bytes_delivered = measurement.bytes
     relevance_usage.removed_by_budget = (json.loads(text).get("truncated") or {}).get("results", 0)
@@ -1268,7 +1297,8 @@ def atlas_context(
 
     Returns:
         JSON string with `target`, `intent`, `sections`, optional `truncated`,
-        `warnings` and `budget`.
+        `warnings` and `budget` (compact profile: `budget` limits appear only when
+        something was cut).
 
         Only `intent="debug"` carries `sections.recent_history`: commits linked to the
         target by `touches`, newest first, each with `commit`, `via`, optional
@@ -1336,7 +1366,8 @@ def _atlas_context_impl(
             RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
         )
     text, _measurement = response_budget.finalize_response(
-        payload, budget, cut_once=context_cut_once, minimal_envelope=context_minimal_envelope
+        payload, budget, cut_once=context_cut_once, minimal_envelope=context_minimal_envelope,
+        budget_block="on_cut" if profile == "compact" else "always",
     )
     final = json.loads(text)
     return _finish_observed(
@@ -1377,6 +1408,10 @@ def atlas_expand(
     needed; a complete symbol requires all its pages. Continuations are tied to
     the file hash and need no session cache.
 
+    A large class comes back as its header plus `outline`: the class's methods,
+    each with its own `ref` and line range. Expand only the methods you need;
+    follow next_ref only if you really need the whole class body.
+
     Args:
         refs: Start with 1–2 search refs; add only needed evidence (hard limit 5).
         include_content: When true (default), include symbol content when it fits
@@ -1384,7 +1419,7 @@ def atlas_expand(
 
     Returns:
         JSON with `results` (location, optional content, optional obsolescence
-        warnings) and `budget`.
+        warnings); `budget` appears only when the page was cut to fit.
     """
     _obs_start = time.monotonic()
     try:
@@ -1503,14 +1538,30 @@ def prepare_expand_delivery(
                 items.append({"ref": ref, "status": "invalid_ref", "reason": "invalid_offset"})
                 warnings.append("expand_invalid_ref")
                 continue
-            # Limita o trabalho do serializador antes da verificação final de bytes/tokens.
-            stop = min(len(content), offset + budget.max_chars)
-            entry["content"] = content[offset:stop]
-            entry["content_range"] = [offset, stop]
-            entry["content_complete"] = stop == len(content)
-            if stop < len(content):
-                entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{stop}'
-                warnings.append("expand_more_available")
+            outline = None
+            if offset == 0 and len(content) > EXPAND_OUTLINE_MIN_CHARS and expand_outline_enabled():
+                outline = build_class_outline(chunk, storage.get_chunks_in_range(rel_path, start, end))
+            if outline is not None:
+                # Classe grande: cabeçalho + métodos com `ref`; `next_ref` segue o corpo inteiro.
+                header_end, members = outline
+                header = "".join(source_lines[start - 1:header_end])
+                entry["content"] = header
+                entry["content_range"] = [0, len(header)]
+                entry["content_complete"] = False
+                entry["outline"] = members[:EXPAND_OUTLINE_MAX_MEMBERS]
+                if len(members) > EXPAND_OUTLINE_MAX_MEMBERS:
+                    entry["outline_omitted"] = len(members) - EXPAND_OUTLINE_MAX_MEMBERS
+                entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{len(header)}'
+                warnings.append("expand_class_outline")
+            else:
+                # Limita o trabalho do serializador antes da verificação final de bytes/tokens.
+                stop = min(len(content), offset + budget.max_chars)
+                entry["content"] = content[offset:stop]
+                entry["content_range"] = [offset, stop]
+                entry["content_complete"] = stop == len(content)
+                if stop < len(content):
+                    entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{stop}'
+                    warnings.append("expand_more_available")
 
         refs_json = chunk.get("references_json")
         if refs_json:
@@ -1565,6 +1616,7 @@ def prepare_expand_delivery(
         budget,
         cut_once=cut_page,
         minimal_envelope=_search_minimal_envelope,
+        budget_block="on_cut",
     )
     return text, _measurement
 

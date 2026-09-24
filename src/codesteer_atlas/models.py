@@ -151,6 +151,8 @@ class CandidateEvaluation(BaseModel):
     chunk_id: Optional[str] = None
     file_path: Optional[str] = None
     scope_name: Optional[str] = None
+    # Nível mais alto da rubrica que avaliou (2 na v1, 3 na v2); limiares são frações dele.
+    score_max: float = 2.0
 
 
 class RelevanceUsage(BaseModel):
@@ -162,6 +164,7 @@ class RelevanceUsage(BaseModel):
     status: str = Field("disabled", description="disabled | skipped | success | fallback | partial")
     reason: Optional[str] = None
     requested_model: Optional[str] = None
+    rubric_version: Optional[str] = None
     resolved_model: Optional[str] = None
     resolved_models: List[str] = Field(default_factory=list)
     provider: Optional[str] = None

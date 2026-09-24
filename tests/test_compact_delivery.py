@@ -12,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import eval_search  # noqa: E402
 
 from codesteer_atlas.context_optimization import encode_expand_ref, sha256_file  # noqa: E402
-from codesteer_atlas.models import CandidateEvaluation, SearchOutcome, SearchResult  # noqa: E402
+from codesteer_atlas.models import (  # noqa: E402
+    CandidateEvaluation,
+    CommitRecord,
+    SearchOutcome,
+    SearchResult,
+)
 from codesteer_atlas.observability import measure_response  # noqa: E402
 from codesteer_atlas.relevance import new_usage  # noqa: E402
 from codesteer_atlas.response_budget import ResponseBudget  # noqa: E402
@@ -60,7 +65,8 @@ def test_pool_selection_then_dedup_then_limit(server):
     assert outcome.results == [first, duplicate]
 
 
-def test_rejected_container_does_not_hide_uncertain_or_exact(server):
+def test_rejected_container_does_not_hide_uncertain_or_exact(server, monkeypatch):
+    monkeypatch.setenv("ATLAS_RELEVANCE_CUT", "0")
     first = hit(1, content="outer inner", end=10)
     inner = hit(2, content="inner", start=2, end=4)
     evaluation = CandidateEvaluation(candidate_id="1", chunk_id=first.chunk_id,
@@ -73,7 +79,9 @@ def test_rejected_container_does_not_hide_uncertain_or_exact(server):
     assert json.loads(text)["results"][0]["symbol"] == first.scope_name
 
 
-def test_all_rejected_uses_local_order(server):
+@pytest.mark.parametrize("cut", ["0", "1"])
+def test_all_rejected_uses_local_order(server, monkeypatch, cut):
+    monkeypatch.setenv("ATLAS_RELEVANCE_CUT", cut)
     hits = [hit(1), hit(2)]
     evaluations = [CandidateEvaluation(candidate_id=str(i), chunk_id=r.chunk_id,
                                       state="evaluated", score=0, confidence=1)
@@ -86,7 +94,9 @@ def test_all_rejected_uses_local_order(server):
     assert "relevance_unconfirmed_fallback" in payload["warnings"]
 
 
-def test_uncertain_pool_never_excluded(server):
+def test_uncertain_pool_never_excluded(server, monkeypatch):
+    # Regra da seleção conservadora; o corte do top_k (default) corta incerto de score baixo.
+    monkeypatch.setenv("ATLAS_RELEVANCE_CUT", "0")
     hits = [hit(1), hit(2)]
     evaluations = [CandidateEvaluation(candidate_id=str(i), chunk_id=r.chunk_id,
                                       state="uncertain", score=0, confidence=0.1)
@@ -94,6 +104,70 @@ def test_uncertain_pool_never_excluded(server):
     outcome = SearchOutcome(results=hits, candidate_pool=hits, pool_evaluations=evaluations)
     text, _ = deliver(server, hits, outcome=outcome)
     assert len(json.loads(text)["results"]) == 2
+
+
+def scored(results, scores, *, state="evaluated", confidence=0.9):
+    return [CandidateEvaluation(candidate_id=str(i), chunk_id=r.chunk_id, file_path=r.file_path,
+                                scope_name=r.scope_name, state=state, score=s, confidence=confidence)
+            for i, (r, s) in enumerate(zip(results, scores, strict=True))]
+
+
+def commit_hit(sha):
+    return SearchResult(
+        file_path="", start_line=0, end_line=0, scope_type="", scope_name="", language="git",
+        content="fix: commit", score=0.5, repo="demo", type="commit",
+        commit=CommitRecord(id=sha, repo="demo", subject="fix: commit",
+                            authored_at="2026-09-24T00:00:00+00:00",
+                            committed_at="2026-09-24T00:00:00+00:00"),
+    )
+
+
+def test_relevance_cut_is_default_and_turns_top_k_into_ceiling(server, monkeypatch):
+    hits = [hit(1), hit(2), hit(3), hit(4)]
+    outcome = SearchOutcome(results=hits[:2], candidate_pool=hits,
+                            pool_evaluations=scored(hits, [1.9, 0.4, 1.5, 1.8]))
+    monkeypatch.delenv("ATLAS_RELEVANCE_CUT", raising=False)
+    text, _ = deliver(server, hits, outcome=outcome, top_k=2)
+    payload = json.loads(text)
+    assert [r["symbol"] for r in payload["results"]] == ["symbol1"]
+    assert payload["omitted"]["relevance"] == 1
+    # Desligado, volta a seleção conservadora: 0,4 não é "irrelevante inequívoco" e fica.
+    monkeypatch.setenv("ATLAS_RELEVANCE_CUT", "0")
+    text, _ = deliver(server, hits, outcome=outcome, top_k=2)
+    assert [r["symbol"] for r in json.loads(text)["results"]] == ["symbol1", "symbol2"]
+
+
+def test_relevance_cut_removes_uncertain_but_keeps_exact(server, monkeypatch):
+    monkeypatch.delenv("ATLAS_RELEVANCE_CUT", raising=False)
+    hits = [hit(1), hit(2), hit(3)]
+    outcome = SearchOutcome(results=hits, candidate_pool=hits,
+                            pool_evaluations=scored(hits, [0.1, 0.5, 1.2],
+                                                    state="uncertain", confidence=0.3))
+    text, _ = deliver(server, hits, outcome=outcome, top_k=3, query="symbol1")
+    assert [r["symbol"] for r in json.loads(text)["results"]] == ["symbol1", "symbol3"]
+
+
+def test_relevance_cut_does_not_hand_slots_to_commits(server, monkeypatch):
+    monkeypatch.delenv("ATLAS_RELEVANCE_CUT", raising=False)
+    hits = [hit(1), hit(2)]
+    outcome = SearchOutcome(results=hits, candidate_pool=hits,
+                            history_candidates=[commit_hit("a" * 40)],
+                            pool_evaluations=scored(hits, [1.9, 0.3]))
+    payload = json.loads(deliver(server, hits, outcome=outcome, top_k=2)[0])
+    assert [r.get("symbol") for r in payload["results"]] == ["symbol1"]
+    # Vaga que o pool já não preenchia continua disponível para o histórico.
+    payload = json.loads(deliver(server, hits, outcome=outcome, top_k=3)[0])
+    assert [r["type"] for r in payload["results"]] == ["function", "commit"]
+
+
+def test_relevance_cut_leaves_full_profile_untouched(server, monkeypatch):
+    monkeypatch.delenv("ATLAS_RELEVANCE_CUT", raising=False)
+    hits = [hit(1), hit(2)]
+    outcome = SearchOutcome(results=hits, candidate_pool=hits,
+                            pool_evaluations=scored(hits, [1.9, 0.1]))
+    storage = storage_for(hits)
+    text, _ = server.prepare_search_delivery(storage, storage.get_manifest(), outcome, top_k=2)
+    assert [r["symbol"] for r in json.loads(text)["results"]] == ["symbol1", "symbol2"]
 
 
 @pytest.mark.parametrize("ceiling", [400, 500, 650, 850])
@@ -108,6 +182,73 @@ def test_budget_and_telemetry_measure_final_text(server, monkeypatch, ceiling):
     assert measurement.bytes == usage.bytes_delivered == len(text.encode())
     assert measurement.tokens == measure_response(text).tokens
     assert payload["omitted"]["budget"] == 5 - len(payload["results"])
+
+
+def test_compact_sem_corte_nao_carrega_bloco_budget(server, tmp_path):
+    text, _ = deliver(server, [hit(1), hit(2)], top_k=2)
+    assert "budget" not in json.loads(text)
+    (tmp_path / "a.py").write_text("body")
+    storage = storage_for([])
+    storage.get_chunk_by_id.return_value = hit(1, path="a.py", end=1).model_dump()
+    storage.get_manifest.return_value.files = {"a.py": sha256_file(tmp_path / "a.py")}
+    text, _ = server.prepare_expand_delivery(storage, tmp_path, [f"{1:016x}"])
+    payload = json.loads(text)
+    assert payload["results"][0]["status"] == "ok"
+    assert "budget" not in payload
+
+
+def _big_class_storage(tmp_path, *, body_lines):
+    header = 'class Big:\n    """Classe grande."""\n\n'
+    method_a = "    def a(self):\n" + "".join(f"        valor_{i} = {i}\n" for i in range(body_lines))
+    method_b = "    def b(self):\n        return 2\n"
+    source = header + method_a + method_b
+    (tmp_path / "big.py").write_text(source, newline="\n")
+    a_start = 4
+    a_end = a_start + body_lines
+    chunk = {"chunk_id": f"{1:016x}", "file_path": "big.py", "repo": "demo", "start_line": 1,
+             "end_line": a_end + 2, "scope_type": "class", "scope_name": "Big",
+             "language": "python", "content": "class Big: ...", "references_json": None}
+    storage = storage_for([])
+    storage.get_chunk_by_id.return_value = chunk
+    storage.get_chunks_in_range.return_value = [
+        {"id": f"{2:016x}", "scope_name": "Big.a", "scope_type": "method",
+         "start_line": a_start, "end_line": a_end},
+        {"id": f"{3:016x}", "scope_name": "Big.b", "scope_type": "method",
+         "start_line": a_end + 1, "end_line": a_end + 2},
+    ]
+    storage.get_manifest.return_value.files = {"big.py": sha256_file(tmp_path / "big.py")}
+    return storage, header, source
+
+
+def test_expand_classe_grande_vira_resumo_com_continuacao(server, tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_EXPAND_OUTLINE", raising=False)
+    storage, header, source = _big_class_storage(tmp_path, body_lines=400)
+    assert len(source) > server.EXPAND_OUTLINE_MIN_CHARS
+    payload = json.loads(server.prepare_expand_delivery(storage, tmp_path, [f"{1:016x}"])[0])
+    item = payload["results"][0]
+    assert item["content"] == header
+    assert item["content_complete"] is False
+    assert [m["symbol"] for m in item["outline"]] == ["Big.a", "Big.b"]
+    assert item["outline"][0]["ref"] == f"{2:016x}"
+    assert "expand_class_outline" in payload["warnings"]
+    page = json.loads(server.prepare_expand_delivery(storage, tmp_path, [item["next_ref"]])[0])
+    assert page["results"][0]["content"].startswith("    def a(self):")
+    assert "outline" not in page["results"][0]
+
+    monkeypatch.setenv("ATLAS_EXPAND_OUTLINE", "0")
+    item = json.loads(server.prepare_expand_delivery(storage, tmp_path, [f"{1:016x}"])[0])["results"][0]
+    assert "outline" not in item
+    assert item["content"].startswith(header + "    def a(self):")
+
+
+def test_expand_classe_pequena_continua_inteira(server, tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_EXPAND_OUTLINE", raising=False)
+    storage, _header, source = _big_class_storage(tmp_path, body_lines=5)
+    item = json.loads(server.prepare_expand_delivery(storage, tmp_path, [f"{1:016x}"])[0])["results"][0]
+    assert "outline" not in item
+    assert item["content"] == source
+    assert item["content_complete"] is True
+    storage.get_chunks_in_range.assert_not_called()
 
 
 def test_full_stays_identical(server):

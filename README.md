@@ -220,10 +220,13 @@ O Jev fica de fora: ele reordena e pode retirar um irrelevante, e também envia 
 | --- | --- | --- |
 | `ATLAS_INDEX_DIR` | `${workspaceFolder}/.code-index` | Pasta do índice. No Cursor, amarra o servidor ao `.code-index` da raiz do repositório. |
 | `ATLAS_CONTEXT_OPTIMIZATION` | `1` | Resposta compacta em `atlas_search` e `atlas_context`. Também aceita `true`. É o que reduz o contexto. |
+| `ATLAS_EXPAND_OUTLINE` | `0` | Classe grande abre em `atlas_expand` como cabeçalho e lista de métodos. Ligado por padrão; `0` volta a paginar a classe inteira. |
 | `ATLAS_OBSERVABILITY` | `1` | Log local de caracteres, bytes e tokens por resposta. Só o valor `1` liga. |
 | `ATLAS_TOKENIZER_PATH` | `/caminho/para/tokenizer.json` | Troca o contador de tokens. Vazio usa o tokenizer que já vem no pacote. |
 | `ATLAS_RELEVANCE` | `1` | Liga o Jev. Sozinha não basta: a URL e a chave abaixo também entram. Também aceita `true`. |
-| `ATLAS_RELEVANCE_GATE` | `1` | Dispensa o Jev quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. |
+| `ATLAS_RELEVANCE_GATE` | `1` | Dispensa o Jev quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. `identifier` dispensa para qualquer consulta que seja um identificador: menos chamadas, porém mais tokens e ranking pior nessas consultas. |
+| `ATLAS_RELEVANCE_RUBRIC` | `v1` | Rubrica do Jev. Ausente, usa a v2 (4 níveis com exemplos), que acerta mais; `v1` volta à antiga, cerca de 2,3× mais barata por chamada. |
+| `ATLAS_RELEVANCE_CUT` | `0` | Com o Jev ligado, a resposta compacta tira do `top_k` o que o Jev julgou mais provavelmente irrelevante que útil, sem pôr outro no lugar, e pode vir com menos itens. Ligado por padrão; `0` (ou `false`) volta à seleção conservadora. |
 | `ATLAS_RELEVANCE_API_URL` | `https://openrouter.ai/api/v1/systemone` | Endpoint do Jev. Só essa URL HTTPS. |
 | `ATLAS_RELEVANCE_API_KEY` | a chave do OpenRouter | Credencial do Jev. Se vazia, reutiliza `ATLAS_SEMANTIC_API_KEY` quando a URL semântica é o chat HTTPS do OpenRouter. |
 | `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Modelo do Jev. Não herda `ATLAS_SEMANTIC_MODEL`. |
@@ -241,9 +244,9 @@ O Jev fica de fora: ele reordena e pode retirar um irrelevante, e também envia 
 
 O [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) é o modelo System One da TypeSafe: recebe a pergunta e os candidatos e devolve, para cada um, uma decisão tipada com score e confiança. No Atlas ele vem **desligado**. A chamada, quando ligada, passa pela API System One do OpenRouter. Com ele desligado, busca e índice continuam na sua máquina.
 
-Ligado, o Jev lê a pergunta e os candidatos que o Atlas já recuperou. Coloca na frente o trecho que julgou mais útil para aquela pergunta. No perfil compacto, pode retirar um candidato claramente irrelevante. Quem encontra os candidatos continua sendo a busca local.
+Ligado, o Jev lê a pergunta e os candidatos que o Atlas já recuperou. Coloca na frente o trecho que julgou mais útil para aquela pergunta. No perfil compacto, tira dos primeiros `top_k` o que julgou mais provavelmente irrelevante que útil, sem pôr outro no lugar. Quem encontra os candidatos continua sendo a busca local.
 
-A entrega compacta, com o Jev desligado, reduziu cerca de **32%** dos tokens de metadados nas 28 consultas de avaliação (32.336 para 21.977), com o alvo na mesma posição. Numa sessão no Cursor, abrir menos símbolos por vez levou o total das ferramentas de 8.433 para 5.712 tokens. O Jev muda a ordem desses resultados. A comparação da qualidade dele com o ranking local ainda está por medir.
+A entrega compacta, com o Jev desligado, reduziu cerca de **32%** dos tokens de metadados nas 28 consultas de avaliação (32.336 para 21.977), com o alvo na mesma posição. Numa sessão no Cursor, abrir menos símbolos por vez levou o total das ferramentas de 8.433 para 5.712 tokens. O Jev refina a ordem desses resultados. No replay de 24/09, com as notas capturadas nas mesmas 28 consultas, o Jev (rubrica v2, com o corte) teve MRR 0,613 contra 0,431 do ranking local sem Jev, com 36% menos tokens de metadados em `top_k=10`. Em linguagem natural, o MRR foi de 0,080 para 0,312.
 
 ### O que precisa estar no `env`
 
@@ -268,13 +271,13 @@ Três variáveis ligam a chamada ao Jev. Com a flag sozinha, sem URL e sem chave
 
 Se `ATLAS_SEMANTIC_API_URL` já for exatamente `https://openrouter.ai/api/v1/chat/completions`, a URL do Jev sai dessa e a chave pode ser a mesma `ATLAS_SEMANTIC_API_KEY`. Fora desse caso, URL e chave do Jev são obrigatórias.
 
-O modelo padrão é `~typesafe/jev-latest`. `ATLAS_RELEVANCE_MODEL` só entra para trocar por um pin `typesafe/jev-…`. `ATLAS_RELEVANCE_GATE=1` é opcional: dispensa a chamada quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. `ATLAS_RERANK` precisa continuar ausente ou diferente de `0`; com `0`, o Jev não roda.
+O modelo padrão é `~typesafe/jev-latest`. `ATLAS_RELEVANCE_MODEL` só entra para trocar por um pin `typesafe/jev-…`. `ATLAS_RELEVANCE_GATE=1` é opcional: dispensa a chamada quando a consulta já é o nome exato de uma única função, método ou classe entre os candidatos. Com a resposta compacta, o Jev também corta: tira dos primeiros `top_k` quem julgou mais provavelmente irrelevante que útil, sem repor. Na medição, os metadados de `top_k=10` caíram 36% sem perder alvo. `ATLAS_RELEVANCE_CUT=0` desliga o corte. Cada busca faz uma chamada só, com a rubrica v2; `ATLAS_RELEVANCE_RUBRIC=v1` troca pela rubrica antiga, mais barata e pior em linguagem natural. `ATLAS_RERANK` precisa continuar ausente ou diferente de `0`; com `0`, o Jev não roda.
 
 Nesse modo, a consulta e os trechos candidatos seguem para o OpenRouter. Cada busca escreve uma linha de custo no log do servidor, sem a pergunta, o código ou a chave. Na rodada medida, o gasto ficou em frações de centavo.
 
 ## Menos contexto na conversa
 
-`ATLAS_CONTEXT_OPTIMIZATION=1` faz a resposta padrão de `atlas_search` e `atlas_context` vir compacta: menos campos, sem repetir o mesmo símbolo, e um identificador para abrir só o que faltar com `atlas_expand`. Funciona com ou sem o Jev. A redução de tokens citada acima veio dessa entrega. O bloco pronto, já com os logs, está em [Menor contexto, com logs](#menor-contexto-com-logs).
+`ATLAS_CONTEXT_OPTIMIZATION=1` faz a resposta padrão de `atlas_search` e `atlas_context` vir compacta: menos campos, sem repetir o mesmo símbolo, e um identificador para abrir só o que faltar com `atlas_expand`. O bloco de orçamento só aparece quando algo foi cortado, e uma classe grande abre como cabeçalho e lista de métodos, para você expandir só o método que interessa. Funciona com ou sem o Jev. A redução de tokens citada acima veio dessa entrega. O bloco pronto, já com os logs, está em [Menor contexto, com logs](#menor-contexto-com-logs).
 
 ## Instruções para agentes de IA (AGENTS.md / CLAUDE.md)
 

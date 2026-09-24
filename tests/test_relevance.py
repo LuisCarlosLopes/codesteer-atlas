@@ -13,13 +13,17 @@ from codesteer_atlas.config import (
 from codesteer_atlas.http_transport import _NoRedirectHandler, post_json
 from codesteer_atlas.models import CandidateEvaluation, SearchResult
 from codesteer_atlas.relevance import (
+    RUBRICS,
     SCORE_LEVELS,
+    _pack_batches,
     build_request,
+    exact_gate_reason,
     new_usage,
     order_by_relevance,
     public_usage_fields,
     request_bytes,
     resolve_config,
+    resolve_rubric,
     status_block,
     try_rerank,
     validate_answers,
@@ -193,11 +197,67 @@ def test_pool_trivial_nao_chama_rede():
 
 
 def test_pergunta_referencia_candidato_explicito():
-    payload = build_request("consulta", [_hit("alpha"), _hit("beta")], "typesafe/jev-1.13")
+    hits = [_hit("alpha"), _hit("beta")]
+    payload = build_request("consulta", hits, "typesafe/jev-1.13", rubric=RUBRICS["v1"])
     assert payload["questions"]["0"]["instructions"].count("state.candidates[0]") == 1
     assert "state.candidates[1]" in payload["questions"]["1"]["instructions"]
     assert payload["questions"]["0"]["type"] == "score"
     assert payload["questions"]["0"]["criteria"] == list(SCORE_LEVELS)
+    assert set(payload["state"]["candidates"][0]) == {"id", "path", "symbol", "content"}
+
+
+def test_rubrica_v2_e_default_com_estado_e_criterios_concretos():
+    payload = build_request("consulta", [_hit("alpha"), _hit("beta")], "typesafe/jev-1.13")
+    question = payload["questions"]["1"]
+    assert "state.candidates[1]" in question["instructions"]
+    assert "state.candidates[0]" not in question["instructions"]
+    assert question["criteria"] == list(RUBRICS["v2"].criteria)
+    assert all("what" in level and "examples" in level for level in question["criteria"])
+    assert set(payload["state"]["candidates"][0]) == {
+        "id", "path", "symbol", "kind", "language", "content",
+    }
+
+
+def test_resolve_rubrica_default_v1_e_invalida():
+    assert resolve_rubric({})[0].name == "v2"
+    assert resolve_rubric({"ATLAS_RELEVANCE_RUBRIC": "V1"})[0].name == "v1"
+    rubric, reason = resolve_rubric({"ATLAS_RELEVANCE_RUBRIC": "v9"})
+    assert rubric.name == "v2"
+    assert reason == "invalid_rubric"
+    block = status_block(_openrouter_env(ATLAS_RELEVANCE_RUBRIC="v9"))["rubric"]
+    assert block == {"version": "jev-relevance-score-v2", "reason": "invalid_rubric"}
+
+
+def test_validacao_respeita_a_escala_da_rubrica():
+    envelope = _envelope(["0"], [3.0])
+    assert validate_answers(envelope, ["0"])[1] == "invalid_response"
+    scores, reason = validate_answers(envelope, ["0"], levels=4)
+    assert reason is None
+    assert scores["0"].score_max == 3.0
+    assert validate_answers(_envelope(["0"], [3.5]), ["0"], levels=4)[1] == "invalid_response"
+    four = {"model": "typesafe/jev-1.13", "answers": {"0": {
+        "type": "score", "score": 2.9, "confidence": 0.9,
+        "probabilities": {"0": 0.0, "1": 0.02, "2": 0.06, "3": 0.92}}}}
+    assert validate_answers(four, ["0"], levels=4)[1] is None
+    assert validate_answers(four, ["0"])[1] == "invalid_response"
+
+
+def test_pool_inteiro_cabe_em_uma_chamada():
+    pool = [_hit(f"s{i}", content="x" * 400) for i in range(40)]
+    batches, leftover = _pack_batches("consulta", pool, "typesafe/jev-1.13")
+    assert len(batches) == 1
+    assert leftover == []
+    calls = {"n": 0}
+
+    def fake_post(_url, payload, **_kwargs):
+        calls["n"] += 1
+        ids = list(payload["questions"].keys())
+        return json.dumps(_envelope(ids, [1.0] * len(ids)))
+
+    usage = new_usage()
+    try_rerank(pool, "consulta", [], usage, environ=_openrouter_env(), post=fake_post)
+    assert calls["n"] == 1
+    assert usage.rubric_version == "jev-relevance-score-v2"
 
 
 def test_conteudo_enviado_e_truncado_sem_alterar_resultado_armazenado():
@@ -398,8 +458,10 @@ def test_lotes_parciais_somam_custo_e_preservam_nao_avaliados(monkeypatch):
     ]
     usage = new_usage()
     warnings: list[str] = []
+    # Mecânica de lotes medida em bytes: v1 mantém o payload pequeno o bastante para o teto de 900.
     ordered = try_rerank(
-        pool, "q", warnings, usage, environ=_openrouter_env(), post=fake_post
+        pool, "q", warnings, usage, environ=_openrouter_env(ATLAS_RELEVANCE_RUBRIC="v1"),
+        post=fake_post,
     )
     assert usage.request_count >= 1
     assert usage.request_count <= 2
@@ -468,7 +530,7 @@ def test_ptbr_consulta_preservada_no_estado():
         lambda: (_envelope(["0", "1", "2"], [1.0, 1.0, 1.0]), "extra"),
         lambda: (_envelope(["0", "1"], [float("nan"), 1.0]), "nan"),
         lambda: (_envelope(["0", "1"], [float("inf"), 1.0]), "inf"),
-        lambda: (_envelope(["0", "1"], [3.0, 1.0]), "range"),
+        lambda: (_envelope(["0", "1"], [4.0, 1.0]), "range"),
         lambda: (
             _envelope(
                 ["0", "1"],
@@ -690,3 +752,26 @@ def test_exact_gate_status_declares_configuration():
     assert gate["policy"] == "unique_exact_symbol_v1"
     assert status_block(_openrouter_env())["gate"]["enabled"] is False
     assert status_block(_openrouter_env(ATLAS_RELEVANCE_GATE="bad"))["gate"]["reason"] == "invalid_flag"
+
+
+def test_gate_identifier_dispensa_qualquer_identificador():
+    env = _openrouter_env(ATLAS_RELEVANCE_GATE="identifier")
+    gate = status_block(env)["gate"]
+    assert gate == {"enabled": True, "policy": "identifier_query_v1", "reason": None}
+    pool = [_hit("a"), _hit("b")]
+    assert exact_gate_reason(pool, "search_hyb", environ=env) == "identifier_query"
+    assert exact_gate_reason(pool, "StorageBackend.search_hybrid", environ=env) == "identifier_query"
+    assert exact_gate_reason(pool, "como o índice é resolvido", environ=env) is None
+    assert exact_gate_reason(pool, "search_hyb", environ=_openrouter_env(ATLAS_RELEVANCE_GATE="1")) is None
+
+
+def test_relevance_cut_status_declares_configuration():
+    cut = status_block(_openrouter_env())["cut"]
+    assert cut == {"enabled": True, "policy": "top_k_no_refill_v1", "score_below": 1.5, "reason": None}
+    assert status_block(_openrouter_env(ATLAS_RELEVANCE_RUBRIC="v1"))["cut"]["score_below"] == 1.0
+    assert status_block({})["cut"]["enabled"] is True
+    for off in ("0", "false", "FALSE"):
+        assert status_block(_openrouter_env(ATLAS_RELEVANCE_CUT=off))["cut"]["enabled"] is False
+    invalid = status_block(_openrouter_env(ATLAS_RELEVANCE_CUT="bad"))["cut"]
+    assert invalid["enabled"] is True
+    assert invalid["reason"] == "invalid_flag"

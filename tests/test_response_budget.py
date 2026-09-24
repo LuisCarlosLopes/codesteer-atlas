@@ -80,6 +80,28 @@ def test_finalize_response_no_cut_needed_adds_budget_block(monkeypatch):
     assert measurement.chars == len(text)
 
 
+def test_on_cut_omite_bloco_quando_cabe_e_embute_quando_corta():
+    budget = rb.ResponseBudget("test", max_chars=5000, max_bytes=5000, max_tokens=1000)
+    text, measurement = rb.finalize_response(
+        {"items": ["a", "b"]}, budget, cut_once=_cut_from_list("items"),
+        minimal_envelope=_minimal_envelope, budget_block="on_cut",
+    )
+    assert json.loads(text) == {"items": ["a", "b"]}
+    assert measurement.chars == len(text)
+
+    tight = rb.ResponseBudget("test", max_chars=500, max_bytes=500, max_tokens=1000)
+    text, measurement = rb.finalize_response(
+        {"items": ["x" * 40] * 20}, tight, cut_once=_cut_from_list("items"),
+        minimal_envelope=_minimal_envelope, budget_block="on_cut",
+    )
+    parsed = json.loads(text)
+    assert parsed["truncated"] > 0
+    assert parsed["budget"]["used_chars"] == len(text) <= 500
+    with pytest.raises(ValueError):
+        rb.finalize_response({}, budget, cut_once=_cut_from_list("items"),
+                             minimal_envelope=_minimal_envelope, budget_block="never")
+
+
 def test_bundled_tokenizer_cuts_unicode_response_to_exact_budget(monkeypatch):
     monkeypatch.delenv(TOKENIZER_PATH_ENV_FLAG, raising=False)
     payload = {"items": ["ação 🎉 日本語 " * 20 for _ in range(20)]}

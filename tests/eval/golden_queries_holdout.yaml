@@ -1,0 +1,215 @@
+# Golden set de validação (holdout) de `atlas_search` — 24/09/2026.
+#
+# Separado de `golden_queries.yaml`, que foi usado para escolher a rubrica v2 e os
+# limiares do corte do top_k. Nenhum alvo daqui aparece no conjunto de ajuste nem em
+# `task_scenarios.yaml`. Mesmo formato: alvos por file_path + scope_name.
+#
+# `doc_answer` é a classe cujo alvo é uma seção de documentação que responde a
+# pergunta; o golden original só aceitava código e contava essas respostas como erro.
+
+queries:
+  # ── linguagem natural em português ──
+  - query: "limitar o tamanho do log da reindexação em segundo plano"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/server.py", scope_name: "_trim_background_reindex_log"}
+
+  - query: "extrair o custo e os tokens informados pela resposta do avaliador"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "_capture_billing"}
+
+  - query: "garantir que a URL do provedor seja https sem usuário e senha embutidos"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "_openrouter_https"}
+
+  - query: "eliminar resultados repetidos que já estão contidos em outro trecho"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/context_optimization.py", scope_name: "deduplicate_results"}
+
+  - query: "gerar a página html do grafo para abrir no navegador"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/viewer.py", scope_name: "write_graph_html"}
+
+  - query: "agrupar eventos de arquivos salvos em sequência antes de reindexar"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/watcher.py", scope_name: "DebouncedReindexTrigger"}
+
+  - query: "propagar ativação pelos vizinhos do grafo a partir das sementes"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/structural.py", scope_name: "spreading_activation"}
+
+  - query: "janela de meses e de quantidade de commits do histórico git"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/config.py", scope_name: "resolve_git_history_window"}
+
+  # ── linguagem natural em inglês ──
+  - query: "list the indexed sections of a markdown file"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/storage.py", scope_name: "StorageBackend.get_sections_by_file_path"}
+
+  - query: "count files whose imports could not be resolved"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "count_unresolved_import_files"}
+
+  - query: "lazily loaded cross encoder model used to rerank results"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/reranker.py", scope_name: "CrossEncoderReranker"}
+      - {file_path: "src/codesteer_atlas/reranker.py", scope_name: "CrossEncoderReranker._load_model"}
+
+  - query: "decide whether the semantic layer of the index is ready"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/semantic.py", scope_name: "semantic_index_state"}
+
+  - query: "resolve a markdown anchor to the matching heading section"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/markdown_links.py", scope_name: "resolve_heading_section"}
+
+  - query: "promote languages to the scip tier after ingesting call edges"
+    klass: natural
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "_promote_scip_languages"}
+
+  # ── símbolo exato ──
+  - query: "order_by_relevance"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "order_by_relevance"}
+
+  - query: "deduplicate_results"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/context_optimization.py", scope_name: "deduplicate_results"}
+
+  - query: "spreading_activation"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/structural.py", scope_name: "spreading_activation"}
+
+  - query: "build_budget_block"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/response_budget.py", scope_name: "build_budget_block"}
+
+  - query: "CrossEncoderReranker"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/reranker.py", scope_name: "CrossEncoderReranker"}
+
+  - query: "write_graph_html"
+    klass: exact_symbol
+    targets:
+      - {file_path: "src/codesteer_atlas/viewer.py", scope_name: "write_graph_html"}
+
+  # ── identificador parcial ──
+  - query: "order_by_rel"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "order_by_relevance"}
+
+  - query: "spreading_act"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/structural.py", scope_name: "spreading_activation"}
+
+  - query: "CrossEncoder"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/reranker.py", scope_name: "CrossEncoderReranker"}
+
+  - query: "count_unresolved"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "count_unresolved_import_files"}
+
+  - query: "expand_ref"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/context_optimization.py", scope_name: "decode_expand_ref"}
+      - {file_path: "src/codesteer_atlas/context_optimization.py", scope_name: "encode_expand_ref"}
+
+  - query: "DebouncedReindex"
+    klass: partial_identifier
+    targets:
+      - {file_path: "src/codesteer_atlas/watcher.py", scope_name: "DebouncedReindexTrigger"}
+
+  # ── entre arquivos / vários alvos ──
+  - query: "custo do avaliador de relevância registrado no log"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/observability.py", scope_name: "log_relevance_cost"}
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "public_usage_fields"}
+
+  - query: "teto de resposta por ferramenta e bloco de orçamento"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/response_budget.py", scope_name: "get_budget"}
+      - {file_path: "src/codesteer_atlas/response_budget.py", scope_name: "build_budget_block"}
+
+  - query: "casamento exato de nome de símbolo na reordenação"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "is_exact_match"}
+      - {file_path: "src/codesteer_atlas/relevance.py", scope_name: "order_by_relevance"}
+
+  - query: "normalizar termos da consulta para o boost de título"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/ranking.py", scope_name: "query_terms"}
+      - {file_path: "src/codesteer_atlas/ranking.py", scope_name: "fold"}
+
+  - query: "vizinhos diretos e arestas de um nó do grafo"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/graph.py", scope_name: "explain"}
+
+  - query: "resumo do projeto em texto dentro do teto de caracteres"
+    klass: cross_file
+    targets:
+      - {file_path: "src/codesteer_atlas/brief.py", scope_name: "render_brief"}
+
+  # ── resposta em documentação ──
+  - query: "o que acontece quando o Jev falha ou demora demais"
+    klass: doc_answer
+    targets:
+      - {file_path: "docs/referencia.md", scope_name: "Como o Jev atua na resposta (Parte 1)"}
+      - {file_path: "docs/referencia.md", scope_name: "Como o Jev atua na resposta (Parte 2)"}
+
+  - query: "quais variáveis de ambiente o operador pode configurar"
+    klass: doc_answer
+    targets:
+      - {file_path: "docs/referencia.md", scope_name: "Configuração e variáveis de ambiente (Parte 1)"}
+      - {file_path: "docs/referencia.md", scope_name: "Configuração e variáveis de ambiente (Parte 2)"}
+      - {file_path: "docs/referencia.md", scope_name: "Configuração e variáveis de ambiente (Parte 3)"}
+
+  - query: "como a indexação incremental decide o que reprocessar"
+    klass: doc_answer
+    targets:
+      - {file_path: "AGENTS.md", scope_name: "Indexação incremental (DECISAO-005 / [J])"}
+
+  - query: "como rodar um teste específico"
+    klass: doc_answer
+    targets:
+      - {file_path: "CONTRIBUTING.md", scope_name: "Rodar um teste específico"}
+
+  - query: "como medir os tokens das respostas das ferramentas"
+    klass: doc_answer
+    targets:
+      - {file_path: "docs/referencia.md", scope_name: "Observabilidade de tokens por consulta (Parte 1)"}
+
+  - query: "como o índice é encontrado quando o servidor roda como plugin global"
+    klass: doc_answer
+    targets:
+      - {file_path: "AGENTS.md", scope_name: "Resolução do diretório de índice (DECISAO-002) (Parte 2)"}
+      - {file_path: "CONTRIBUTING.md", scope_name: "Resolução do diretório de índice (detalhado)"}

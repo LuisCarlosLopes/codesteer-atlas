@@ -7,13 +7,62 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Added
+
+- `ATLAS_RELEVANCE_GATE=identifier` dispensa o Jev para toda consulta que seja um
+  identificador (`reason=identifier_query`). Opcional e desligado: no replay de
+  24/09, cortou as chamadas de 28 para 13, mas baixou o MRR de 0,613 para 0,569 e
+  subiu os tokens de metadados em 32%, porque essas consultas perdem o corte e a
+  rubrica v2.
+
 ### Changed
 
+- Respostas compactas (`atlas_search` e `atlas_context` no perfil compacto, e
+  `atlas_expand`) só trazem o bloco `budget` quando algo foi cortado para caber;
+  o perfil `full`, `atlas_graph` e `atlas_brief` não mudam. No replay de 24/09
+  (v2 + corte), os metadados de `top_k=5` caíram de 9.933 para 6.879 tokens
+  (−31%) e os de `top_k=10` de 14.163 para 11.100 (−22%); os cenários com
+  expansão, de 24.184 para 21.123 (−13%), com os mesmos 8 completos.
+- Em `atlas_expand`, classe com mais de 6.000 caracteres e métodos indexados abre
+  como cabeçalho + `outline` (métodos com `ref`, `symbol`, `type` e `lines`);
+  `next_ref` segue o corpo inteiro e `ATLAS_EXPAND_OUTLINE=0` desliga.
+  `StorageBackend` foi de 4.819 tokens na primeira página (19.065 inteira) para
+  1.965, e `ASTChunker` de 4.528 (13.453) para 1.433.
+- A rubrica default do Jev passa a ser a v2: 4 níveis concretos com `what` e
+  `examples`, instruções que admitem consulta em português ou identificador, e
+  `kind`/`language` no estado de cada candidato. `ATLAS_RELEVANCE_RUBRIC=v1`
+  volta à rubrica anterior; `atlas_status.relevance.rubric` declara a versão.
+  Os limiares viram frações do nível mais alto da escala. No replay de 24/09
+  (`top_k=10`, com o corte), o MRR foi de 0,500 para 0,613, linguagem natural de
+  0,073 para 0,312 e os cenários completos de 7 para 8. A v2 custa ~2,3× por
+  chamada (~US$ 0,001 por busca com `top_k=10`). Validado fora da amostra, com o
+  Jev de verdade em 38 consultas novas
+  ([holdout](tests/eval/golden_queries_holdout.yaml)): MRR 0,697 contra 0,507 do
+  ranking local e 0,558 da v1 em `top_k=10`, com 39% menos tokens e nenhum alvo
+  perdido.
+- Uma chamada ao Jev leva o pool inteiro: o teto por requisição passa de 24 KB
+  para 192 KB, abaixo do limite do modelo. Com `top_k=10`, a v1 fazia 2 chamadas
+  sequenciais.
+- Com o Jev ligado, o perfil compacto faz do `top_k` um teto: entre os `top_k`
+  primeiros na ordem Jev, sai quem tem score abaixo da metade da escala (1,5 na
+  v2, 1,0 na v1), sem repor a vaga nem cedê-la a commits. Exatos e candidatos
+  sem avaliação ficam; `omitted.relevance` conta os cortes e
+  `atlas_status.relevance.cut` declara a política. É o default;
+  `ATLAS_RELEVANCE_CUT=0` volta à seleção conservadora. Com as notas Jev de
+  24/09 reaplicadas no caminho de produção (v2), os metadados de `top_k=10`
+  caíram 38% e os cenários com expansão 32%, sem perder alvo
+  ([estudo](tests/eval/jev_curation_study_20260924.md)).
 - `AGENTS.md` é a única fonte das instruções de agente e da arquitetura;
   `CLAUDE.md` apenas importa esse arquivo.
 
 ### Fixed
 
+- Com o Jev ligado, o pool chega ao Jev já na ordem do rerank lexical, e o
+  candidato que ele não avalia com confiança fica nessa ordem, não mais na
+  posição RRF crua. O cross-encoder continua só no fallback. No replay de 24/09,
+  identificadores parciais voltam de MRR 0,400 para 0,781, e o total em
+  `top_k=10` vai de 0,375 para 0,496 (0,500 com o corte), acima dos 0,431 sem
+  Jev. Sem Jev, o ranking não muda.
 - Orientação de expansão começa com uma ou duas refs e exige lacuna de evidência
   para abrir mais; continuações deixam de recomendar leitura integral automática.
 

@@ -23,11 +23,13 @@ e, se quiser, `ATLAS_RELEVANCE_API_KEY`. `ATLAS_RELEVANCE_MODEL` não herda
 `ATLAS_SEMANTIC_MODEL`. Default `~typesafe/jev-latest`; também aceita o alias
 sem `~` e pins versionados `typesafe/jev-[0-9]…`.
 
-Jev **reordena** o pool; no perfil compacto também pode excluir só candidatos
-com score ≤ 0,25 e confiança ≥ 0,90. Lotes cabem em 24.000 bytes UTF-8 (até
-duas chamadas, timeout compartilhado de 3 s). Timeout, HTTP ou schema inválido
-caem no reranker local para o lote afetado; baixa confiança isola o candidato
-sem invalidar os demais. Reinicie o MCP depois de mudar o `env`.
+Jev **refina a ordem lexical** do pool e, no perfil compacto, corta o `top_k`
+([detalhes](#corte-do-top_k-por-relevância)). Uma chamada leva o pool inteiro:
+o lote cabe em 192.000 bytes UTF-8, abaixo do limite do modelo (64 mil tokens
+por requisição), com até duas chamadas só em overflow e timeout compartilhado
+de 3 s. Timeout, HTTP ou schema inválido caem no reranker local para o lote
+afetado; baixa confiança isola o candidato sem invalidar os demais. Reinicie o
+MCP depois de mudar o `env`.
 
 Cada `atlas_search` emite **uma** linha JSON de custo em stderr (conhecido,
 parcialmente conhecido, zero sem chamada, ou desconhecido). Isso **não** é o
@@ -37,19 +39,25 @@ Logs nunca incluem query, código, paths ou a chave.
 
 ### Como o Jev atua na resposta
 
-O Jev recebe a consulta e os candidatos do pool pós-RRF e devolve, por
-candidato, um score de relevância e uma confiança. Isso acontece antes do
-corte `top_k` e do merge com commits. O `score` que a tool devolve continua
-sendo o RRF.
+O Jev recebe a consulta e os candidatos do pool pós-RRF, já na ordem do rerank
+lexical, e devolve, por candidato, um score de relevância e uma confiança. Isso
+acontece antes do corte `top_k` e do merge com commits. O `score` que a tool
+devolve continua sendo o RRF. O cross-encoder (`ATLAS_RERANK_MODEL`) não roda
+junto: só volta no fallback.
 
-1. **Reordena o que já foi recuperado.** Avaliação confiante ocupa as posições
-   livres, da maior para a menor. Correspondência exata de símbolo permanece
-   na frente, na ordem RRF. Avaliação incerta ou ausente fica onde o ranking
-   local a colocou.
-2. **Descarta só o irrelevante inequívoco, e só no perfil compacto.** Sai o
-   candidato com score ≤ 0,25 e confiança ≥ 0,90. O restante permanece. Se a
-   seleção esvaziar o pool, volta o primeiro candidato do ranking local, com
-   o aviso `relevance_unconfirmed_fallback`.
+1. **Refina a ordem lexical.** Avaliação confiante ocupa as posições livres, da
+   maior para a menor. Correspondência exata de símbolo permanece na frente.
+   Avaliação incerta ou ausente fica onde o rerank lexical a colocou. Até
+   24/09 ela ficava na posição RRF crua, e isso derrubava identificadores
+   parciais (MRR 0,781 → 0,400 no replay).
+2. **No perfil compacto, corta o `top_k` sem repor.** Entre os `top_k`
+   primeiros, sai quem tem score abaixo da metade da escala; detalhes em
+   [corte do top_k](#corte-do-top_k-por-relevância). Com
+   `ATLAS_RELEVANCE_CUT=0`, vale a seleção conservadora: sai só o candidato com
+   score ≤ 1/8 da escala (0,25 na v1, 0,375 na v2) e confiança ≥ 0,90, e a vaga
+   é reposta pelo pool. Nos dois
+   modos, se tudo sair, volta o primeiro candidato do ranking local, com o
+   aviso `relevance_unconfirmed_fallback`.
 3. **Falha devolve o ranking local** daquele lote (timeout, HTTP ou schema
    inválido). `ATLAS_RERANK=0` impede a chamada.
 
@@ -57,6 +65,70 @@ O agente passa a ver primeiro o trecho que o Jev julgou mais útil para a
 consulta. `ranking_changed` registra mudança de ordem e
 `removed_by_relevance` conta os descartes. `status=success` significa que o
 contrato da resposta foi aceito.
+
+### Rubrica do score
+
+A rubrica default é a **v2**. Ela tem 4 níveis concretos, cada um com `what` e
+`examples`: não relacionado, menção de passagem, contexto de apoio e evidência
+direta. As instruções dizem que a consulta pode estar em português e ser
+descrição, identificador exato ou parcial. Cada candidato leva `kind` e
+`language` no estado. `ATLAS_RELEVANCE_RUBRIC=v1` volta aos 3 níveis antigos
+(irrelevante, contexto relacionado, evidência direta). Valor inválido mantém a
+v2 e aparece em `atlas_status.relevance.rubric.reason` como `invalid_rubric`.
+
+Os limiares valem como fração do nível mais alto da rubrica, então o mesmo
+corte fica em 1,0 na v1 (escala 0–2) e em 1,5 na v2 (escala 0–3). A v2 custa
+cerca de 2,3× mais por chamada, porque os critérios com exemplos se repetem em
+cada pergunta: ~US$ 0,001 por busca com `top_k=10` e ~US$ 0,0005 com
+`top_k=5`, contra ~US$ 0,00045 e ~US$ 0,0002 da v1.
+
+No replay de 24/09 no caminho de produção (28 consultas, `top_k=10`,
+compacto, com o corte), trocar a v1 pela v2 levou o MRR de 0,500 a 0,613.
+Linguagem natural foi de 0,073 a 0,312, identificador parcial de 0,781 a
+0,938, os alvos entregues de 18 a 19 de 28, e os tokens de metadados de
+15.012 a 14.163. Nos 12 cenários com expansão, os completos passaram de 7 para
+8, com 24.184 tokens contra 26.329. Detalhes em
+[`tests/eval/jev_curation_study_20260924.md`](../tests/eval/jev_curation_study_20260924.md).
+
+Validação fora da amostra, com o Jev chamado de verdade pelo caminho de produção
+em 38 consultas novas ([`tests/eval/golden_queries_holdout.yaml`](../tests/eval/golden_queries_holdout.yaml)):
+com `top_k=10`, a v2 com o corte teve MRR 0,697 contra 0,507 do ranking local
+(IC95 da diferença +0,094 a +0,299) e 0,558 da v1, com 39% menos tokens de
+metadados que o local e nenhum alvo perdido. Com `top_k=5`: 0,640 contra 0,505
+(local) e 0,564 (v1), com 27% menos tokens. Latência HTTP p50 da v2: 975 ms com
+20 candidatos e 1.254 ms com 40; da v1, ~660 ms. Dados em
+[`tests/eval/jev_holdout_validation_20260924.json`](../tests/eval/jev_holdout_validation_20260924.json).
+
+### Corte do top_k por relevância
+
+Com o Jev ligado, o perfil compacto faz do `top_k` um teto. O Atlas
+deduplica o pool na ordem do Jev, fica com os `top_k` primeiros e remove quem
+tem score abaixo da metade da escala: 1,5 na rubrica v2 (default) e 1,0 na v1,
+onde isso equivale a p(irrelevante) > p(evidência direta). A vaga não é reposta
+pelo próximo candidato nem cedida a commits; commits só ocupam vagas que o pool
+já não preenchia. Correspondência
+exata e candidato sem avaliação ficam. Candidato incerto também sai: exigir
+confiança ≥ 0,70 anularia o corte, porque ~70% dos candidatos ficam abaixo
+disso. Se tudo sair, volta o primeiro do ranking local com
+`relevance_unconfirmed_fallback`.
+
+A resposta pode ter menos itens que `top_k`; `omitted.relevance` conta os
+cortados. O perfil `full` não muda. Sem `ATLAS_RELEVANCE=1`, sem avaliação
+válida ou fora do perfil compacto, não há corte.
+
+O corte é o **default**: `ATLAS_RELEVANCE_CUT` ausente ou `1`/`true` liga;
+`0`/`false` volta à seleção conservadora (item 2 acima). Valor inválido mantém
+o default e aparece como `reason=invalid_flag`. `atlas_status.relevance.cut`
+declara configuração, política (`top_k_no_refill_v1`) e limiar.
+
+No caminho de produção, com as notas Jev da captura de 24/09 reaplicadas sem
+rede (28 consultas, rubrica v2), o corte levou os metadados de `top_k=10` de
+22.681 para 14.163 tokens (−38%) e os de `top_k=5` de 13.421 para 9.933
+(−26%). Nenhum alvo se perdeu; o MRR subiu de 0,577 para 0,613 em `top_k=10` e
+de 0,589 para 0,607 em `top_k=5`. Nos 12 cenários com expansão, os tokens
+caíram de 35.389 para 24.184 (−32%), com os mesmos 8 completos. O score oscila
+com o lote, então um alvo pode sair; detalhes em
+[`tests/eval/jev_curation_study_20260924.md`](../tests/eval/jev_curation_study_20260924.md).
 
 ### Dispensa de Jev para símbolo exato
 
@@ -71,6 +143,16 @@ para pools com menos de dois candidatos permanece. Os limiares Jev não mudam.
 `atlas_status.relevance.gate` declara configuração e versão da política; buscas
 dispensadas registram `status=skipped`, `reason=unique_exact_symbol`, nenhuma
 chamada remota e `cost_status=not_incurred`. `ATLAS_RERANK=0` continua prevalecendo.
+
+`ATLAS_RELEVANCE_GATE=identifier` estende a dispensa a toda consulta que seja
+um identificador, com ou sem pontos (`search_hyb`, `StorageBackend.search_hybrid`).
+A consulta segue com a ordem lexical e a promoção do exato, registra
+`reason=identifier_query` e não chama o Jev. O custo é real: sem avaliação, o
+corte do `top_k` e a reordenação da v2 não agem nessas consultas. No replay de
+24/09 (`top_k=10`), as chamadas caíram de 28 para 13, mas o MRR foi de 0,613
+para 0,569 (parciais de 0,938 para 0,781) e os tokens de metadados subiram de
+14.163 para 18.737. Use só quando custo e latência pesarem mais que tokens.
+`atlas_status.relevance.gate.policy` mostra `identifier_query_v1`.
 
 Para avaliação pareada com Jev habilitado, usando as credenciais já configuradas
 no ambiente, sem duplicar chamadas remotas entre variantes:
@@ -169,7 +251,12 @@ completos. Três execuções somaram 106 chamadas e **US$ 0,023391144**, com
 todos os custos conhecidos.
 
 A comparação publicada é gate contra Jev sempre ligado, no mesmo ranking.
-MRR do Jev contra o rerank local, no mesmo índice, continua por medir.
+O Jev contra o rerank local, no mesmo índice, foi medido em 24/09 por replay
+das notas capturadas (28 consultas, `top_k=10`, perfil compacto). Rerank local
+sem Jev: MRR 0,431. Jev sobre a ordem RRF crua (comportamento até então): 0,375.
+Jev sobre a ordem lexical, com o corte do top_k: 0,500 com a rubrica v1 e 0,613
+com a v2 (default). Detalhes em
+[`tests/eval/jev_curation_study_20260924.md`](../tests/eval/jev_curation_study_20260924.md).
 
 ## Otimização de contexto
 
@@ -198,6 +285,18 @@ passe essa referência a `atlas_expand` se precisar do restante. A última pági
 traz `content_complete=true`; para reconstituir o símbolo, concatene todas as
 partes desde o offset zero. A continuação é vinculada ao hash do arquivo e não
 usa cache; se o arquivo mudar, ela fica obsoleta mesmo após reindexação.
+
+Classe com mais de 6.000 caracteres (~1.500 tokens) e métodos indexados abre
+como **resumo**: `content` traz só o cabeçalho (assinatura, docstring e
+atributos até o primeiro método), e `outline` lista os métodos diretos, cada
+um com `ref`, `symbol`, `type` e `lines` (até 100; o excedente aparece em
+`outline_omitted`). A resposta traz o aviso `expand_class_outline`, e
+`next_ref` continua do fim do cabeçalho para quem precisar do corpo inteiro.
+Medido no índice deste repositório: `StorageBackend` foi de 4.819 tokens na
+primeira página (19.065 com as 4 páginas) para 1.965; `ASTChunker`, de 4.528
+(13.453 em 3 páginas) para 1.433. `ATLAS_EXPAND_OUTLINE=0` volta à classe
+paginada. Classe menor que o limiar abre inteira, porque ali ler tudo sai mais
+barato que abrir métodos um a um.
 
 Os tetos de bytes e tokens valem para cada resposta inteira, incluindo referências
 e metadados. A paginação prefere quebras de linha; linhas muito longas podem ser
@@ -312,8 +411,11 @@ A falha é memorizada; reinicie o servidor após corrigir ou trocar o arquivo.
 O teto de resposta é aplicado **independentemente** da observabilidade.
 Search corta resultados inteiros da cauda; context/brief/graph mantêm suas
 prioridades de corte. O bloco `budget` declara `mode`, `max_chars`, `max_bytes`,
-`max_tokens`, `tokenizer_sha256` e `used_chars`. Com o padrão carregado,
-`mode="tokenizer_exact"` e os tetos de tokens passam a valer sem configuração
+`max_tokens`, `tokenizer_sha256` e `used_chars`. Nas respostas compactas
+(`atlas_search` e `atlas_context` no perfil compacto, e `atlas_expand`), o
+bloco só aparece quando algo foi cortado para caber. Sem corte, ele custaria
+~121 tokens por resposta, 26% de uma busca compacta com 5 itens. Com o padrão
+carregado, `mode="tokenizer_exact"` e os tetos de tokens passam a valer sem configuração
 manual. Isso pode cortar respostas que antes cabiam apenas em chars/bytes.
 Se o contador estiver indisponível, o limite passa a chars/bytes:
 `mode="byte_bpe_upper_bound"`, `max_tokens=null`, sem garantia de tokens exatos.
@@ -402,8 +504,11 @@ Todas as flags abaixo são **opt-in ou de override**. Sem elas, o Atlas indexa, 
 | `ATLAS_RELEVANCE_API_URL` | derivado só de OpenRouter chat | Endpoint HTTPS System One. Sem host implícito genérico. |
 | `ATLAS_RELEVANCE_API_KEY` | reuso condicional | Se ausente, reutiliza `ATLAS_SEMANTIC_API_KEY` somente quando a URL semântica é OpenRouter HTTPS. |
 | `ATLAS_RELEVANCE_MODEL` | `~typesafe/jev-latest` | Não herda `ATLAS_SEMANTIC_MODEL`. Alias OpenRouter ou pin `typesafe/jev-[0-9]…`. |
-| `ATLAS_RELEVANCE_GATE` | desligado | `1`/`true` dispensa Jev para símbolo exato único no pool; preserva promoção local do exato. |
+| `ATLAS_RELEVANCE_GATE` | desligado | `1`/`true` dispensa Jev para símbolo exato único no pool; preserva promoção local do exato. `identifier` dispensa para toda consulta-identificador (menos chamadas, mais tokens). |
+| `ATLAS_RELEVANCE_RUBRIC` | `v2` | Rubrica do score Jev: `v2` (4 níveis com exemplos) ou `v1` (3 níveis, mais barata). Detalhes: [Rubrica do score](#rubrica-do-score). |
+| `ATLAS_RELEVANCE_CUT` | ligado | Com o Jev e o perfil compacto, faz do `top_k` um teto: remove, sem repor, quem tem score Jev abaixo da metade da escala (1,5 na v2, 1,0 na v1) entre os `top_k` primeiros. `0`/`false` volta à seleção conservadora. Detalhes: [Corte do top_k por relevância](#corte-do-top_k-por-relevância). |
 | `ATLAS_CONTEXT_OPTIMIZATION` | desligado | `1`/`true` faz `response_profile=default` resolver para compacto em search/context. Independente do Jev. Detalhes: [Otimização de contexto](#otimização-de-contexto). |
+| `ATLAS_EXPAND_OUTLINE` | ligado | Classe acima de ~1.500 tokens abre em `atlas_expand` como cabeçalho + `outline` dos métodos. `0`/`false` volta à classe inteira paginada. |
 | `ATLAS_TOKENIZER_PATH` | ausente | Caminho de um `tokenizer.json` local (lib `tokenizers`) para contagem exata de tokens e teto de tokens no orçamento de resposta. Independente de `ATLAS_OBSERVABILITY`. Sem ele (ou inválido), estimativa `ceil(chars/4)` identificada como tal — `max_tokens` fica `null`; isso é esperado. |
 
 História de Git **não tem variável de ambiente**. A janela é teto interno (até 100 commits por arquivo e 24 meses).

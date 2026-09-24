@@ -224,12 +224,25 @@ overlay semântico.
 
 O Jev é o modelo System One da TypeSafe: devolve, por candidato, uma decisão
 tipada com score e confiança. `ATLAS_RELEVANCE=1` (ou `true`) usa essa decisão
-no lugar da reordenação lexical/cross-encoder, no pool pós-RRF **antes** de
-`_merge_typed` e do corte `top_k`. A chamada passa pela API System One do
-OpenRouter. Default False. `ATLAS_RERANK=0` desliga Jev e o rerank local.
-Lotes ≤ 24 KB (máx. 2 chamadas, timeout compartilhado 3 s). Baixa confiança
-isola o candidato; falha de contrato invalida só o lote. No perfil compacto,
-seleção semântica remove apenas score ≤ 0,25 com confiança ≥ 0,90. O custo
+para refinar a reordenação lexical, no lugar do cross-encoder, no pool pós-RRF
+**antes** de `_merge_typed` e do corte `top_k`: o pool chega ao Jev já na ordem
+lexical, e quem ele não avalia com confiança fica nessa ordem. A chamada passa
+pela API System One do OpenRouter. Default False. `ATLAS_RERANK=0` desliga Jev
+e o rerank local.
+Uma chamada leva o pool inteiro (lote ≤ 192 KB; no máximo 2 chamadas em
+overflow, timeout compartilhado 3 s). A rubrica default é a v2: 4 níveis
+concretos com exemplos e `kind`/`language` no estado de cada candidato;
+`ATLAS_RELEVANCE_RUBRIC=v1` volta aos 3 níveis antigos. Os limiares valem como
+fração do nível mais alto da rubrica. Baixa confiança isola o candidato; falha
+de contrato invalida só o lote. No perfil compacto, `top_k` vira teto: entre os
+`top_k` primeiros na ordem Jev sai quem tem score abaixo da metade da escala
+(1,0 na v1, 1,5 na v2), incertos inclusive, sem repor a vaga nem cedê-la a
+commits; exatos e não avaliados ficam, e `omitted.relevance` conta os cortes.
+É o default (`ATLAS_RELEVANCE_CUT` ausente ou `1`); `ATLAS_RELEVANCE_CUT=0`
+volta à seleção conservadora, que remove apenas score ≤ 1/8 da escala com
+confiança ≥ 0,90. `ATLAS_RELEVANCE_GATE=identifier` dispensa o Jev para toda
+consulta-identificador: economiza chamadas, mas essas consultas perdem o corte e
+a reordenação da v2. O custo
 remoto sai em uma linha JSON em stderr por `atlas_search` (conhecido /
 parcialmente conhecido / zero / desconhecido); `atlas_status.relevance` é
 estático. Default `~typesafe/jev-latest` via `ATLAS_RELEVANCE_MODEL`. Reinicie
@@ -239,9 +252,11 @@ o MCP após mudar o `env`.
 
 `ATLAS_CONTEXT_OPTIMIZATION=1` faz `response_profile=default` resolver para
 `compact` em `atlas_search`/`atlas_context`. Independente do Jev. Compacto:
-projeção enxuta, dedup por cobertura verificável, orçamento a 70%,
-`atlas_expand` por id. Sem a flag (ou com `response_profile=full`), o formato
-atual permanece.
+projeção enxuta, dedup por cobertura verificável, orçamento a 70%, bloco
+`budget` só quando algo foi cortado, `atlas_expand` por id. Classe acima de
+~1.500 tokens expande como cabeçalho + `outline` dos métodos, cada um com seu
+`ref`; `ATLAS_EXPAND_OUTLINE=0` volta à classe inteira paginada. Sem a flag (ou
+com `response_profile=full`), o formato atual permanece.
 
 ### Indexação incremental (DECISAO-005 / [J])
 
@@ -283,5 +298,7 @@ adicional deve preencher uma lacuna concreta de evidência; não abra todos os h
 nem auxiliares e tipos apenas porque aparecem no resultado. Lotes de três a cinco
 só quando a tarefa já exigir comparar esses símbolos. Pare assim que houver
 informação suficiente; se `atlas_context` já atende, não repita o conteúdo.
-Continue `next_ref` somente se precisar da parte restante do símbolo.
+Continue `next_ref` somente se precisar da parte restante do símbolo. Se a
+expansão vier com `outline` (classe grande), expanda só os métodos necessários
+pelos `ref` do outline, sem seguir `next_ref` para ler a classe inteira.
 <!-- /atlas:selective-expansion -->

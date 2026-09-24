@@ -33,7 +33,7 @@ from codesteer_atlas.models import (
 )
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
-from codesteer_atlas.relevance import new_usage, order_by_relevance, try_rerank
+from codesteer_atlas.relevance import new_usage, order_by_relevance, resolve_config, try_rerank
 from codesteer_atlas.semantic import semantic_enabled, semantic_index_state
 from codesteer_atlas.structural import node_id_for, spreading_activation
 
@@ -528,8 +528,8 @@ class StorageBackend:
 
         `structural=True` acrescenta o braço de grafo à fusão (opt-in por chamada).
         Sem `ATLAS_RERANK_MODEL`, a reordenação permanece a lexical de `ranking.rerank`.
-        `ATLAS_RELEVANCE=1` substitui essa reordenação por Jev quando a busca é elegível;
-        em falha, cai no reranker local anteriormente configurado.
+        `ATLAS_RELEVANCE=1` faz o Jev refinar a ordem lexical, no lugar do cross-encoder,
+        quando a busca é elegível; em falha, cai no reranker local configurado.
 
         `relevance_usage` é o ledger request-local do custo Jev; chamadas diretas
         sem ledger (harness) criam um local e o devolvem em `SearchOutcome`.
@@ -676,10 +676,13 @@ class StorageBackend:
         evaluations = []
         local_fallback = list(pool)
         if _rerank_enabled():
-            reranked = try_rerank(pool, query_text, warnings, usage)
+            # @MindDecision: o Jev refina a ordem lexical — quem ele não avalia com
+            # confiança fica onde o rerank local o pôs, não na posição RRF crua.
+            base = rerank(pool, query_text) if resolve_config().enabled else pool
+            reranked = try_rerank(base, query_text, warnings, usage)
             if reranked is None:
                 pool = self._rerank_pool(pool, query_text, warnings)
-                if usage.reason == "unique_exact_symbol":
+                if usage.reason in {"unique_exact_symbol", "identifier_query"}:
                     # Preserva a promoção de exatos do Jev usando apenas evidência local.
                     pool = order_by_relevance(pool, query_text, {})
                     usage.ranking_changed = [
@@ -889,6 +892,25 @@ class StorageBackend:
         except Exception:
             return None
         return rows[0] if rows else None
+
+    def get_chunks_in_range(self, file_path: str, start_line: int, end_line: int) -> List[Dict[str, Any]]:
+        """Chunks de `file_path` que começam dentro de [start_line, end_line], sem conteúdo."""
+        if not self.exists():
+            return []
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        escaped_path = file_path.replace("'", "''")
+        arrow_table = (
+            table.search()
+            .where(
+                f"file_path = '{escaped_path}' AND start_line >= {int(start_line)} "
+                f"AND start_line <= {int(end_line)}",
+                prefilter=True,
+            )
+            .select(["id", "scope_type", "scope_name", "start_line", "end_line"])
+            .to_arrow()
+        )
+        return arrow_table.to_pylist()
 
     def get_sections_by_file_path(self, file_path: str) -> List[Dict[str, Any]]:
         """

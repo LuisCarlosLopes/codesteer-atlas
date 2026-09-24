@@ -19,8 +19,10 @@ from codesteer_atlas.config import (
     CHUNK_TRUNCATION_MARKER,
     CONTEXT_EXPAND_MAX_REFS,
     CONTEXT_OPTIMIZATION_ENV_FLAG,
+    EXPAND_OUTLINE_ENV_FLAG,
+    RELEVANCE_CUT_NORMALIZED_BELOW,
     RELEVANCE_DROP_CONFIDENCE_MIN,
-    RELEVANCE_DROP_SCORE_MAX,
+    RELEVANCE_DROP_NORMALIZED_MAX,
 )
 from codesteer_atlas.models import CandidateEvaluation, RelevanceUsage, SearchResult
 from codesteer_atlas.relevance import is_exact_match
@@ -36,6 +38,45 @@ def context_optimization_enabled(environ: Optional[Mapping[str, str]] = None) ->
 
 def context_optimization_status(environ: Optional[Mapping[str, str]] = None) -> dict:
     return {"enabled": context_optimization_enabled(environ)}
+
+
+def expand_outline_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Ligado por padrão: só `0`/`false` desliga o resumo de classes grandes."""
+    values = environ if environ is not None else os.environ
+    raw = (values.get(EXPAND_OUTLINE_ENV_FLAG) or "").strip().lower()
+    return raw not in {"0", "false"}
+
+
+def build_class_outline(
+    chunk: Mapping[str, Any], members: Sequence[Mapping[str, Any]]
+) -> Optional[tuple[int, list[dict]]]:
+    """
+    (última linha do cabeçalho, métodos diretos) de um chunk de classe, ou None.
+    Membro direto é `Classe.nome` que começa depois da linha da classe; o
+    cabeçalho vai da classe até a linha anterior ao primeiro membro.
+    """
+    # @MindRisk: JS minificado põe classe e métodos na mesma linha — sem resumo possível.
+    name = chunk.get("scope_name") or ""
+    if chunk.get("scope_type") != "class" or not name:
+        return None
+    start, end = chunk["start_line"], chunk["end_line"]
+    direct = sorted(
+        (
+            m for m in members
+            if (m.get("scope_name") or "").startswith(name + ".")
+            and "." not in m["scope_name"][len(name) + 1:]
+            and start < m["start_line"] <= end
+        ),
+        key=lambda m: m["start_line"],
+    )
+    if not direct:
+        return None
+    outline = [
+        {"ref": m["id"], "symbol": m["scope_name"], "type": m["scope_type"],
+         "lines": [m["start_line"], m["end_line"]]}
+        for m in direct
+    ]
+    return direct[0]["start_line"] - 1, outline
 
 
 def resolve_response_profile(
@@ -204,8 +245,9 @@ def select_conservative(
     local_fallback: Optional[Sequence[SearchResult]] = None,
 ) -> SelectionOutcome:
     """
-    Seleção conservadora do perfil compacto com Jev.
-    Descarta só score ≤ 0,25 e confiança ≥ 0,90. Incertos/não avaliados ficam.
+    Seleção conservadora do perfil compacto com Jev (ATLAS_RELEVANCE_CUT=0).
+    Descarta só score ≤ 1/8 da escala (0,25 na v1) e confiança ≥ 0,90.
+    Incertos/não avaliados ficam.
     """
     by_key: dict[str, CandidateEvaluation] = {}
     for ev in evaluations:
@@ -225,7 +267,7 @@ def select_conservative(
             and evaluation.state == "evaluated"
             and evaluation.score is not None
             and evaluation.confidence is not None
-            and evaluation.score <= RELEVANCE_DROP_SCORE_MAX
+            and evaluation.score <= RELEVANCE_DROP_NORMALIZED_MAX * evaluation.score_max
             and evaluation.confidence >= RELEVANCE_DROP_CONFIDENCE_MIN
         ):
             removed += 1
@@ -242,6 +284,61 @@ def select_conservative(
             kept = [fallback_pool[0]]
             unconfirmed = True
             warnings.append("relevance_unconfirmed_fallback")
+
+    return SelectionOutcome(
+        results=kept,
+        removed_by_relevance=removed,
+        unconfirmed=unconfirmed,
+        warnings=warnings,
+    )
+
+
+def select_within_top_k(
+    results: Sequence[SearchResult],
+    query: str,
+    evaluations: Sequence[CandidateEvaluation],
+    *,
+    top_k: int,
+    normalized_below: float = RELEVANCE_CUT_NORMALIZED_BELOW,
+    local_fallback: Optional[Sequence[SearchResult]] = None,
+) -> SelectionOutcome:
+    """
+    Corte do top_k (ATLAS_RELEVANCE_CUT): recebe a ordem Jev já deduplicada, fica com
+    os `top_k` primeiros e remove, sem repor a vaga, quem tem score abaixo de
+    `normalized_below` × o nível máximo da rubrica (1,0 na v1, 1,5 na v2).
+    Exatos e candidatos sem avaliação ficam; incertos também saem.
+    """
+    # @MindWhy: exigir confiança ≥ 0,70 anula o corte — ~70% dos candidatos ficam abaixo
+    # @MindRisk: o score oscila com o lote (p95 0,56); `omitted.relevance` declara o corte
+    by_key: dict[str, CandidateEvaluation] = {}
+    for ev in evaluations:
+        by_key[ev.chunk_id or f"{ev.file_path}:{ev.scope_name}"] = ev
+
+    window = list(results[:top_k])
+    kept: list[SearchResult] = []
+    removed = 0
+    for result in window:
+        evaluation = by_key.get(result.chunk_id or f"{result.file_path}:{result.scope_name}")
+        if (
+            not is_exact_match(result, query)
+            and evaluation is not None
+            and evaluation.state in {"evaluated", "uncertain"}
+            and evaluation.score is not None
+            and evaluation.score < normalized_below * evaluation.score_max
+        ):
+            removed += 1
+            continue
+        kept.append(result)
+
+    unconfirmed = False
+    warnings: list[str] = []
+    if not kept and window:
+        fallback = (list(local_fallback) if local_fallback else window)[0]
+        kept = [fallback]
+        unconfirmed = True
+        warnings.append("relevance_unconfirmed_fallback")
+        if any(_identity(fallback) == _identity(result) for result in window):
+            removed -= 1
 
     return SelectionOutcome(
         results=kept,
