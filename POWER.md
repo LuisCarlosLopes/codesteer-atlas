@@ -47,7 +47,8 @@ Use as tools deste power sempre que precisar:
 
 - `atlas_search(query, top_k, repo, language, path_prefix, include_content)` — busca híbrida. Por padrão retorna só metadados (`file_path`, linhas, símbolo, score); use `include_content=true` ou `Read` nas linhas indicadas para o conteúdo.
 - `atlas_brief(level)` — briefing pré-computado do projeto (identidade, camadas, entrypoints, hubs). Chame uma vez, no início, para se orientar num repositório desconhecido.
-- `atlas_graph(mode, target, source, top_n)` — consulta o grafo derivado para hubs, caminhos entre nós e explain com rationale/notas ligadas.
+- `atlas_context(target, intent)` — pacote da tarefa numa chamada (`intent`: `edit`, `debug`, `review`, `understand`). Use quando o símbolo/arquivo já é conhecido.
+- `atlas_graph(mode, target, source, top_n)` — consulta o grafo derivado para hubs, caminhos, explain e `mode="affected"` (raio de impacto).
 - `atlas_status()` — diagnóstico do índice (existência, total de chunks, modelo, staleness, `graph_available`, `graph_viewer_path`).
 - `atlas_index(workspace, paths, full, dry_run)` — (re)indexa o workspace; use `dry_run=true` antes de indexar pastas ainda não indexadas.
 

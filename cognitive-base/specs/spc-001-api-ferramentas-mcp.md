@@ -4,7 +4,7 @@ type: api
 title: "API das ferramentas MCP atlas_*"
 status: approved
 created: "2026-06-17"
-updated: "2026-06-17"
+updated: "2026-08-30"
 author: "@luiscarloslopes"
 links:
   - id: sys-005
@@ -22,10 +22,39 @@ meta:
 
 ## Contexto
 
-Contrato das cinco ferramentas expostas pelo [[sys-005-mcp-server]]. Transporte
+Contrato das ferramentas expostas pelo [[sys-005-mcp-server]]. Transporte
 [[meta/glossary#stdio-transport|stdio]]; respostas em JSON compacto (string).
 
 Recurso read-only adicional: `atlas://status` (alias de `atlas_status`).
+
+### Delta F4 — camada semântica opt-in
+
+`ATLAS_SEMANTIC=1` é o único opt-in; não há parâmetro adicional em `atlas_search`.
+O braço `semantic` só aparece em `match_arms` quando `atlas_status.semantic.index` é
+`ready` (índice 2.3.0 com propósito utilizável). A camada desligada omite prosa e
+warnings semânticos.
+
+`atlas_status` sempre inclui `semantic: {enabled, origin, egress, index, index_reason?,
+last_generation?}`. A origem é `sampling` apenas no sync MCP, depois endpoint local
+explicitamente configurado e API somente com URL explícita; o campo `egress` descreve o
+que sai e nunca inclui credenciais.
+
+Quando `ATLAS_SEMANTIC_MODEL` está definido, a origem API usa contrato
+OpenAI-compatible (`model` + `messages`), incluindo OpenRouter; sem a variável, mantém o
+payload genérico legado. URL, chave e modelo continuam explícitos, sem provider default.
+
+Quando a busca degrada, `warnings` pode incluir `semantic_layer_unavailable` (camada
+ligada sem índice pronto) ou `semantic_arm_unavailable` (falha do braço semântico).
+Esses avisos preservam vector+FTS, mas informam que o recall semântico está incompleto.
+
+`atlas_brief` pode incluir `layers[].summary`; `atlas_context` com `understand` pode
+incluir `sections.symbol.purpose`, `sections.file_summary` e `layer.summary`. Esses campos
+são opcionais e cedem primeiro ao orçamento. `atlas_index` síncrono acrescenta
+`semantic_status`, `semantic_generated`, `semantic_reused` e contadores de arquivo/camada.
+
+O formato 2.3.0 é obtido por reindexação/rechunk integral (`full=true`, sem `paths`), sem
+migration de banco. Índices anteriores permanecem legados e nenhuma atualização parcial
+pode fazer delete, append ou relabelar seu manifesto.
 
 ## Endpoints
 
@@ -71,31 +100,47 @@ localizar código ou documentos. Não chamar `atlas_status` antes "só para chec
 `markdown_references` com `{file_path, anchor, resolved_section, alias?, candidates?}`.
 Resultados de código podem incluir `rationale_refs` com `{kind, key, note_path?, text?, candidates?}`.
 
-### `atlas_map`
+Se um braço falhar, `warnings` informa a degradação: `vector_search_unavailable`,
+`fts_unavailable`, `cross_encoder_unavailable`, `structural_arm_unavailable`,
+`semantic_layer_unavailable` ou `semantic_arm_unavailable`. Os dois últimos não removem
+os resultados estruturais vector+FTS; exigem cautela antes de concluir que algo não existe.
 
-Mapa hierárquico compacto de arquivos e símbolos (sem conteúdo).
+### `atlas_context`
 
-| Parâmetro | Tipo | Default | Descrição |
-| --------- | ---- | ------- | --------- |
-| `repo` | string | — | Filtro por repo (informativo na resposta) |
-| `path_prefix` | string | — | Filtra `file_path` por prefixo |
-| `max_depth` | int | 3 | Profundidade máxima de diretórios |
-| `query` | string | — | Aceito por compatibilidade; **ignorado** |
+Pacote da tarefa numa chamada quando o símbolo ou arquivo já é conhecido.
+Não substitui `atlas_brief` (orientação) nem `atlas_search` (descoberta).
 
-**Resposta:**
+| Parâmetro | Tipo | Obrigatório | Default | Descrição |
+| --------- | ---- | ----------- | ------- | --------- |
+| `target` | string | sim | — | Id do nó, label exato ou sufixo único (mesma resolução de `atlas_graph`) |
+| `intent` | string | sim | — | `edit`, `debug`, `review` ou `understand` |
+
+**Resposta (JSON compacto):**
 
 ```json
 {
-  "map": "src/server.py\n  class Foo\n  func bar",
-  "total_files": 42,
-  "total_symbols": 318,
-  "repo": "all"
+  "target": {"id": "sym:src/app.py#login", "label": "login", "kind": "symbol"},
+  "intent": "edit",
+  "sections": {"symbol": {}, "callers": [], "callees": [], "tests": [], "rationale": []},
+  "truncated": {},
+  "warnings": ["calls_unavailable"],
+  "budget": {"max_chars": 12000, "used_chars": 1840}
 }
 ```
 
+Seções por `intent`: `edit` → symbol, callers, callees, tests, rationale;
+`debug` → symbol, call_chain_to_entrypoints, error_handling, recent_history;
+`review` → diff, impact, tests, adrs; `understand` → symbol, layer, neighbors, brief_layer.
+Capacidades ausentes nesta fase (git/diff/`calls`) degradam com `warnings` estáveis, sem raise.
+
+### `atlas_map` (removida)
+
+`atlas_map` não é tool vigente. Use `atlas_brief` para orientação e `atlas_context`
+quando o alvo da tarefa já é conhecido.
+
 ### `atlas_status`
 
-Diagnóstico do índice. **Não** é pré-requisito de `atlas_search`/`atlas_map`.
+Diagnóstico do índice. **Não** é pré-requisito de `atlas_search`/`atlas_context`.
 
 | Parâmetro | Tipo | Descrição |
 | --------- | ---- | --------- |
@@ -128,12 +173,13 @@ Valores de `index_resolution`: `cli-arg` | `env` | `discovery` | `editor-project
 
 ### `atlas_graph`
 
-Consulta o grafo derivado do índice para hubs, caminhos e vizinhança explicativa.
+Consulta o grafo derivado do índice para hubs, caminhos, vizinhança explicativa
+e raio de impacto.
 
 | Parâmetro | Tipo | Obrigatório | Default | Descrição |
 | --------- | ---- | ----------- | ------- | --------- |
-| `mode` | string | sim | — | `hubs`, `path` ou `explain` |
-| `target` | string | condicional | — | Obrigatório em `path` e `explain`; aceita id, label exato ou sufixo único |
+| `mode` | string | sim | — | `hubs`, `path`, `explain` ou `affected` |
+| `target` | string | condicional | — | Obrigatório em `path`, `explain` e `affected`; aceita id, label exato ou sufixo único |
 | `source` | string | condicional | — | Obrigatório em `path`; aceita id, label exato ou sufixo único |
 | `top_n` | int | não | 10 | Máximo de hubs em `mode="hubs"` (1–50) |
 
@@ -176,7 +222,27 @@ Consulta o grafo derivado do índice para hubs, caminhos e vizinhança explicati
   "node": {"id": "sym:src/app.py#run"},
   "neighbors": {"doc": [], "rationale": []},
   "rationale": [],
-  "notes": []
+  "notes": [],
+  "truncated": {"symbol": 4}
+}
+```
+
+**Resposta `mode="affected"`:**
+
+```json
+{
+  "mode": "affected",
+  "target": {"id": "file:src/app.py", "label": "app.py", "kind": "file"},
+  "items": [
+    {
+      "id": "file:src/cli.py",
+      "hops": 1,
+      "via": "imports",
+      "via_location": {"file_path": "src/cli.py"}
+    }
+  ],
+  "truncated": false,
+  "warnings": ["calls_unavailable"]
 }
 ```
 
@@ -218,10 +284,12 @@ Indexa ou reindexa o workspace ([[sys-004-index-workspace]]).
 
 | Situação | Comportamento |
 | -------- | ------------- |
-| Índice ausente (`atlas_search`/`atlas_map`) | Erro acionável com instrução para `atlas_index` |
+| Índice ausente (`atlas_search`/`atlas_context`) | Erro acionável com instrução para `atlas_index` |
 | `query` vazio | `ValueError` |
 | `top_k` fora de 1–50 | `ValueError` |
 | `mode` inválido em `atlas_graph` | `ValueError` |
+| `intent` inválido em `atlas_context` | `ValueError` |
+| `target` vazio em `atlas_context` / `affected` | `ValueError` |
 | `top_n` fora de 1–50 | `ValueError` |
 | `graph.json` ausente | `FileNotFoundError` acionável pedindo reindex |
 | `path` fora do workspace (`atlas_index`) | `ValueError` (anti-traversal) |
@@ -238,12 +306,13 @@ atlas_search(query="resolve index dir", path_prefix="src/codesteer_atlas")
 # Passo 2 — ler linhas exatas no editor
 Read file_path + lines retornados
 
-# Passo 3 — mapa estrutural
-atlas_map(path_prefix="src/codesteer_atlas", max_depth=2)
+# Passo 3 — pacote da tarefa (símbolo já conhecido)
+atlas_context(target="AuthService.login", intent="edit")
 
 # Grafo derivado
 atlas_graph(mode="hubs", top_n=5)
 atlas_graph(mode="path", source="src/app.py", target="dec-002")
+atlas_graph(mode="affected", target="AuthService.login")
 
 # Diagnóstico explícito
 atlas_status() → se is_stale: atlas_index(paths=["src"])
@@ -260,3 +329,4 @@ atlas_status() → se is_stale: atlas_index(paths=["src"])
 | Versão | Data       | Autor            | Descrição |
 | ------ | ---------- | ---------------- | --------- |
 | 1.0.0  | 2026-06-17 | @luiscarloslopes | Criação   |
+| 1.1.0  | 2026-08-30 | @luiscarloslopes | `atlas_context`; `atlas_graph mode=affected`; `atlas_map` removida |

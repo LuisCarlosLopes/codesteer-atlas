@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from codesteer_atlas.config import GRAPH_HTML_FILENAME, GRAPH_VIEWER_MAX_FULL_NODES
+from codesteer_atlas.hub_noise import is_noise_hub
 
 # Bundle UMD do force-graph (d3-force embutido) vendorizado localmente para
 # manter o graph.html 100% autocontido/offline (abre via file://, sem CDN).
@@ -17,6 +18,19 @@ def _load_force_graph_lib() -> str:
     if _FORCE_GRAPH_LIB_CACHE is None:
         _FORCE_GRAPH_LIB_CACHE = _FORCE_GRAPH_LIB_PATH.read_text(encoding="utf-8")
     return _FORCE_GRAPH_LIB_CACHE
+
+
+def _is_noise_hub(node: dict) -> bool:
+    """Aplica o predicado do grafo e aceita marcações explícitas de ruído."""
+    if is_noise_hub(node):
+        return True
+    metrics = node.get("metrics") or {}
+    if metrics.get("noise_hub") is True:
+        return True
+    if metrics.get("is_noise_hub") is True:
+        return True
+    tags = node.get("tags") or []
+    return "noise_hub" in tags
 
 
 _HTML_TEMPLATE = """<!doctype html>
@@ -196,6 +210,18 @@ _HTML_TEMPLATE = """<!doctype html>
       display: inline-block;
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
     }
+    .legend-line {
+      width: 20px;
+      height: 0;
+      display: inline-block;
+      vertical-align: middle;
+      border-top-width: 2px;
+      border-top-color: rgba(230, 237, 243, 0.72);
+    }
+    .legend-sub {
+      color: rgba(230, 237, 243, 0.62);
+      word-break: break-word;
+    }
     .details {
       min-height: 120px;
     }
@@ -269,6 +295,7 @@ _HTML_TEMPLATE = """<!doctype html>
         <div class="section-title">Mapa</div>
         <div id="counts" class="metric-stack small"></div>
         <div id="legend" class="legend-list small"></div>
+        <div id="coverage" class="legend-list small"></div>
       </div>
 
       <div class="panel-block">
@@ -312,6 +339,13 @@ _HTML_TEMPLATE = """<!doctype html>
       cites: { color: "#76c7b7", alpha: 0.40, width: 1.20 },
       annotates: { color: "#b392f0", alpha: 0.36, width: 1.08 },
     };
+    // Tracado por tier de resolucao (graph.resolution_coverage / edge.origin):
+    // scip = solida, treesitter = tracejada, origem ausente = pontilhada.
+    const linkDashByOrigin = {
+      scip: { dash: null, css: "solid", label: "scip (indice do toolchain)" },
+      treesitter: { dash: [6, 4], css: "dashed", label: "treesitter (fallback sintatico)" },
+      unknown: { dash: [1, 4], css: "dotted", label: "sem origem declarada" },
+    };
     const NODE_REL_SIZE = 4;
 
     // Perfil de renderizacao (mesmos knobs expostos por write_graph_html).
@@ -330,6 +364,7 @@ _HTML_TEMPLATE = """<!doctype html>
     const activeEdgeKinds = new Set(edgeKinds);
     const summaryFocusIds = new Set(viewer.focus_node_ids || []);
     const highlightHubIds = new Set(viewer.highlight_hub_ids || []);
+    const noiseHubIds = new Set(viewer.noise_hub_ids || []);
     const nodeIdsByKind = new Map(nodeKinds.map(kind => [kind, []]));
     const adjacency = new Map(rawNodes.map(node => [node.id, []]));
     for (const node of rawNodes) {
@@ -361,6 +396,7 @@ _HTML_TEMPLATE = """<!doctype html>
       details: document.getElementById("details"),
       counts: document.getElementById("counts"),
       legend: document.getElementById("legend"),
+      coverage: document.getElementById("coverage"),
       nodeFilters: document.getElementById("node-filters"),
       edgeFilters: document.getElementById("edge-filters"),
       search: document.getElementById("search"),
@@ -416,7 +452,12 @@ _HTML_TEMPLATE = """<!doctype html>
       for (const edge of rawEdges) {
         if (!activeEdgeKinds.has(edge.kind)) continue;
         if (nodeSet.has(edge.source) && nodeSet.has(edge.target)) {
-          links.push({ source: edge.source, target: edge.target, kind: edge.kind });
+          links.push({
+            source: edge.source,
+            target: edge.target,
+            kind: edge.kind,
+            origin: edge.origin || "unknown",
+          });
         }
       }
       const nodes = rawNodes.filter(node => nodeSet.has(node.id));
@@ -453,10 +494,11 @@ _HTML_TEMPLATE = """<!doctype html>
     function colorForNode(node) {
       const base = colorByKind[node.kind] || "#94a3b8";
       let alpha = 0.9;
+      if (noiseHubIds.has(node.id)) alpha = 0.22;
       if (state.focusIds.size && !state.focusIds.has(node.id)) {
         alpha = 0.1;
       } else if (!state.focusIds.size && viewer.hubs_only && !state.showAll && !highlightHubIds.has(node.id)) {
-        alpha = 0.45;
+        alpha = Math.min(alpha, 0.45);
       }
       if (state.matchedIds.has(node.id)) alpha = 1;
       if (node.id === state.selectedId || node.id === state.hoveredId) alpha = 1;
@@ -475,6 +517,10 @@ _HTML_TEMPLATE = """<!doctype html>
 
     function widthForLink(link) {
       return (edgeStyleByKind[link.kind] || { width: 1 }).width;
+    }
+
+    function dashForLink(link) {
+      return (linkDashByOrigin[link.origin] || linkDashByOrigin.unknown).dash;
     }
 
     function drawNodeDecorations(node, ctx, scale) {
@@ -541,6 +587,7 @@ _HTML_TEMPLATE = """<!doctype html>
       })
       .onBackgroundClick(() => clearSelection());
 
+    if (typeof Graph.linkLineDash === "function") Graph.linkLineDash(dashForLink);
     if (typeof Graph.minZoom === "function") Graph.minZoom(minZoom);
     if (typeof Graph.maxZoom === "function") Graph.maxZoom(maxZoom);
 
@@ -612,6 +659,51 @@ _HTML_TEMPLATE = """<!doctype html>
           `;
         })
         .join("");
+    }
+
+    // Legenda de cobertura: tracado por origem da aresta + tiers de resolucao,
+    // incluindo as linguagens que o indice nao consegue resolver (tier "none").
+    function renderCoverageLegend() {
+      const counts = new Map();
+      for (const edge of rawEdges) {
+        const origin = edge.origin || "unknown";
+        counts.set(origin, (counts.get(origin) || 0) + 1);
+      }
+      const originRows = Object.entries(linkDashByOrigin)
+        .filter(([origin]) => counts.get(origin))
+        .map(([origin, style]) => `
+          <div class="legend-item">
+            <span><span class="legend-line" style="border-top-style:${style.css}"></span> ${escapeHtml(style.label)}</span>
+            <span class="muted">${counts.get(origin)}</span>
+          </div>
+        `);
+
+      const coverage = graph.resolution_coverage || {};
+      const tierRows = ["scip", "treesitter", "none"]
+        .filter(tier => Array.isArray(coverage[tier]))
+        .map(tier => `
+          <div class="legend-item">
+            <span>${escapeHtml(tier)}</span>
+            <span class="legend-sub">${escapeHtml(coverage[tier].join(", ") || "-")}</span>
+          </div>
+        `);
+      if (typeof coverage.files_unresolved === "number") {
+        tierRows.push(`
+          <div class="legend-item">
+            <span class="muted">arquivos sem resolver</span>
+            <span>${escapeHtml(coverage.files_unresolved)}</span>
+          </div>
+        `);
+      }
+
+      const blocks = [];
+      if (originRows.length) {
+        blocks.push(`<div class="muted">Origem da aresta</div>`, ...originRows);
+      }
+      if (tierRows.length) {
+        blocks.push(`<div class="muted">Cobertura por tier</div>`, ...tierRows);
+      }
+      elements.coverage.innerHTML = blocks.join("");
     }
 
     function renderFilterGroup(container, values, activeSet) {
@@ -758,6 +850,7 @@ _HTML_TEMPLATE = """<!doctype html>
     renderFilterGroup(elements.nodeFilters, nodeKinds, activeNodeKinds);
     renderFilterGroup(elements.edgeFilters, edgeKinds, activeEdgeKinds);
     renderLegend();
+    renderCoverageLegend();
     if (viewer.hubs_only) {
       elements.notice.hidden = false;
       elements.notice.textContent = viewer.notice || "Resumo por hubs ativo para manter o mapa fluido.";
@@ -797,12 +890,17 @@ def write_graph_html(graph: dict, index_dir: Path) -> Path:
 
     existing_viewer = dict(graph_for_view.get("viewer") or {})
     existing_render_profile = dict(existing_viewer.get("render_profile") or {})
+
+    noise_hub_ids = [
+        node["id"] for node in graph_for_view.get("nodes", []) if _is_noise_hub(node)
+    ]
     graph_for_view["viewer"] = {
         **existing_viewer,
         "node_count": metrics.get("node_count", node_count),
         "edge_count": metrics.get("edge_count", edge_count),
         "layout_mode": "light-relaxed" if node_count <= 250 else "radial-seeded",
         "highlight_hub_ids": top_hub_ids,
+        "noise_hub_ids": noise_hub_ids,
         "render_profile": {
             **existing_render_profile,
             "label_mode": "focus-only",

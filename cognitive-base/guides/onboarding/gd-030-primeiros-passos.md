@@ -80,7 +80,7 @@ uv run ruff check
 - [ ] `.code-index/manifest.json` existe após indexação
 - [ ] `atlas_status` retorna índice válido e não stale
 - [ ] MCP registrado no editor e `atlas_search` responde
-- [ ] Regras do projeto (`CLAUDE.md`) orientam uso do Atlas antes de grep
+- [ ] Regras do projeto (`AGENTS.md`) orientam uso do Atlas antes de grep
 
 ## Notas Relacionadas
 

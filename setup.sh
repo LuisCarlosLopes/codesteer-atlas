@@ -25,9 +25,9 @@ if ! command -v uv &>/dev/null; then
 fi
 echo "uv encontrado: $(uv --version)"
 
-# 2. Sincroniza dependências (produção + dev)
+# 2. Sincroniza dependências (produção + dev + extra watch para ATLAS_WATCH=1)
 echo "Sincronizando dependências..."
-uv sync --group dev
+uv sync --group dev --extra watch
 
 # 3. Valida imports críticos via deploy_mcp.py --check
 echo "Validando imports críticos..."
@@ -36,5 +36,5 @@ uv run python deploy_mcp.py --check
 echo ""
 echo "Setup concluído. Próximos passos:"
 echo "  1. Indexar workspace: uv run atlas-index --workspace ."
-echo "  2. Iniciar servidor:  uv run atlas-serve"
+echo "  2. Iniciar servidor:  uv run --extra watch atlas-serve"
 echo "  3. Rodar testes:      uv run pytest -v"

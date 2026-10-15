@@ -2,14 +2,28 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import sys
 import threading
 from collections import deque
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from pathlib import Path, PurePath
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from codesteer_atlas.config import GRAPH_FILENAME, GRAPH_PATH_MAX_HOPS, GRAPH_TOP_HUBS_LIMIT
-from codesteer_atlas.markdown_links import extract_markdown_link_targets
+from codesteer_atlas.config import (
+    GRAPH_AFFECTED_MAX_RESULTS,
+    GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND,
+    GRAPH_FILENAME,
+    GRAPH_PATH_MAX_HOPS,
+    GRAPH_RESPONSE_MAX_CHARS,
+    GRAPH_TOP_HUBS_LIMIT,
+    IGNORE_DIRS,
+    IMPORT_RESOLUTION_TIERS,
+)
+from codesteer_atlas.hub_noise import is_noise_hub as is_noise_hub
+from codesteer_atlas.markdown_links import (
+    extract_markdown_link_targets,
+    resolve_heading_section,
+)
 from codesteer_atlas.models import CodeChunk
 from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
 from codesteer_atlas.viewer import write_graph_html
@@ -47,8 +61,77 @@ def _resolve_note_matches(name_to_paths: Dict[str, List[str]], key: str) -> List
 # Diretórios que convencionalmente hospedam pacotes sem serem parte do nome do módulo
 _CONVENTIONAL_SOURCE_ROOTS = ("src", "lib")
 
+# Manifestos de build que marcam raiz de módulo. `go.mod` e `*.csproj` NÃO têm
+# extensão em SUPPORTED_EXTENSIONS, logo não estão no manifest do índice — só são
+# descobertos varrendo o workspace, e por isso `workspace_root` é opcional aqui.
+_BUILD_MANIFEST_NAMES = frozenset({"go.mod", "pom.xml", "Cargo.toml", "build.gradle"})
+_BUILD_MANIFEST_SUFFIXES = (".csproj",)
+# Teto de profundidade: cobre monorepo (`services/api/go.mod`) sem varrer a árvore toda.
+_BUILD_MANIFEST_MAX_DEPTH = 3
 
-def infer_package_roots(manifest_files: set[str]) -> List[str]:
+_GO_MODULE_RE = re.compile(r"^\s*module\s+(\S+)", re.MULTILINE)
+
+
+def _is_build_manifest(name: str) -> bool:
+    return name in _BUILD_MANIFEST_NAMES or name.endswith(_BUILD_MANIFEST_SUFFIXES)
+
+
+def _discover_build_manifests(workspace_root: Optional[Path]) -> List[Tuple[str, str]]:
+    """[(diretório relativo POSIX, nome do arquivo)] dos manifestos de build."""
+    if workspace_root is None:
+        return []
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return []
+
+    found: List[Tuple[str, str]] = []
+    for current_dir, dir_names, file_names in os.walk(root):
+        rel_dir = PurePath(Path(current_dir).relative_to(root)).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        depth = 0 if not rel_dir else rel_dir.count("/") + 1
+        if depth >= _BUILD_MANIFEST_MAX_DEPTH:
+            dir_names[:] = []
+        else:
+            dir_names[:] = [
+                name for name in dir_names if name not in IGNORE_DIRS and not name.startswith(".")
+            ]
+        for file_name in file_names:
+            if _is_build_manifest(file_name):
+                found.append((rel_dir, file_name))
+    return sorted(found)
+
+
+def infer_go_modules(
+    manifest_files: set[str], workspace_root: Optional[Path] = None
+) -> List[Tuple[str, str]]:
+    """
+    [(caminho do módulo declarado no `go.mod`, diretório relativo da raiz)].
+
+    Ordenado do módulo mais longo para o mais curto para que, num monorepo com
+    módulos aninhados, o prefixo mais específico case primeiro.
+    """
+    if workspace_root is None or not any(path.endswith(".go") for path in manifest_files):
+        return []
+
+    modules: List[Tuple[str, str]] = []
+    for rel_dir, file_name in _discover_build_manifests(workspace_root):
+        if file_name != "go.mod":
+            continue
+        try:
+            content = (Path(workspace_root) / rel_dir / file_name).read_text(
+                encoding="utf-8", errors="ignore"
+            )
+        except OSError:
+            continue
+        match = _GO_MODULE_RE.search(content)
+        if match:
+            modules.append((match.group(1).strip(), rel_dir))
+    return sorted(modules, key=lambda item: (-len(item[0]), item[0]))
+
+
+def infer_package_roots(
+    manifest_files: set[str], workspace_root: Optional[Path] = None
+) -> List[str]:
     """
     Deduz os prefixos de diretório que NÃO fazem parte do nome do módulo.
 
@@ -61,6 +144,10 @@ def infer_package_roots(manifest_files: set[str]) -> List[str]:
     pacote, e a raiz é o pai do pacote mais externo. Retorna sempre a raiz do
     workspace ("") como fallback, e a lista é ordenada para tornar a resolução
     determinística.
+
+    Com `workspace_root`, o diretório de cada manifesto de build (`go.mod`,
+    `pom.xml`, `*.csproj`, `Cargo.toml`) também vira raiz — sem ele, só os
+    manifestos indexáveis (`pom.xml`, `Cargo.toml`) são vistos (§3.3).
     """
     package_dirs = {
         posixpath.dirname(file_path)
@@ -83,6 +170,20 @@ def infer_package_roots(manifest_files: set[str]) -> List[str]:
         prefix = f"{candidate}/"
         if any(file_path.startswith(prefix) for file_path in manifest_files):
             roots.add(candidate)
+
+    # Manifestos de build indexáveis já estão no manifest do índice
+    for file_path in manifest_files:
+        if _is_build_manifest(posixpath.basename(file_path)):
+            roots.add(posixpath.dirname(file_path))
+
+    for rel_dir, file_name in _discover_build_manifests(workspace_root):
+        if _is_build_manifest(file_name):
+            roots.add(rel_dir)
+            # Layout Maven/Gradle: as fontes ficam sob src/main/<linguagem>
+            for nested in ("src/main/java", "src/main/kotlin", "src/main/scala", "src"):
+                candidate = posixpath.join(rel_dir, nested) if rel_dir else nested
+                if any(path.startswith(f"{candidate}/") for path in manifest_files):
+                    roots.add(candidate)
 
     # Raiz do workspace primeiro; depois as mais rasas — determinístico
     return sorted(roots, key=lambda root: (len(root), root))
@@ -161,6 +262,265 @@ def _resolve_js_ts_import(source_path: str, raw_import: str, manifest_files: set
     return None
 
 
+# Só estas duas arestas têm mais de um tier de qualidade possível; a presença do
+# campo `origin` já significa "esta aresta tem tier" (DECISÃO-006).
+_ORIGIN_EDGE_KINDS = frozenset({"imports", "calls"})
+IMPORT_ORIGIN_TREESITTER = "treesitter"
+# Grafo 2.1.0 não tem `origin`; o consumidor recebe isto em vez de nada (Princípio VI)
+EDGE_ORIGIN_UNKNOWN = "unknown"
+
+
+class _ImportContext:
+    """Índices derivados uma vez por build e compartilhados por todos os resolvers."""
+
+    __slots__ = (
+        "manifest_files",
+        "package_roots",
+        "declares_index",
+        "go_modules",
+        "files_by_dir",
+        "dirs_by_name",
+    )
+
+    def __init__(
+        self,
+        manifest_files: set[str],
+        package_roots: List[str],
+        files_declares: Dict[str, str],
+        go_modules: List[Tuple[str, str]],
+    ):
+        self.manifest_files = manifest_files
+        self.package_roots = package_roots
+        self.go_modules = go_modules
+
+        declares_index: Dict[str, List[str]] = {}
+        for path, namespace in files_declares.items():
+            declares_index.setdefault(namespace, []).append(path)
+        self.declares_index = {key: sorted(value) for key, value in declares_index.items()}
+
+        files_by_dir: Dict[str, List[str]] = {}
+        for path in manifest_files:
+            files_by_dir.setdefault(posixpath.dirname(path), []).append(path)
+        self.files_by_dir = {key: sorted(value) for key, value in files_by_dir.items()}
+
+        dirs_by_name: Dict[str, List[str]] = {}
+        for directory in self.files_by_dir:
+            if directory:
+                dirs_by_name.setdefault(posixpath.basename(directory), []).append(directory)
+        self.dirs_by_name = {key: sorted(value) for key, value in dirs_by_name.items()}
+
+
+def _resolve_python_targets(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = _resolve_python_import(
+        source_path, raw_import, ctx.manifest_files, ctx.package_roots
+    )
+    return [target] if target else []
+
+
+def _resolve_js_ts_targets(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = _resolve_js_ts_import(source_path, raw_import, ctx.manifest_files)
+    return [target] if target else []
+
+
+def _files_in_package_dir(ctx: _ImportContext, directory: str, suffix: str, source_path: str):
+    directory = "" if directory in {".", "/"} else directory.strip("/")
+    return [
+        path
+        for path in ctx.files_by_dir.get(directory, ())
+        if path.endswith(suffix) and path != source_path
+    ]
+
+
+def _resolve_go_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    """
+    Em Go o pacote é o diretório: o import aponta para TODOS os `.go` daquele diretório.
+
+    O caminho do import é absoluto pelo `module` do `go.mod`; sem casar um módulo
+    conhecido, o alvo é externo (stdlib ou dependência) e não gera aresta.
+    """
+    if raw_import.startswith(("./", "../")):
+        target_dir = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), raw_import))
+        return _files_in_package_dir(ctx, target_dir, ".go", source_path)
+
+    for module, root in ctx.go_modules:
+        if raw_import == module:
+            remainder = ""
+        elif raw_import.startswith(f"{module}/"):
+            remainder = raw_import[len(module) + 1 :]
+        else:
+            continue
+        target_dir = posixpath.join(root, remainder) if root else remainder
+        return _files_in_package_dir(ctx, target_dir, ".go", source_path)
+    return []
+
+
+def _resolve_declared_namespace_import(
+    source_path: str, raw_import: str, ctx: _ImportContext
+) -> List[str]:
+    """
+    Java, C#, Kotlin e Scala: o namespace é declarado, não é o caminho (DECISÃO-003).
+
+    Casa o prefixo mais longo do import que alguém declara. Se sobrar um segmento
+    depois do namespace (`com.pkg.Service` sobre o pacote `com.pkg`), prefere o
+    arquivo cujo nome é esse segmento; senão devolve todos os arquivos do namespace.
+    """
+    parts = [part for part in raw_import.split(".") if part]
+    for cut in range(len(parts), 0, -1):
+        paths = ctx.declares_index.get(".".join(parts[:cut]))
+        if not paths:
+            continue
+        remainder = parts[cut:]
+        if remainder:
+            stem = remainder[0]
+            exact = [
+                path
+                for path in paths
+                if posixpath.splitext(posixpath.basename(path))[0] == stem
+                and path != source_path
+            ]
+            if exact:
+                return exact
+        return [path for path in paths if path != source_path]
+    return []
+
+
+def _resolve_rust_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    parts = [part for part in raw_import.split("::") if part]
+    if not parts:
+        return []
+    source_dir = posixpath.dirname(source_path)
+    head = parts[0]
+    if head == "crate":
+        rest, bases = parts[1:], list(ctx.package_roots)
+    elif head == "self":
+        rest, bases = parts[1:], [source_dir]
+    elif head == "super":
+        rest, bases = parts[1:], [posixpath.dirname(source_dir)]
+    else:
+        rest, bases = parts, [source_dir, *ctx.package_roots]
+
+    while rest:
+        joined = "/".join(rest)
+        for base in bases:
+            prefix = posixpath.join(base, joined) if base else joined
+            for candidate in (f"{prefix}.rs", posixpath.join(prefix, "mod.rs")):
+                normalized = posixpath.normpath(candidate)
+                if normalized in ctx.manifest_files and normalized != source_path:
+                    return [normalized]
+        rest = rest[:-1]
+    return []
+
+
+def _resolve_php_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    # include/require carregam um caminho de arquivo; `use` carrega um namespace PSR-4
+    if raw_import.endswith(".php") or raw_import.startswith(("./", "../", "/")):
+        base = posixpath.dirname(source_path)
+        target = posixpath.normpath(posixpath.join(base, raw_import.lstrip("/")))
+        return [target] if target in ctx.manifest_files and target != source_path else []
+
+    parts = [part for part in raw_import.replace("\\", "/").split("/") if part]
+    while parts:
+        joined = "/".join(parts)
+        for root in ctx.package_roots:
+            prefix = posixpath.join(root, joined) if root else joined
+            candidate = posixpath.normpath(f"{prefix}.php")
+            if candidate in ctx.manifest_files and candidate != source_path:
+                return [candidate]
+        parts = parts[:-1]
+    return []
+
+
+def _resolve_ruby_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    target = raw_import if raw_import.endswith(".rb") else f"{raw_import}.rb"
+    # `require_relative` ancora no arquivo; `require` ancora no load path (as raízes)
+    for base in (posixpath.dirname(source_path), *ctx.package_roots):
+        candidate = posixpath.normpath(posixpath.join(base, target) if base else target)
+        if candidate in ctx.manifest_files and candidate != source_path:
+            return [candidate]
+    return []
+
+
+def _resolve_swift_import(source_path: str, raw_import: str, ctx: _ImportContext) -> List[str]:
+    # Swift importa módulo, não arquivo: o módulo é o diretório de fontes homônimo
+    module = raw_import.split(".")[0]
+    targets: List[str] = []
+    for directory in ctx.dirs_by_name.get(module, ()):
+        targets.extend(_files_in_package_dir(ctx, directory, ".swift", source_path))
+    return sorted(set(targets))
+
+
+ImportResolver = Callable[[str, str, _ImportContext], List[str]]
+
+# @MindContext: registry de resolução de import por sufixo (§3.3). O conjunto de
+# LINGUAGENS coberto aqui tem de ser exatamente `IMPORT_RESOLUTION_TIERS["treesitter"]`
+# — `tests/test_resolution_coverage.py` guarda essa igualdade.
+_IMPORT_RESOLVERS: Dict[str, ImportResolver] = {
+    ".py": _resolve_python_targets,
+    ".js": _resolve_js_ts_targets,
+    ".jsx": _resolve_js_ts_targets,
+    ".ts": _resolve_js_ts_targets,
+    ".tsx": _resolve_js_ts_targets,
+    ".go": _resolve_go_import,
+    ".java": _resolve_declared_namespace_import,
+    ".cs": _resolve_declared_namespace_import,
+    ".kt": _resolve_declared_namespace_import,
+    ".kts": _resolve_declared_namespace_import,
+    ".scala": _resolve_declared_namespace_import,
+    ".rs": _resolve_rust_import,
+    ".php": _resolve_php_import,
+    ".rb": _resolve_ruby_import,
+    ".swift": _resolve_swift_import,
+}
+
+
+def _resolve_import_targets(
+    file_path: str, raw_import: str, ctx: _ImportContext
+) -> List[str]:
+    resolver = _IMPORT_RESOLVERS.get(posixpath.splitext(file_path)[1].lower())
+    if resolver is None:
+        return []
+    return resolver(file_path, raw_import, ctx)
+
+
+def count_unresolved_import_files(manifest, ctx: _ImportContext) -> int:
+    """
+    Arquivos que declaram import mas não produziram nenhuma aresta.
+
+    É a métrica de `resolution_coverage.files_unresolved`: mede exatamente o modo de
+    falha que a F3 existe para tornar visível — arquivo indexado, mas mudo sobre como
+    se conecta. Fica igual nos dois caminhos de build por ser a única implementação.
+    """
+    unresolved = 0
+    for file_path, raw_imports in manifest.files_imports.items():
+        if not raw_imports:
+            continue
+        if not any(
+            _resolve_import_targets(file_path, raw_import, ctx) for raw_import in raw_imports
+        ):
+            unresolved += 1
+    return unresolved
+
+
+def _build_resolution_coverage(languages: Iterable[str], files_unresolved: int) -> dict:
+    """
+    Bloco `resolution_coverage` do grafo (DECISÃO-005).
+
+    Lista só as linguagens efetivamente presentes no índice e garante, por construção,
+    que nenhuma apareça em dois tiers.
+    """
+    present = set(languages or ())
+    coverage: Dict[str, Any] = {}
+    assigned: set[str] = set()
+    for tier in ("scip", "treesitter", "none"):
+        tier_languages = sorted(
+            (present & set(IMPORT_RESOLUTION_TIERS.get(tier, frozenset()))) - assigned
+        )
+        assigned.update(tier_languages)
+        coverage[tier] = tier_languages
+    coverage["files_unresolved"] = files_unresolved
+    return coverage
+
+
 def _node_summary(node: dict) -> dict:
     return {
         "id": node["id"],
@@ -178,6 +538,137 @@ def _build_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str]]]:
         adjacency.setdefault(edge["source"], []).append((edge["target"], edge["kind"]))
         adjacency.setdefault(edge["target"], []).append((edge["source"], edge["kind"]))
     return adjacency
+
+
+def _build_reverse_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str, dict]]]:
+    """target → [(source, kind, edge), ...] — dependentes de cada dependência."""
+    reverse: Dict[str, List[Tuple[str, str, dict]]] = {}
+    for edge in graph.get("edges", []):
+        reverse.setdefault(edge["target"], []).append((edge["source"], edge["kind"], edge))
+    return reverse
+
+
+def _via_location(dependent: dict, edge: dict) -> Optional[dict]:
+    location = edge.get("location")
+    if location:
+        return location
+    file_path = dependent.get("file_path")
+    lines = dependent.get("lines")
+    if file_path and lines:
+        return {"file_path": file_path, "lines": lines}
+    if file_path:
+        return {"file_path": file_path}
+    return None
+
+
+def _serialized_len(payload: dict) -> int:
+    return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+
+
+def _mark_graph_truncated(payload: dict, omitted: int = 1) -> None:
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    payload["warnings"] = sorted(warnings)
+    mode = payload.get("mode")
+    truncated = payload.get("truncated")
+    if mode == "explain":
+        current = dict(truncated) if isinstance(truncated, dict) else {}
+        current["budget"] = current.get("budget", 0) + omitted
+        payload["truncated"] = current
+        return
+    if mode == "affected" or isinstance(truncated, dict) and "omitted" in (truncated or {}):
+        previous = truncated.get("omitted", 0) if isinstance(truncated, dict) else 0
+        payload["truncated"] = {"omitted": previous + omitted}
+        return
+    payload["truncated"] = True
+
+
+def graph_cut_once(payload: dict) -> bool:
+    """
+    Remove UM item do payload de `atlas_graph`, na mesma ordem de prioridade
+    histórica (items -> neighbors -> rationale/notes -> path), e declara o
+    corte em `truncated`/`warnings`. Retorna `False` quando não há mais nada a
+    remover (payload já reduzido ao essencial) — é o `cut_once` que
+    `response_budget.finalize_response` chama repetidamente até caber em
+    chars/bytes/tokens (§4.2 do plano observabilidade-tokens-consultas).
+    """
+    items = payload.get("items")
+    if isinstance(items, list) and items:
+        items.pop()
+        _mark_graph_truncated(payload)
+        return True
+
+    neighbors = payload.get("neighbors")
+    if isinstance(neighbors, dict):
+        for kind in list(neighbors):
+            bucket = neighbors.get(kind)
+            if isinstance(bucket, list) and bucket:
+                bucket.pop()
+                _mark_graph_truncated(payload)
+                return True
+
+    for key in ("rationale", "notes"):
+        bucket = payload.get(key)
+        if isinstance(bucket, list) and bucket:
+            bucket.pop()
+            _mark_graph_truncated(payload)
+            return True
+
+    path = payload.get("path")
+    if isinstance(path, list) and len(path) > 1:
+        path.pop()
+        _mark_graph_truncated(payload)
+        return True
+
+    return False
+
+
+def graph_minimal_envelope(payload: dict) -> dict:
+    """
+    Envelope mínimo de `atlas_graph`: preserva `mode` e a identidade do nó-alvo
+    (já bounded por `_node_summary`), esvazia coleções e declara o corte —
+    nunca finge ausência de correspondências (D3/guardrail do IPD).
+    """
+    minimal: Dict[str, Any] = {"mode": payload.get("mode")}
+    for key in ("node", "target"):
+        if key in payload:
+            minimal[key] = payload[key]
+    if "found" in payload:
+        minimal["found"] = payload["found"]
+        minimal["path"] = []
+    if "items" in payload:
+        minimal["items"] = []
+    if "neighbors" in payload:
+        minimal["neighbors"] = {}
+        minimal["rationale"] = []
+        minimal["notes"] = []
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    minimal["warnings"] = sorted(warnings)
+    minimal["truncated"] = {"omitted": "all"}
+    return minimal
+
+
+def enforce_graph_response_budget(
+    payload: dict, max_chars: int = GRAPH_RESPONSE_MAX_CHARS
+) -> dict:
+    """
+    Pós-condição por caracteres apenas (compat/uso direto fora do servidor
+    MCP): corte declarado em truncated/warnings. `atlas_graph` usa
+    `response_budget.finalize_response` (chars + bytes + tokens exatos) com
+    `graph_cut_once`/`graph_minimal_envelope` acima.
+    """
+    while _serialized_len(payload) > max_chars:
+        if not graph_cut_once(payload):
+            break
+    return payload
+
+
+def _attach_query_indexes(graph: dict) -> dict:
+    graph["_nodes_by_id"] = {node["id"]: node for node in graph.get("nodes", [])}
+    graph["_adjacency"] = _build_adjacency(graph)
+    graph["_reverse_adjacency"] = _build_reverse_adjacency(graph)
+    return graph
 
 
 def _clear_graph_cache(graph_path: Optional[Path] = None) -> None:
@@ -226,7 +717,7 @@ def _build_empty_graph(manifest) -> dict:
         "graph_version": "1.0",
         "generated_at": manifest.last_indexed_at,
         "workspace_repo": manifest.repos_indexed[0] if manifest.repos_indexed else "",
-        "import_languages": ["python", "javascript", "typescript"],
+        "import_languages": sorted(IMPORT_RESOLUTION_TIERS["treesitter"]),
         "nodes": [],
         "edges": [],
         "metrics": {
@@ -235,6 +726,68 @@ def _build_empty_graph(manifest) -> dict:
             "top_hubs": [],
         },
     }
+
+
+def _sections_by_file_from_rows(rows_by_file: Dict[str, List[dict]]) -> Dict[str, List[dict]]:
+    sections_by_file: Dict[str, List[dict]] = {}
+    for file_path, file_rows in rows_by_file.items():
+        sections = [
+            {
+                "scope_name": row["scope_name"],
+                "lines": [row["start_line"], row["end_line"]],
+            }
+            for row in file_rows
+            if row.get("language") == "markdown"
+        ]
+        if sections:
+            sections_by_file[file_path] = sections
+    return sections_by_file
+
+
+def _sections_by_file_from_nodes(nodes: Dict[str, dict]) -> Dict[str, List[dict]]:
+    sections_by_file: Dict[str, List[dict]] = {}
+    for node in nodes.values():
+        if node.get("kind") != "section":
+            continue
+        sections_by_file.setdefault(node["file_path"], []).append(
+            {"scope_name": node["label"], "lines": node.get("lines")}
+        )
+    return sections_by_file
+
+
+def _links_to_target_id(
+    target,
+    nodes: Dict[str, dict],
+    sections_by_file: Dict[str, List[dict]],
+) -> Optional[str]:
+    """Resolve `links_to` para a seção da âncora, ou para o doc se o heading faltar."""
+    if target.file_path is None:
+        return None
+    file_id = f"file:{target.file_path}"
+    if file_id not in nodes:
+        return None
+    if not target.anchor:
+        return file_id
+
+    sections = sections_by_file.get(target.file_path, [])
+    section_name = resolve_heading_section(target.anchor, sections)
+    if not section_name:
+        return file_id
+
+    section_id = f"sec:{target.file_path}#{section_name}"
+    if section_id not in nodes:
+        section_info = next(
+            (item for item in sections if item.get("scope_name") == section_name),
+            {},
+        )
+        nodes[section_id] = {
+            "id": section_id,
+            "kind": "section",
+            "label": section_name,
+            "file_path": target.file_path,
+            "lines": section_info.get("lines"),
+        }
+    return section_id
 
 
 def _add_contribution_from_rows(
@@ -246,7 +799,8 @@ def _add_contribution_from_rows(
     nodes: Dict[str, dict],
     edges: List[dict],
     edge_keys: set[tuple[str, str, str]],
-    package_roots: Optional[List[str]] = None,
+    import_context: _ImportContext,
+    sections_by_file: Optional[Dict[str, List[dict]]] = None,
 ) -> None:
     file_kind = "doc" if file_path.lower().endswith(".md") else "file"
     file_node_id = f"file:{file_path}"
@@ -259,12 +813,18 @@ def _add_contribution_from_rows(
             "lines": None,
         }
 
-    def _add_edge(source: str, target: str, kind: str) -> None:
+    def _add_edge(source: str, target: str, kind: str, origin: Optional[str] = None) -> None:
         key = (source, target, kind)
         if source == target or key in edge_keys:
             return
         edge_keys.add(key)
-        edges.append({"source": source, "target": target, "kind": kind})
+        edge = {"source": source, "target": target, "kind": kind}
+        # @MindWhy: `origin` só onde a qualidade da aresta varia (DECISÃO-006).
+        # Em `contains`/`cites`/`links_to`/`annotates` não há tier a declarar, e o
+        # campo só inflaria o graph.json, que é lido inteiro e cacheado em memória.
+        if origin and kind in _ORIGIN_EDGE_KINDS:
+            edge["origin"] = origin
+        edges.append(edge)
 
     for row in rows:
         references = decode_references_json(row.get("references_json"))
@@ -289,10 +849,8 @@ def _add_contribution_from_rows(
             for target in extract_markdown_link_targets(
                 row.get("content") or "", file_path, name_to_paths=name_to_paths
             ):
-                if target.file_path is None:
-                    continue
-                target_id = f"file:{target.file_path}"
-                if target_id not in nodes:
+                target_id = _links_to_target_id(target, nodes, sections_by_file or {})
+                if target_id is None:
                     continue
                 _add_edge(node_id, target_id, "links_to")
             continue
@@ -324,27 +882,37 @@ def _add_contribution_from_rows(
 
     source_id = f"file:{file_path}"
     for raw_import in raw_imports:
-        target_path = None
-        if file_path.endswith(".py"):
-            target_path = _resolve_python_import(
-                file_path, raw_import, manifest_files, package_roots
-            )
-        elif file_path.endswith((".js", ".jsx", ".ts", ".tsx")):
-            target_path = _resolve_js_ts_import(file_path, raw_import, manifest_files)
-        if target_path is None:
-            continue
-        target_id = f"file:{target_path}"
-        if target_id in nodes:
-            _add_edge(source_id, target_id, "imports")
+        for target_path in _resolve_import_targets(file_path, raw_import, import_context):
+            target_id = f"file:{target_path}"
+            if target_id in nodes:
+                _add_edge(source_id, target_id, "imports", origin=IMPORT_ORIGIN_TREESITTER)
 
 
-def _finalize_graph(graph: dict) -> dict:
+HISTORY_NODE_KIND = "commit"
+HISTORY_EDGE_KIND = "touches"
+# Arestas fora do grau: `contains` é estrutura interna do arquivo e `touches` é
+# história — nenhuma das duas é dependência entre símbolos.
+_NON_DEGREE_EDGE_KINDS = frozenset({"contains", HISTORY_EDGE_KIND})
+
+
+def commit_node_id(repo: str, sha: str) -> str:
+    """Chave de nó do commit; inclui o repo para SHAs iguais não colidirem [GA-03]."""
+    return f"{HISTORY_NODE_KIND}:{repo}:{sha}"
+
+
+def _finalize_graph(
+    graph: dict,
+    languages: Optional[Iterable[str]] = None,
+    files_unresolved: Optional[int] = None,
+) -> dict:
     nodes = {node["id"]: dict(node) for node in graph.get("nodes", [])}
     edges = list(graph.get("edges", []))
 
     degree_by_id = {node_id: 0 for node_id in nodes}
     for edge in edges:
-        if edge["kind"] == "contains":
+        # `touches` é relação histórica consultável, não dependência de código:
+        # contá-la no grau moveria hubs, brief e a expansão estrutural [GA-05]
+        if edge["kind"] in _NON_DEGREE_EDGE_KINDS:
             continue
         degree_by_id[edge["source"]] = degree_by_id.get(edge["source"], 0) + 1
         degree_by_id[edge["target"]] = degree_by_id.get(edge["target"], 0) + 1
@@ -352,7 +920,13 @@ def _finalize_graph(graph: dict) -> dict:
         nodes[node_id]["degree"] = degree
 
     top_hubs = sorted(
-        ({"id": node_id, "degree": degree} for node_id, degree in degree_by_id.items()),
+        (
+            {"id": node_id, "degree": degree}
+            for node_id, degree in degree_by_id.items()
+            if node_id in nodes
+            and nodes[node_id].get("kind") != HISTORY_NODE_KIND
+            and not is_noise_hub(nodes[node_id])
+        ),
         key=lambda item: (-item["degree"], item["id"]),
     )[:GRAPH_TOP_HUBS_LIMIT]
 
@@ -363,6 +937,12 @@ def _finalize_graph(graph: dict) -> dict:
         "edge_count": len(edges),
         "top_hubs": top_hubs,
     }
+    # @MindWhy: `origin` não entra em `degree` nem em `top_hubs` — §1.2/§1.3 não podem
+    # regredir. O bloco de cobertura é anexado depois das métricas, não dentro delas.
+    if languages is not None:
+        graph["resolution_coverage"] = _build_resolution_coverage(
+            languages, files_unresolved or 0
+        )
     return graph
 
 
@@ -384,17 +964,34 @@ def _graph_rows_from_chunks(chunks: List[CodeChunk]) -> Dict[str, List[dict]]:
     return rows_by_file
 
 
-def build_and_write(storage, manifest, index_path: Path, return_metadata: bool = False):
+def build_and_write(
+    storage,
+    manifest,
+    index_path: Path,
+    return_metadata: bool = False,
+    workspace_root: Optional[Path] = None,
+):
     """
     Reconstrói `graph.json` inteiro a partir do estado atual do índice.
+
+    `workspace_root` é opcional e serve só para descobrir manifestos de build que o
+    índice não contém (`go.mod`, `*.csproj`); sem ele a resolução Go degrada para
+    nenhuma aresta, o que `resolution_coverage` declara.
     """
     rows = storage.get_graph_projection()
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
-    package_roots = infer_package_roots(manifest_files)
+    package_roots = infer_package_roots(manifest_files, workspace_root)
+    import_context = _ImportContext(
+        manifest_files=manifest_files,
+        package_roots=package_roots,
+        files_declares=dict(manifest.files_declares),
+        go_modules=infer_go_modules(manifest_files, workspace_root),
+    )
     rows_by_file: Dict[str, List[dict]] = {}
     for row in rows:
         rows_by_file.setdefault(row["file_path"], []).append(row)
+    sections_by_file = _sections_by_file_from_rows(rows_by_file)
 
     nodes: Dict[str, dict] = {
         f"file:{file_path}": {
@@ -418,10 +1015,15 @@ def build_and_write(storage, manifest, index_path: Path, return_metadata: bool =
             nodes=nodes,
             edges=edges,
             edge_keys=edge_keys,
-            package_roots=package_roots,
+            import_context=import_context,
+            sections_by_file=sections_by_file,
         )
 
-    graph = _finalize_graph(_build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges})
+    graph = _finalize_graph(
+        _build_empty_graph(manifest) | {"nodes": list(nodes.values()), "edges": edges},
+        languages=manifest.languages_indexed,
+        files_unresolved=count_unresolved_import_files(manifest, import_context),
+    )
     graph_path, metadata = _persist_graph(graph, index_path)
     if return_metadata:
         return graph_path, metadata
@@ -433,6 +1035,7 @@ def build_and_write_incremental(
     manifest,
     updated_chunks: List[CodeChunk],
     updated_file_paths: set[str],
+    workspace_root: Optional[Path] = None,
 ) -> tuple[Path, dict]:
     """
     Atualiza `graph.json` a partir do grafo anterior quando apenas arquivos de
@@ -450,7 +1053,11 @@ def build_and_write_incremental(
 
     kept_edges: List[dict] = []
     for edge in graph.get("edges", []):
-        if edge["source"] in removed_node_ids or edge["target"] in removed_node_ids:
+        if edge["source"] in removed_node_ids:
+            continue
+        # Incoming `links_to` a uma seção reindexada sobrevive se o heading
+        # (mesmo id) for recriado; o prune pós-contribuição descarta o miss.
+        if edge["target"] in removed_node_ids and edge["kind"] != "links_to":
             continue
         if edge["kind"] in {"contains", "imports"} and edge["source"].startswith("file:"):
             source_file = edge["source"][len("file:") :]
@@ -461,8 +1068,16 @@ def build_and_write_incremental(
     edge_keys = {(edge["source"], edge["target"], edge["kind"]) for edge in kept_edges}
     manifest_files = set(manifest.files.keys())
     name_to_paths = _stem_to_paths(manifest)
-    package_roots = infer_package_roots(manifest_files)
+    package_roots = infer_package_roots(manifest_files, workspace_root)
+    import_context = _ImportContext(
+        manifest_files=manifest_files,
+        package_roots=package_roots,
+        files_declares=dict(manifest.files_declares),
+        go_modules=infer_go_modules(manifest_files, workspace_root),
+    )
     rows_by_file = _graph_rows_from_chunks(updated_chunks)
+    sections_by_file = _sections_by_file_from_nodes(nodes)
+    sections_by_file.update(_sections_by_file_from_rows(rows_by_file))
 
     for file_path in updated_file_paths:
         _add_contribution_from_rows(
@@ -474,14 +1089,26 @@ def build_and_write_incremental(
             nodes=nodes,
             edges=kept_edges,
             edge_keys=edge_keys,
-            package_roots=package_roots,
+            import_context=import_context,
+            sections_by_file=sections_by_file,
         )
+
+    kept_edges[:] = [
+        edge
+        for edge in kept_edges
+        if edge["source"] in nodes and edge["target"] in nodes
+    ]
 
     updated_graph = _build_empty_graph(manifest) | {
         "nodes": list(nodes.values()),
         "edges": kept_edges,
     }
-    updated_graph = _finalize_graph(updated_graph)
+    updated_graph = _finalize_graph(
+        updated_graph,
+        languages=manifest.languages_indexed,
+        files_unresolved=count_unresolved_import_files(manifest, import_context),
+    )
+    _carry_over_scip_block(graph, updated_graph)
     return _persist_graph(updated_graph, index_path)
 
 
@@ -504,8 +1131,7 @@ def load_graph(index_dir: Path) -> dict:
 
     with open(graph_path, "r", encoding="utf-8") as f:
         graph = json.load(f)
-    graph["_nodes_by_id"] = {node["id"]: node for node in graph.get("nodes", [])}
-    graph["_adjacency"] = _build_adjacency(graph)
+    _attach_query_indexes(graph)
     with _GRAPH_CACHE_LOCK:
         _GRAPH_CACHE.update(
             {
@@ -516,6 +1142,137 @@ def load_graph(index_dir: Path) -> dict:
             }
         )
     return graph
+
+
+def _promote_scip_languages(graph: dict, languages: Iterable[str]) -> None:
+    """Move para o tier `scip` quem a ingestão cobriu — nunca deixa em dois tiers."""
+    coverage = graph.get("resolution_coverage")
+    if not isinstance(coverage, dict):
+        return
+    promoted = set(languages)
+    if not promoted:
+        return
+    coverage = dict(coverage)
+    for tier in ("treesitter", "none"):
+        coverage[tier] = [lang for lang in coverage.get(tier, []) if lang not in promoted]
+    coverage["scip"] = sorted(set(coverage.get("scip", [])) | promoted)
+    graph["resolution_coverage"] = coverage
+
+
+def _carry_over_scip_block(previous: dict, graph: dict) -> None:
+    """
+    Mantém a declaração da última ingestão SCIP através de um rebuild incremental.
+
+    `_build_empty_graph` cria um grafo do zero, então sem isto o bloco `scip` e o
+    tier de cobertura sumiriam a cada indexação incremental — o índice passaria a
+    se apresentar como se nunca tivesse tido resolução semântica (Princípio VI).
+    `edges` é recontado sobre o grafo novo: arestas `calls` de arquivos alterados
+    caem junto com os nós que foram re-chunkados.
+    """
+    scip = previous.get("scip")
+    if not isinstance(scip, dict):
+        return
+    surviving = sum(1 for edge in graph.get("edges", []) if edge.get("kind") == "calls")
+    graph["scip"] = {**scip, "edges": surviving}
+    if scip.get("status") == "ok":
+        _promote_scip_languages(graph, scip.get("languages", []))
+
+
+def apply_scip_result(
+    index_path: Path,
+    call_edges: List[dict],
+    status: str,
+    head_sha: Optional[str],
+    languages: Iterable[str],
+) -> tuple[Path, dict]:
+    """
+    Aplica o resultado da ingestão SCIP ao `graph.json` já persistido (DECISÃO-002).
+
+    Substitui **apenas** as arestas `kind="calls"`; as demais seguem intactas. Em
+    status diferente de `ok` nada é reescrito além do bloco `graph["scip"]`, que
+    declara a degradação sem descartar as arestas da ingestão anterior (Princípio VI).
+    """
+    # As chaves `_*` são índices de consulta anexados por `load_graph`; ficam fora
+    # do que é persistido, e a cópia evita mutar o dict que está no cache.
+    graph = {key: value for key, value in load_graph(index_path).items() if not key.startswith("_")}
+    previous = graph.get("scip") or {}
+
+    if status == "ok":
+        kept_edges = [edge for edge in graph.get("edges", []) if edge.get("kind") != "calls"]
+        graph["edges"] = kept_edges + [dict(edge) for edge in call_edges]
+        ingested_languages = sorted(set(languages))
+        graph["scip"] = {
+            "status": status,
+            "head_sha": head_sha,
+            "languages": ingested_languages,
+            "edges": len(call_edges),
+        }
+        _promote_scip_languages(graph, ingested_languages)
+    else:
+        graph["scip"] = {
+            "status": status,
+            "head_sha": previous.get("head_sha"),
+            "languages": list(previous.get("languages", [])),
+            "edges": int(previous.get("edges", 0)),
+        }
+
+    return _persist_graph(_finalize_graph(graph), index_path)
+
+
+def apply_history(index_path: Path, commit_rows: Iterable[dict]) -> tuple[Path, dict]:
+    """
+    Reprojeta a camada histórica sobre o `graph.json` já persistido (mesmo padrão
+    de `apply_scip_result`): substitui TODOS os nós `commit` e arestas `touches`
+    pela visão informada, sem tocar nas relações estruturais.
+
+    A `location` da aresta é o intervalo ATUAL do símbolo — é o ponto verificável
+    contra o índice corrente; símbolo ausente hoje simplesmente não recebe aresta.
+    """
+    graph = {key: value for key, value in load_graph(index_path).items() if not key.startswith("_")}
+    nodes = [
+        node for node in graph.get("nodes", []) if node.get("kind") != HISTORY_NODE_KIND
+    ]
+    edges = [
+        edge for edge in graph.get("edges", []) if edge.get("kind") != HISTORY_EDGE_KIND
+    ]
+    nodes_by_id = {node["id"]: node for node in nodes}
+
+    for row in commit_rows:
+        node_id = commit_node_id(row["repo"], row["id"])
+        nodes.append(
+            {
+                "id": node_id,
+                "kind": HISTORY_NODE_KIND,
+                "label": row.get("subject") or "",
+                "file_path": None,
+                "lines": None,
+            }
+        )
+        touches = row.get("touches")
+        if touches is None:
+            touches = json.loads(row.get("touches_json") or "[]")
+        seen: set[str] = set()
+        for item in touches:
+            symbol_id = f"sym:{item['file_path']}#{item['scope_name']}"
+            target = nodes_by_id.get(symbol_id)
+            if target is None or symbol_id in seen:
+                continue
+            seen.add(symbol_id)
+            edges.append(
+                {
+                    "source": node_id,
+                    "target": symbol_id,
+                    "kind": HISTORY_EDGE_KIND,
+                    "location": {
+                        "file_path": target.get("file_path"),
+                        "lines": target.get("lines"),
+                    },
+                }
+            )
+
+    graph["nodes"] = nodes
+    graph["edges"] = edges
+    return _persist_graph(_finalize_graph(graph), index_path)
 
 
 def resolve_node(graph: dict, ref: str) -> dict:
@@ -615,10 +1372,12 @@ def bfs_path(graph: dict, source_ref: str, target_ref: str, max_hops: int = GRAP
 
 
 def hubs(graph: dict, top_n: int) -> List[dict]:
-    result = []
-    for item in graph.get("metrics", {}).get("top_hubs", [])[:top_n]:
+    result: List[dict] = []
+    for item in graph.get("metrics", {}).get("top_hubs", []):
+        if len(result) >= top_n:
+            break
         node = graph["_nodes_by_id"].get(item["id"])
-        if node is None:
+        if node is None or is_noise_hub(node):
             continue
         result.append(
             {
@@ -632,37 +1391,139 @@ def hubs(graph: dict, top_n: int) -> List[dict]:
     return result
 
 
+def _origins_by_edge(graph: dict) -> Dict[Tuple[str, str, str], str]:
+    """Origem por aresta nos dois sentidos — `_adjacency` é não-dirigida."""
+    origins: Dict[Tuple[str, str, str], str] = {}
+    for edge in graph.get("edges", []):
+        if edge.get("kind") not in _ORIGIN_EDGE_KINDS:
+            continue
+        origin = edge.get("origin") or EDGE_ORIGIN_UNKNOWN
+        origins[(edge["source"], edge["target"], edge["kind"])] = origin
+        origins[(edge["target"], edge["source"], edge["kind"])] = origin
+    return origins
+
+
 def explain(graph: dict, ref: str) -> dict:
     node = resolve_node(graph, ref)
     adjacency = graph["_adjacency"]
+    origins = _origins_by_edge(graph)
     neighbors: Dict[str, List[dict]] = {}
-    rationale_nodes: List[dict] = []
-    notes: List[dict] = []
 
     for neighbor_id, edge_kind in adjacency.get(node["id"], []):
         neighbor = graph["_nodes_by_id"][neighbor_id]
         summary = _node_summary(neighbor)
         summary["edge_kind"] = edge_kind
+        # Grafo 2.1.0 não grava `origin`; o consumidor recebe "unknown" (DECISÃO-006)
+        if edge_kind in _ORIGIN_EDGE_KINDS:
+            summary["origin"] = origins.get(
+                (node["id"], neighbor_id, edge_kind), EDGE_ORIGIN_UNKNOWN
+            )
         neighbors.setdefault(neighbor["kind"], []).append(summary)
-        if neighbor["kind"] == "rationale":
-            rationale_nodes.append(summary)
-        if neighbor["kind"] == "doc":
-            notes.append(
-                {
-                    "id": neighbor["id"],
-                    "label": neighbor.get("label"),
-                    "file_path": neighbor.get("file_path"),
-                    "lines": neighbor.get("lines"),
-                }
+
+    truncated: Dict[str, int] = {}
+    capped: Dict[str, List[dict]] = {}
+    for kind, items in neighbors.items():
+        ordered = sorted(
+            items,
+            key=lambda item: (-(item.get("degree") or 0), item.get("label") or "", item["id"]),
+        )
+        omitted = max(0, len(ordered) - GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND)
+        if omitted:
+            truncated[kind] = omitted
+        capped[kind] = ordered[:GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND]
+
+    notes = sorted(
+        [
+            {
+                "id": item["id"],
+                "label": item.get("label"),
+                "file_path": item.get("file_path"),
+                "lines": item.get("lines"),
+            }
+            for item in capped.get("doc", [])
+        ],
+        key=lambda item: item["file_path"] or "",
+    )
+
+    result = {
+        "node": _node_summary(node),
+        "neighbors": capped,
+        "rationale": list(capped.get("rationale", [])),
+        "notes": notes,
+    }
+    if truncated:
+        result["truncated"] = truncated
+    return result
+
+
+_AFFECTED_RELATIONS = frozenset({"calls", "imports"})
+
+
+def affected(graph: dict, ref: str) -> dict:
+    # @MindFlow: resolve → semeia contains (não reporta) → BFS reversa {calls,imports} → cap
+    # @MindRisk: reusar _adjacency não-dirigida marcaria dependência e dependente como afetados
+    seed = resolve_node(graph, ref)
+    nodes_by_id = graph["_nodes_by_id"]
+    reverse = graph.get("_reverse_adjacency")
+    if reverse is None:
+        reverse = _build_reverse_adjacency(graph)
+
+    warnings: List[str] = []
+    if not any(edge.get("kind") == "calls" for edge in graph.get("edges", [])):
+        warnings.append("calls_unavailable")
+
+    seed_ids = {seed["id"]}
+    for edge in graph.get("edges", []):
+        if edge["kind"] == "contains" and edge["source"] == seed["id"]:
+            seed_ids.add(edge["target"])
+
+    visited = set(seed_ids)
+    queue: deque[tuple[str, int, str, Optional[dict], str]] = deque()
+
+    def enqueue_from(origin_id: str, hops: int) -> None:
+        origin = nodes_by_id.get(origin_id)
+        if origin is None:
+            return
+        if is_noise_hub(origin) and origin_id != seed["id"]:
+            return
+        for neighbor_id, kind, edge in reverse.get(origin_id, []):
+            if kind not in _AFFECTED_RELATIONS or neighbor_id in visited:
+                continue
+            neighbor = nodes_by_id.get(neighbor_id)
+            if neighbor is None:
+                continue
+            if is_noise_hub(neighbor) and neighbor_id != seed["id"]:
+                continue
+            visited.add(neighbor_id)
+            queue.append(
+                (
+                    neighbor_id,
+                    hops,
+                    kind,
+                    _via_location(neighbor, edge),
+                    edge.get("origin") or EDGE_ORIGIN_UNKNOWN,
+                )
             )
 
-    for kind in neighbors:
-        neighbors[kind] = sorted(neighbors[kind], key=lambda item: (item["label"] or "", item["id"]))
-    notes = sorted(notes, key=lambda item: item["file_path"] or "")
+    for sid in seed_ids:
+        enqueue_from(sid, 1)
 
+    items: List[dict] = []
+    while queue:
+        node_id, hops, via, location, origin = queue.popleft()
+        neighbor = nodes_by_id[node_id]
+        entry = {**_node_summary(neighbor), "hops": hops, "via": via, "origin": origin}
+        if location:
+            entry["via_location"] = location
+        items.append(entry)
+        enqueue_from(node_id, hops + 1)
+
+    items.sort(key=lambda item: (item["hops"], -(item.get("degree") or 0), item["id"]))
+    omitted = max(0, len(items) - GRAPH_AFFECTED_MAX_RESULTS)
+    items = items[:GRAPH_AFFECTED_MAX_RESULTS]
     return {
-        "node": _node_summary(node),
-        "neighbors": neighbors,
-        "rationale": rationale_nodes,
-        "notes": notes,
+        "target": _node_summary(seed),
+        "items": items,
+        "truncated": {"omitted": omitted} if omitted else False,
+        "warnings": warnings,
     }

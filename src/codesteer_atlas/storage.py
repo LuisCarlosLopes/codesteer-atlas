@@ -3,23 +3,39 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import lancedb
+import pyarrow as pa
 
 from codesteer_atlas.config import (
     CANDIDATES_LIMIT,
     CURRENT_INDEX_VERSION,
     DEFAULT_INDEX_DIR,
+    GIT_HISTORY_POINTER_FILENAME,
+    GIT_HISTORY_TABLE_PREFIX,
+    GIT_HISTORY_VERSION,
     MIN_INDEX_VERSION,
     RERANK_ENV_FLAG,
+    RERANK_MODEL_ENV_FLAG,
     RERANK_POOL_MULTIPLIER,
     RRF_K,
+    STRUCTURAL_SEED_TOP_N,
 )
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME
-from codesteer_atlas.models import CodeChunk, IndexManifest, SearchOutcome, SearchResult
+from codesteer_atlas.models import (
+    CodeChunk,
+    CommitRecord,
+    IndexManifest,
+    RelevanceUsage,
+    SearchOutcome,
+    SearchResult,
+)
 from codesteer_atlas.ranking import rerank
 from codesteer_atlas.rationale import decode_references_json, encode_references_json
+from codesteer_atlas.relevance import new_usage, order_by_relevance, resolve_config, try_rerank
+from codesteer_atlas.semantic import semantic_enabled, semantic_index_state
+from codesteer_atlas.structural import node_id_for, spreading_activation
 
 
 def _rerank_enabled() -> bool:
@@ -60,6 +76,166 @@ def _table_names(db) -> List[str]:
     return list(tables)
 
 
+_VECTOR_DIM = 384
+
+
+def _normalize_fixed_vector(value: Any, dim: int = _VECTOR_DIM) -> Optional[List[float]]:
+    """Devolve um vetor de `dim` floats ou None — o LanceDB rejeita listas vazias/mistas."""
+    if value is None:
+        return None
+    try:
+        length = len(value)
+    except TypeError:
+        return None
+    if length != dim:
+        return None
+    return [float(item) for item in value]
+
+
+def _chunks_schema() -> pa.Schema:
+    """Declara o schema 2.3.0, incluindo irmãos semânticos nullable."""
+    return pa.schema(
+        [
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("file_path", pa.string()),
+            pa.field("repo", pa.string()),
+            pa.field("start_line", pa.int64()),
+            pa.field("end_line", pa.int64()),
+            pa.field("scope_type", pa.string()),
+            pa.field("scope_name", pa.string()),
+            pa.field("language", pa.string()),
+            pa.field("content", pa.string()),
+            pa.field("indexed_at", pa.string()),
+            pa.field("vector", pa.list_(pa.float32(), _VECTOR_DIM)),
+            pa.field("purpose", pa.string()),
+            pa.field("purpose_hash", pa.string()),
+            pa.field("purpose_vector", pa.list_(pa.float32(), _VECTOR_DIM)),
+            pa.field("references_json", pa.string()),
+        ]
+    )
+
+
+def _assert_chunks_schema(table) -> None:
+    expected = _chunks_schema()
+    actual = table.schema
+    problems = []
+    if actual.names != expected.names:
+        problems.append(f"colunas={actual.names!r}")
+    for expected_field in expected:
+        try:
+            actual_field = actual.field(expected_field.name)
+        except KeyError:
+            continue
+        if actual_field.type != expected_field.type or (
+            expected_field.name in {"purpose", "purpose_hash", "purpose_vector"}
+            and not actual_field.nullable
+        ):
+            problems.append(
+                f"{expected_field.name}={actual_field.type}/{actual_field.nullable}"
+            )
+    if problems:
+        raise RuntimeError(
+            "O schema da tabela chunks não é compatível com o índice 2.3.0 "
+            f"({'; '.join(problems)}). Nenhuma mutação incremental foi executada; "
+            "use full=true sem paths para reindexar integralmente."
+        )
+
+
+
+def _history_schema() -> pa.Schema:
+    """
+    Schema da tabela histórica (F5.1). É uma tabela dedicada: `chunks` não ganha
+    coluna nenhuma e nenhum commit vira `CodeChunk` [GA-01].
+
+    `touches_json` guarda os pares (arquivo, símbolo) atribuídos ao commit; o
+    intervalo de linhas NÃO é persistido aqui porque a localização pública é o
+    intervalo ATUAL do símbolo, resolvido na projeção do grafo.
+    """
+    return pa.schema(
+        [
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("repo", pa.string()),
+            pa.field("subject", pa.string()),
+            pa.field("body", pa.string()),
+            pa.field("message", pa.string()),
+            pa.field("authored_at", pa.string()),
+            pa.field("committed_at", pa.string()),
+            pa.field("files_json", pa.string()),
+            pa.field("touches_json", pa.string()),
+            pa.field("is_revert", pa.bool_()),
+            pa.field("reverted_commit_id", pa.string()),
+            pa.field("stale", pa.bool_()),
+            pa.field("vector", pa.list_(pa.float32(), _VECTOR_DIM)),
+        ]
+    )
+
+
+def _commit_row(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Normaliza um registro de commit para a linha persistida."""
+    files = sorted({str(path) for path in record.get("files_touched") or []})
+    touches = sorted(
+        {
+            (str(item["file_path"]), str(item["scope_name"]))
+            for item in record.get("touches") or []
+        }
+    )
+    subject = str(record.get("subject") or "")
+    body = str(record.get("body") or "")
+    return {
+        "id": str(record["id"]),
+        "repo": str(record["repo"]),
+        "subject": subject,
+        "body": body,
+        "message": f"{subject}\n{body}".strip(),
+        "authored_at": str(record.get("authored_at") or ""),
+        "committed_at": str(record.get("committed_at") or ""),
+        "files_json": json.dumps(files, ensure_ascii=False),
+        "touches_json": json.dumps(
+            [{"file_path": path, "scope_name": scope} for path, scope in touches],
+            ensure_ascii=False,
+        ),
+        "is_revert": bool(record.get("is_revert")),
+        "reverted_commit_id": record.get("reverted_commit_id"),
+        "stale": bool(record.get("stale")),
+        "vector": list(record.get("vector") or [0.0] * _VECTOR_DIM),
+    }
+
+
+def _commit_from_row(row: Dict[str, Any]) -> CommitRecord:
+    return CommitRecord(
+        id=row["id"],
+        repo=row["repo"],
+        subject=row.get("subject") or "",
+        body=row.get("body") or "",
+        authored_at=row.get("authored_at") or "",
+        committed_at=row.get("committed_at") or "",
+        files_touched=json.loads(row.get("files_json") or "[]"),
+        is_revert=bool(row.get("is_revert")),
+        reverted_commit_id=row.get("reverted_commit_id") or None,
+    )
+
+
+
+def _without_history(graph: dict, node_kind: str, edge_kind: str) -> dict:
+    """
+    Cópia do grafo sem a camada histórica, para a expansão estrutural.
+
+    @MindRisk: sem isto um commit vira ponte entre símbolos sem relação de código
+    e a ativação estrutural passa a ranquear por coincidência de história [GA-05].
+    """
+    nodes = [node for node in graph.get("nodes", []) if node.get("kind") != node_kind]
+    edges = [edge for edge in graph.get("edges", []) if edge.get("kind") != edge_kind]
+    filtered: Dict[str, Any] = {"nodes": nodes, "edges": edges}
+    filtered["_nodes_by_id"] = {node["id"]: node for node in nodes}
+    adjacency: Dict[str, List] = {}
+    for edge in edges:
+        adjacency.setdefault(edge["source"], []).append((edge["target"], edge["kind"]))
+        adjacency.setdefault(edge["target"], []).append((edge["source"], edge["kind"]))
+    filtered["_adjacency"] = adjacency
+    return filtered
+
+
+
 class StorageBackend:
     """
     Abstração que encapsula toda a interação com o banco de dados vetorial LanceDB
@@ -70,12 +246,41 @@ class StorageBackend:
         self.index_dir = Path(index_dir)
         self.db_path = self.index_dir / "lancedb"
         self.manifest_path = self.index_dir / "manifest.json"
+        self.history_pointer_path = self.index_dir / GIT_HISTORY_POINTER_FILENAME
 
     def _chunk_to_row(self, chunk: CodeChunk) -> Dict[str, Any]:
         row = chunk.model_dump()
         row["references_json"] = encode_references_json(chunk.references)
         row.pop("references", None)
+        # @MindRisk: purpose_vector vazio/None/dimensão errada vira "variable length
+        # vectors" no LanceDB (Windows, índice grande, F4 parcial). Null é válido.
+        row["purpose_vector"] = _normalize_fixed_vector(row.get("purpose_vector"))
+        vector = _normalize_fixed_vector(row.get("vector"))
+        row["vector"] = vector if vector is not None else [0.0] * _VECTOR_DIM
         return row
+
+    def _assert_incremental_current(self) -> None:
+        if not self.manifest_path.exists():
+            return
+        manifest = self.get_manifest()
+        if _version_tuple(manifest.index_version) < _version_tuple(CURRENT_INDEX_VERSION):
+            raise RuntimeError(
+                f"O índice legado {manifest.index_version} não aceita atualização incremental. "
+                "Use full=true sem paths para reindexar e rechunkear integralmente em 2.3.0."
+            )
+
+    def validate_incremental_schema(self) -> None:
+        """Valida o schema atual antes de qualquer delete/append incremental."""
+        self._assert_incremental_current()
+        if not self.exists():
+            return
+        db = lancedb.connect(str(self.db_path))
+        if "chunks" not in _table_names(db):
+            raise RuntimeError(
+                "A tabela chunks não existe para o manifesto atual; "
+                "use full=true sem paths para reconstruir o índice."
+            )
+        _assert_chunks_schema(db.open_table("chunks"))
 
 
     def exists(self) -> bool:
@@ -87,6 +292,7 @@ class StorageBackend:
         chunks: List[CodeChunk],
         git_head_sha: Optional[str] = None,
         files_meta: Optional[Dict[str, list]] = None,
+        files_declares: Optional[Dict[str, str]] = None,
     ):
         """
         Salva uma lista de chunks de código no LanceDB, gera o índice FTS
@@ -99,11 +305,19 @@ class StorageBackend:
         db = lancedb.connect(str(self.db_path))
 
         # Prepara a lista de dicionários para inserção
-        data_to_insert = [self._chunk_to_row(chunk) for chunk in chunks]
+        data_to_insert = pa.Table.from_pylist(
+            [self._chunk_to_row(chunk) for chunk in chunks], schema=_chunks_schema()
+        )
 
         # Sobrescreve a tabela se já existir para evitar duplicações no MVP
         table_name = "chunks"
-        table = db.create_table(table_name, data=data_to_insert, mode="overwrite")
+        table = db.create_table(
+            table_name,
+            data=data_to_insert,
+            schema=_chunks_schema(),
+            mode="overwrite",
+            on_bad_vectors="null",
+        )
 
         # Cria índice Full-Text Search (FTS) na coluna 'content' para buscas BM25
         table.create_fts_index("content", replace=True)
@@ -134,6 +348,7 @@ class StorageBackend:
             index_version=CURRENT_INDEX_VERSION,
             files=files,
             files_meta=files_meta or {},
+            files_declares=files_declares or {},
         )
 
         # Salva o arquivo de metadados manifest.json (escrita atômica)
@@ -148,6 +363,8 @@ class StorageBackend:
         if not chunks:
             return
 
+        self._assert_incremental_current()
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
         db = lancedb.connect(str(self.db_path))
 
@@ -155,7 +372,8 @@ class StorageBackend:
 
         if "chunks" in _table_names(db):
             table = db.open_table("chunks")
-            table.add(data_to_insert)
+            _assert_chunks_schema(table)
+            table.add(data_to_insert, on_bad_vectors="null")
 
             # Recria o índice FTS do zero após cada append incremental.
             # Workaround para bug lance-index 7.0.0 (lance-format/lance#7313):
@@ -164,7 +382,13 @@ class StorageBackend:
             # múltiplos appends incrementais. Custo extra ~1-2s por reindex.
             table.create_fts_index("content", replace=True)
         else:
-            table = db.create_table("chunks", data=data_to_insert, mode="overwrite")
+            table = db.create_table(
+                "chunks",
+                data=pa.Table.from_pylist(data_to_insert, schema=_chunks_schema()),
+                schema=_chunks_schema(),
+                mode="overwrite",
+                on_bad_vectors="null",
+            )
             table.create_fts_index("content", replace=True)
 
     def update_manifest_after_incremental(
@@ -173,14 +397,17 @@ class StorageBackend:
         git_head_sha: Optional[str] = None,
         files_meta: Optional[Dict[str, list]] = None,
         files_imports: Optional[Dict[str, list]] = None,
+        files_declares: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Recalcula `total_chunks`/`repos_indexed`/`languages_indexed` a partir da
         tabela atual (após inserções/remoções incrementais) e regrava o
         manifest.json com o novo mapa `files`. Retorna o `total_chunks` atualizado.
         """
+        self._assert_incremental_current()
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
+        _assert_chunks_schema(table)
 
         projection = table.search().select(["repo", "language"]).to_arrow()
         rows = projection.to_pylist()
@@ -205,6 +432,7 @@ class StorageBackend:
             files=files,
             files_meta=files_meta or {},
             files_imports=files_imports or {},
+            files_declares=files_declares or {},
         )
 
         _write_manifest_atomic(self.manifest_path, manifest)
@@ -277,7 +505,15 @@ class StorageBackend:
         return " AND ".join(clauses)
 
     def search_hybrid(
-        self, query_vector: List[float], query_text: str, filters: Dict[str, Any], top_k: int
+        self,
+        query_vector: List[float],
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+        *,
+        structural: bool = False,
+        relevance_usage: Optional[RelevanceUsage] = None,
+        include_candidates: bool = False,
     ) -> SearchOutcome:
         """
         Executa uma busca híbrida combinando busca vetorial (cosseno) e léxica (BM25 FTS)
@@ -288,7 +524,15 @@ class StorageBackend:
         quando existem matches suficientes (DECISAO-003).
 
         A reordenação pós-RRF roda sobre um pool maior que `top_k`, e a regra veio de
-        medição no golden set, não de intuição. Veja CLAUDE.md (DECISAO-007).
+        medição no golden set, não de intuição. Veja AGENTS.md (DECISAO-007).
+
+        `structural=True` acrescenta o braço de grafo à fusão (opt-in por chamada).
+        Sem `ATLAS_RERANK_MODEL`, a reordenação permanece a lexical de `ranking.rerank`.
+        `ATLAS_RELEVANCE=1` faz o Jev refinar a ordem lexical, no lugar do cross-encoder,
+        quando a busca é elegível; em falha, cai no reranker local configurado.
+
+        `relevance_usage` é o ledger request-local do custo Jev; chamadas diretas
+        sem ledger (harness) criam um local e o devolvem em `SearchOutcome`.
 
         A falha de um braço isolado degrada a busca em vez de derrubá-la, mas é
         reportada em `SearchOutcome.warnings` — degradação silenciosa aqui significa
@@ -300,6 +544,8 @@ class StorageBackend:
             raise FileNotFoundError(
                 "Índice não encontrado. É necessário executar o indexer.py antes de realizar buscas."
             )
+
+        usage = relevance_usage if relevance_usage is not None else new_usage()
 
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
@@ -313,7 +559,7 @@ class StorageBackend:
         # 1. Executa busca vetorial (cosseno) com prefilter
         vector_results: List[Dict[str, Any]] = []
         try:
-            query = table.search(query_vector).metric("cosine")
+            query = table.search(query_vector, vector_column_name="vector").metric("cosine")
             if where_clause:
                 query = query.where(where_clause, prefilter=True)
             vector_results = query.limit(CANDIDATES_LIMIT).to_list()
@@ -371,6 +617,30 @@ class StorageBackend:
         _fuse(vector_results, "vector")
         _fuse(text_results, "fts")
 
+        # @MindDecision: o vetor de propósito é um braço independente; não altera
+        # `content`/`vector` e só é consultado em índice 2.3.0 pronto.
+        if semantic_enabled():
+            manifest = self.get_manifest()
+            semantic_index, _reason = semantic_index_state(self.index_dir, manifest)
+            if semantic_index == "ready":
+                try:
+                    query = table.search(query_vector, vector_column_name="purpose_vector").metric("cosine")
+                    if where_clause:
+                        query = query.where(where_clause, prefilter=True)
+                    semantic_results = query.limit(CANDIDATES_LIMIT).to_list()
+                    _fuse(semantic_results, "semantic")
+                except Exception as error:
+                    warnings.append("semantic_arm_unavailable")
+                    print(
+                        f"[atlas] Braço semântico indisponível ({type(error).__name__}).",
+                        file=sys.stderr,
+                    )
+            else:
+                warnings.append("semantic_layer_unavailable")
+
+        if structural:
+            self._fuse_structural_arm(rrf_scores, items_by_id, _fuse, warnings)
+
         # Ordena os ids de chunks baseados no score RRF decrescente
         sorted_chunk_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
 
@@ -399,13 +669,122 @@ class StorageBackend:
                     repo=item["repo"],
                     references=decode_references_json(item.get("references_json")),
                     match_arms=arms_by_id.get(chunk_id, []),
+                    chunk_id=chunk_id,
                 )
             )
 
+        evaluations = []
+        local_fallback = list(pool)
         if _rerank_enabled():
-            pool = rerank(pool, query_text)
+            # @MindDecision: o Jev refina a ordem lexical — quem ele não avalia com
+            # confiança fica onde o rerank local o pôs, não na posição RRF crua.
+            base = rerank(pool, query_text) if resolve_config().enabled else pool
+            reranked = try_rerank(base, query_text, warnings, usage)
+            if reranked is None:
+                pool = self._rerank_pool(pool, query_text, warnings)
+                if usage.reason in {"unique_exact_symbol", "identifier_query"}:
+                    # Preserva a promoção de exatos do Jev usando apenas evidência local.
+                    pool = order_by_relevance(pool, query_text, {})
+                    usage.ranking_changed = [
+                        (r.chunk_id, r.file_path, r.scope_name) for r in pool
+                    ] != [(r.chunk_id, r.file_path, r.scope_name) for r in local_fallback]
+            else:
+                pool = reranked
+                evaluations = list(usage.evaluations)
+            if include_candidates:
+                local_fallback = (self._rerank_pool(local_fallback, query_text, warnings)
+                                  if reranked is not None else list(pool))
+        else:
+            usage.status = "skipped"
+            usage.reason = "rerank_disabled"
 
-        return SearchOutcome(results=pool[:top_k], warnings=warnings)
+        history = self._search_history_arm(query_vector, query_text, filters, top_k, warnings)
+        merged = self._merge_typed(pool, history, top_k)
+        eval_by_key = {}
+        for ev in evaluations:
+            key = ev.chunk_id or f"{ev.file_path}:{ev.scope_name}"
+            eval_by_key[key] = ev
+        aligned = []
+        for result in merged:
+            key = result.chunk_id or f"{result.file_path}:{result.scope_name}"
+            if key in eval_by_key:
+                aligned.append(eval_by_key[key])
+        return SearchOutcome(
+            results=merged,
+            warnings=warnings,
+            relevance_usage=usage,
+            evaluations=aligned,
+            candidate_pool=list(pool) if include_candidates else None,
+            pool_evaluations=evaluations if include_candidates else [],
+            local_fallback=local_fallback if include_candidates else [],
+            history_candidates=history if include_candidates else [],
+        )
+
+    def _fuse_structural_arm(
+        self,
+        rrf_scores: Dict[str, float],
+        items_by_id: Dict[str, Dict[str, Any]],
+        fuse: Callable[[List[Dict[str, Any]], str], None],
+        warnings: List[str],
+    ) -> None:
+        # @MindFlow: load_graph → sementes RRF → spreading_activation → _fuse("graph")
+        # @MindRisk: junção chunk↔nó só em memória; chunk fora do pool nunca é materializado
+        """Acrescenta o braço `graph` à fusão; grafo ausente vira aviso e no-op."""
+        try:
+            from codesteer_atlas.graph import HISTORY_EDGE_KIND, HISTORY_NODE_KIND, load_graph
+
+            graph = _without_history(load_graph(self.index_dir), HISTORY_NODE_KIND, HISTORY_EDGE_KIND)
+        except Exception as e:
+            warnings.append("structural_arm_unavailable")
+            print(
+                f"[atlas] Braço estrutural indisponível ({type(e).__name__}: {e}); "
+                "busca segue sem o braço.",
+                file=sys.stderr,
+            )
+            return
+
+        chunk_id_by_node: Dict[str, str] = {}
+        for chunk_id, item in items_by_id.items():
+            chunk_id_by_node[node_id_for(item)] = chunk_id
+
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
+        seed_node_ids = [
+            node_id_for(items_by_id[chunk_id])
+            for chunk_id in sorted_ids[:STRUCTURAL_SEED_TOP_N]
+        ]
+        ranked_node_ids = spreading_activation(
+            graph, seed_node_ids, chunk_id_by_node.keys()
+        )
+
+        graph_results: List[Dict[str, Any]] = []
+        for node_id in ranked_node_ids:
+            candidate_id = chunk_id_by_node.get(node_id)
+            if candidate_id is None:
+                continue
+            graph_results.append(items_by_id[candidate_id])
+
+        fuse(graph_results, "graph")
+
+    def _rerank_pool(
+        self, pool: List[SearchResult], query_text: str, warnings: List[str]
+    ) -> List[SearchResult]:
+        """Escolhe lexical vs cross-encoder; falha do CE cai no lexical com aviso."""
+        model_name = os.environ.get(RERANK_MODEL_ENV_FLAG)
+        if not model_name:
+            return rerank(pool, query_text)
+
+        try:
+            from codesteer_atlas.reranker import CrossEncoderReranker
+
+            return CrossEncoderReranker().rerank(query_text, pool)
+        except Exception as e:
+            warnings.append("cross_encoder_unavailable")
+            print(
+                f"[atlas] Cross-encoder indisponível ({type(e).__name__}: {e}); "
+                "reordenação degradada para ranking lexical.",
+                file=sys.stderr,
+            )
+            return rerank(pool, query_text)
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """
@@ -423,6 +802,113 @@ class StorageBackend:
 
         arrow_table = (
             table.search().select(["file_path", "scope_type", "scope_name"]).to_arrow()
+        )
+        return arrow_table.to_pylist()
+
+    def get_semantic_cache(self, file_paths: Optional[List[str]] = None) -> Dict[tuple, Dict[str, Any]]:
+        """Lê a projeção semântica antes de um delete para permitir reuso."""
+        if not self.exists():
+            return {}
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        columns = ["file_path", "scope_name", "scope_type", "content", "purpose", "purpose_hash", "purpose_vector"]
+        query = table.search()
+        if file_paths:
+            escaped = [path.replace("'", "''") for path in file_paths]
+            query = query.where(
+                f"file_path IN ({', '.join(repr(path) for path in escaped)})", prefilter=True
+            )
+        try:
+            rows = query.select(columns).to_arrow().to_pylist()
+        except Exception:
+            fallback = ["file_path", "scope_name", "scope_type", "content"]
+            rows = query.select(fallback).to_arrow().to_pylist()
+        result: Dict[tuple, Dict[str, Any]] = {}
+        from codesteer_atlas.semantic import content_hash
+
+        for row in rows:
+            if not row.get("purpose"):
+                continue
+            key = (row.get("file_path", ""), row.get("scope_name", ""), content_hash(row.get("content", "")))
+            result[key] = row
+        return result
+
+    def get_semantic_projection(self) -> List[Dict[str, Any]]:
+        if not self.exists():
+            return []
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        columns = ["file_path", "scope_name", "scope_type", "content", "purpose", "purpose_hash"]
+        try:
+            return table.search().select(columns).to_arrow().to_pylist()
+        except Exception:
+            return table.search().select(["file_path", "scope_name", "scope_type", "content"]).to_arrow().to_pylist()
+
+    def lookup_purpose(self, file_path: str, scope_name: str) -> Optional[str]:
+        """Faz um point lookup do propósito semântico, sem carregar vetores."""
+        if not self.exists():
+            return None
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        path = file_path.replace("'", "''")
+        scope = scope_name.replace("'", "''")
+        try:
+            rows = table.search().where(
+                f"file_path = '{path}' AND scope_name = '{scope}'", prefilter=True
+            ).select(["purpose"]).limit(1).to_arrow().to_pylist()
+        except Exception:
+            return None
+        return rows[0].get("purpose") if rows else None
+
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
+        """Consulta direta por id do chunk — sem embedding nem Jev."""
+        if not self.exists() or not chunk_id:
+            return None
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        escaped = chunk_id.replace("'", "''")
+        try:
+            rows = (
+                table.search()
+                .where(f"id = '{escaped}'", prefilter=True)
+                .select(
+                    [
+                        "id",
+                        "file_path",
+                        "repo",
+                        "start_line",
+                        "end_line",
+                        "scope_type",
+                        "scope_name",
+                        "language",
+                        "content",
+                        "references_json",
+                    ]
+                )
+                .limit(1)
+                .to_arrow()
+                .to_pylist()
+            )
+        except Exception:
+            return None
+        return rows[0] if rows else None
+
+    def get_chunks_in_range(self, file_path: str, start_line: int, end_line: int) -> List[Dict[str, Any]]:
+        """Chunks de `file_path` que começam dentro de [start_line, end_line], sem conteúdo."""
+        if not self.exists():
+            return []
+        db = lancedb.connect(str(self.db_path))
+        table = db.open_table("chunks")
+        escaped_path = file_path.replace("'", "''")
+        arrow_table = (
+            table.search()
+            .where(
+                f"file_path = '{escaped_path}' AND start_line >= {int(start_line)} "
+                f"AND start_line <= {int(end_line)}",
+                prefilter=True,
+            )
+            .select(["id", "scope_type", "scope_name", "start_line", "end_line"])
+            .to_arrow()
         )
         return arrow_table.to_pylist()
 
@@ -572,9 +1058,345 @@ class StorageBackend:
         if not file_paths or not self.exists():
             return
 
+        self._assert_incremental_current()
+
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("chunks")
+        _assert_chunks_schema(table)
 
         escaped_paths = [file_path.replace("'", "''") for file_path in file_paths]
         in_clause = ", ".join(f"'{path}'" for path in escaped_paths)
         table.delete(f"file_path IN ({in_clause})")
+
+    # ------------------------------------------------------------------
+    # Camada histórica (F5.1) — tabela dedicada + ponteiro de snapshot ativo
+    # @MindContext: história de Git bounded, publicada por snapshot [ADR-009/010]
+    # @MindRisk: apagar o snapshot ativo antes da publicação perderia a única
+    # evidência conhecida; por isso staging → ponteiro → GC, nessa ordem [GA-08]
+    # @MindTest: tests/test_storage.py
+    # ------------------------------------------------------------------
+
+    def _connect(self):
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        return lancedb.connect(str(self.db_path))
+
+    def read_history_pointer(self) -> Optional[Dict[str, Any]]:
+        """Ponteiro da geração ativa; `None` quando ausente ou incompatível."""
+        if not self.history_pointer_path.exists():
+            return None
+        try:
+            with open(self.history_pointer_path, "r", encoding="utf-8") as f:
+                pointer = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(pointer, dict):
+            return None
+        if str(pointer.get("history_version")) != GIT_HISTORY_VERSION:
+            # Incompatibilidade histórica degrada só esta camada [GA-010-08/09]
+            return None
+        return pointer
+
+    def _write_history_pointer(self, pointer: Dict[str, Any]) -> None:
+        tmp_path = self.history_pointer_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(pointer, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, self.history_pointer_path)
+
+    def _active_history_table(self):
+        """Tabela do snapshot ativo, ou `None` quando não há visão publicada."""
+        pointer = self.read_history_pointer()
+        if not pointer or not pointer.get("table"):
+            return None
+        if not self.db_path.exists():
+            return None
+        db = lancedb.connect(str(self.db_path))
+        if pointer["table"] not in _table_names(db):
+            return None
+        return db.open_table(pointer["table"])
+
+    def stage_history(self, records: List[Dict[str, Any]]) -> str:
+        """
+        Materializa a visão candidata em uma geração NÃO ativa e devolve seu id.
+
+        Nada aqui é observável: sem publicação do ponteiro, o consumidor continua
+        vendo o snapshot anterior [GA-010-03].
+        """
+        snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        table_name = f"{GIT_HISTORY_TABLE_PREFIX}{snapshot_id}"
+
+        deduped: Dict[tuple, Dict[str, Any]] = {}
+        for record in records:
+            row = _commit_row(record)
+            deduped.setdefault((row["repo"], row["id"]), row)
+        rows = [deduped[key] for key in sorted(deduped)]
+
+        db = self._connect()
+        table = db.create_table(
+            table_name,
+            data=pa.Table.from_pylist(rows, schema=_history_schema()),
+            schema=_history_schema(),
+            mode="overwrite",
+        )
+        if rows:
+            table.create_fts_index("message", replace=True)
+        return snapshot_id
+
+    def publish_history(self, snapshot_id: str, state: str = "ok") -> Dict[str, Any]:
+        """Torna a geração `snapshot_id` a ativa. Só é chamada com o grafo pronto."""
+        db = self._connect()
+        table_name = f"{GIT_HISTORY_TABLE_PREFIX}{snapshot_id}"
+        table = db.open_table(table_name)
+        rows = table.search().select(["touches_json"]).to_arrow().to_pylist()
+        touches = sum(len(json.loads(row.get("touches_json") or "[]")) for row in rows)
+        pointer = {
+            "history_version": GIT_HISTORY_VERSION,
+            "snapshot_id": snapshot_id,
+            "table": table_name,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "state": state,
+            "commits": len(rows),
+            "touches": touches,
+        }
+        self._write_history_pointer(pointer)
+        return pointer
+
+    def mark_history_state(self, state: str) -> Optional[Dict[str, Any]]:
+        """
+        Declara falha da atualização sem tocar no snapshot ativo: o conjunto
+        anterior continua servível e passa a ser apresentado como stale [GA-010-05].
+        """
+        pointer = self.read_history_pointer()
+        if pointer is None:
+            return None
+        pointer = {**pointer, "state": state}
+        self._write_history_pointer(pointer)
+        return pointer
+
+    def gc_history(self) -> int:
+        """Remove gerações não ativas. Roda DEPOIS da publicação e nunca apaga o ativo."""
+        if not self.db_path.exists():
+            return 0
+        pointer = self.read_history_pointer()
+        active = pointer.get("table") if pointer else None
+        db = lancedb.connect(str(self.db_path))
+        removed = 0
+        for name in _table_names(db):
+            if not name.startswith(GIT_HISTORY_TABLE_PREFIX) or name == active:
+                continue
+            try:
+                db.drop_table(name)
+                removed += 1
+            except Exception as error:
+                print(
+                    f"[atlas] Falha ao remover geração histórica {name}: {error}",
+                    file=sys.stderr,
+                )
+        return removed
+
+    def get_history_state(self) -> Dict[str, Any]:
+        """
+        Estado observável da camada: `absent` | `ok` | `partial` | `unavailable`.
+        `absent` significa que não há conjunto anterior algum para servir.
+        """
+        pointer = self.read_history_pointer()
+        if pointer is None:
+            return {"state": "absent", "commits": 0, "touches": 0}
+        try:
+            table = self._active_history_table()
+        except Exception:
+            table = None
+        if table is None:
+            return {"state": "absent", "commits": 0, "touches": 0}
+        return {
+            "state": str(pointer.get("state") or "ok"),
+            "snapshot_id": pointer.get("snapshot_id"),
+            "commits": int(pointer.get("commits") or 0),
+            "touches": int(pointer.get("touches") or 0),
+        }
+
+    def get_history_projection(self) -> List[Dict[str, Any]]:
+        """Projeção do snapshot ativo para a derivação de nós/arestas do grafo."""
+        try:
+            table = self._active_history_table()
+        except Exception as error:
+            print(f"[atlas] Camada histórica ilegível: {error}", file=sys.stderr)
+            return []
+        if table is None:
+            return []
+        columns = ["id", "repo", "subject", "committed_at", "touches_json", "stale"]
+        try:
+            rows = table.search().select(columns).to_arrow().to_pylist()
+        except Exception as error:
+            print(f"[atlas] Projeção histórica indisponível: {error}", file=sys.stderr)
+            return []
+        return sorted(rows, key=lambda row: (row["repo"], row["id"]))
+
+    def lookup_commits(self, keys: List[tuple]) -> List[tuple]:
+        """
+        Point lookup por `(repo, SHA completo)` no snapshot ativo, devolvendo
+        `(CommitRecord, stale)` — nunca varredura integral, nunca leitura de Git [GA-02].
+        """
+        if not keys:
+            return []
+        try:
+            table = self._active_history_table()
+        except Exception:
+            table = None
+        if table is None:
+            return []
+        ids = sorted({str(sha).replace("'", "''") for _repo, sha in keys})
+        in_clause = ", ".join(f"'{sha}'" for sha in ids)
+        try:
+            rows = (
+                table.search()
+                .where(f"id IN ({in_clause})", prefilter=True)
+                .select(
+                    [
+                        "id",
+                        "repo",
+                        "subject",
+                        "body",
+                        "authored_at",
+                        "committed_at",
+                        "files_json",
+                        "is_revert",
+                        "reverted_commit_id",
+                        "stale",
+                    ]
+                )
+                .to_arrow()
+                .to_pylist()
+            )
+        except Exception as error:
+            print(f"[atlas] Lookup histórico indisponível: {error}", file=sys.stderr)
+            return []
+        wanted = {(str(repo), str(sha)) for repo, sha in keys}
+        found = []
+        for row in rows:
+            if (row["repo"], row["id"]) not in wanted:
+                continue
+            record = _commit_from_row(row)
+            found.append((record, bool(row.get("stale"))))
+        return found
+
+    def _search_history_arm(
+        self,
+        query_vector: List[float],
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+        warnings: List[str],
+    ) -> List[SearchResult]:
+        """
+        Sub-recuperação histórica tipada (F5.1): RRF próprio sobre a mensagem do
+        commit, com a mesma constante de fusão do pipeline de código.
+
+        @MindDecision: pipeline separado para o commit não virar semente nem vizinho
+        do braço `graph` — ele nunca ganha `match_arms=["graph"]` [ADR-009].
+        """
+        if filters.get("language") and filters["language"] != "git":
+            return []
+
+        try:
+            table = self._active_history_table()
+        except Exception as error:
+            print(f"[atlas] Camada histórica ilegível ({type(error).__name__}).", file=sys.stderr)
+            table = None
+        if table is None:
+            warnings.append("git_history_unavailable")
+            return []
+
+        where_clause = None
+        if filters.get("repo"):
+            repo = str(filters["repo"]).replace("'", "''")
+            where_clause = f"repo = '{repo}'"
+
+        def _run(query) -> List[Dict[str, Any]]:
+            if where_clause:
+                query = query.where(where_clause, prefilter=True)
+            return query.limit(CANDIDATES_LIMIT).to_list()
+
+        vector_rows: List[Dict[str, Any]] = []
+        text_rows: List[Dict[str, Any]] = []
+        failures = 0
+        try:
+            vector_rows = _run(table.search(query_vector, vector_column_name="vector").metric("cosine"))
+        except Exception:
+            failures += 1
+        try:
+            text_rows = _run(table.search(query_text, query_type="fts"))
+        except Exception:
+            failures += 1
+
+        if failures == 2:
+            warnings.append("git_history_unavailable")
+            return []
+
+        scores: Dict[str, float] = {}
+        rows_by_key: Dict[str, Dict[str, Any]] = {}
+        arms: Dict[str, List[str]] = {}
+        for rows, arm in ((vector_rows, "vector"), (text_rows, "fts")):
+            for rank, row in enumerate(rows):
+                key = f"{row['repo']}:{row['id']}"
+                rows_by_key.setdefault(key, row)
+                arms.setdefault(key, []).append(arm)
+                scores[key] = scores.get(key, 0.0) + (1.0 / (rank + RRF_K))
+
+        prefix = None
+        if filters.get("path_prefix"):
+            prefix = PurePath(str(filters["path_prefix"]).replace("\\", "/")).as_posix()
+
+        results: List[SearchResult] = []
+        # Filtrar ANTES de cortar em `top_k`: `files_json` só existe na linha já
+        # materializada, então o prefixo não vira `where()` como no braço de código
+        # (DECISAO-003) — mas a semântica de `top_k` ("os N melhores ENTRE os que
+        # casam") exige a mesma ordem de aplicação.
+        for key in sorted(scores, key=lambda item: (-scores[item], item)):
+            if len(results) >= top_k:
+                break
+            row = rows_by_key[key]
+            record = _commit_from_row(row)
+            # Um commit casa `path_prefix` quando ao menos um arquivo tocado está sob ele
+            if prefix and not any(path.startswith(prefix) for path in record.files_touched):
+                continue
+            results.append(
+                SearchResult(
+                    # Sentinelas: um commit não tem localização de símbolo; a associação
+                    # a arquivos é `commit.files_touched` [A4 do IPD]
+                    file_path="",
+                    start_line=0,
+                    end_line=0,
+                    scope_type="",
+                    scope_name="",
+                    language="git",
+                    content=row.get("message"),
+                    score=float(scores[key]),
+                    repo=record.repo,
+                    type="commit",
+                    commit=record,
+                    match_arms=arms.get(key, []),
+                )
+            )
+        return results
+
+    def _merge_typed(
+        self, code: List[SearchResult], history: List[SearchResult], top_k: int
+    ) -> List[SearchResult]:
+        """
+        União tipada: a ordem do código é a mesma de antes da F5.1 e os commits
+        entram apenas nas vagas restantes de `top_k`, por score decrescente.
+
+        @MindDecision: a união por score foi medida no golden set e regrediu TODAS
+        as classes (MRR total 0.4230 → 0.2077) — o pool histórico é pequeno, então
+        seus scores RRF nascem altos e deslocam código. Fica o fallback previsto no
+        plano: nenhuma classe regride e a história ainda é recuperável (GA-12).
+        """
+        results = code[:top_k]
+        if not history or len(results) >= top_k:
+            return results
+        def history_key(result: SearchResult) -> tuple[float, str]:
+            assert result.commit is not None
+            return -result.score, result.commit.id
+
+        ordered = sorted(history, key=history_key)
+        return results + ordered[: top_k - len(results)]

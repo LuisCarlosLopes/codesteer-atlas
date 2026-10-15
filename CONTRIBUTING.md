@@ -55,7 +55,7 @@ Qualquer mudança de lógica no indexador ou no servidor MCP deve vir acompanhad
 
 ## Arquitetura
 
-Veja [CLAUDE.md](CLAUDE.md) para detalhes de arquitetura, módulos internos (`chunker.py`, `embeddings.py`, `storage.py`, `indexer.py`, `server.py`, `models.py`) e convenções de código, e [.memory-bank/constitution.md](.memory-bank/constitution.md) para os princípios que regem o projeto.
+Veja [AGENTS.md](AGENTS.md) para detalhes de arquitetura, módulos internos (`chunker.py`, `embeddings.py`, `storage.py`, `indexer.py`, `server.py`, `models.py`) e convenções de código, e [.memory-bank/constitution.md](.memory-bank/constitution.md) para os princípios que regem o projeto. Contrato do Jev, medições, tokenizer e variáveis de ambiente: [referência do operador](docs/referencia.md).
 
 ## Pipeline de indexação (detalhado)
 
@@ -94,7 +94,7 @@ O diretório `.code-index` é resolvido nesta ordem (`resolve_index_dir()` em `s
 
 ## Configuração manual em outros clientes
 
-Há dois modos suportados para registrar o servidor MCP — escolha um e use-o de forma consistente em todos os clientes. Em ambos, substitua `/caminho/para/.code-index` pelo diretório do índice do workspace alvo (gerado por `atlas-index --workspace .`, veja [README](README.md#início-rápido-primeira-vez)).
+Há dois modos suportados para registrar o servidor MCP — escolha um e use-o de forma consistente em todos os clientes. Em ambos, substitua `/caminho/para/.code-index` pelo diretório do índice do workspace alvo (gerado por `atlas-index --workspace .`, veja [README](README.md#começar)).
 
 - **Remoto** (`uvx`) — não requer instalação nem clonar o repositório; baixa o pacote do GitHub a cada execução.
 - **Instalado** (`uv tool install`) — instala `atlas-serve`/`atlas-index` uma vez no PATH (`uv tool install git+https://github.com/LuisCarlosLopes/codesteer-atlas.git`); execuções subsequentes são instantâneas.
@@ -179,7 +179,7 @@ Crie/edite `opencode.json` **na raiz do projeto** (não na config global):
 
 ### Kiro
 
-Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` **na raiz do seu projeto** (não na config global do Kiro) e reinicie.
+Este repositório já inclui um [`examples/clients/kiro/settings/mcp.json`](examples/clients/kiro/settings/mcp.json) pronto, em modo remoto (`uvx`, sem paths absolutos), com `autoApprove` para as tools somente-leitura (`atlas_brief`, `atlas_search`, `atlas_graph`, `atlas_context`, `atlas_status`). Copie esse arquivo para `.kiro/settings/mcp.json` **na raiz do seu projeto** (não na config global do Kiro) e reinicie.
 
 Para usar o modo instalado em vez do remoto, edite o arquivo copiado com o bloco "Modo instalado" acima.
 

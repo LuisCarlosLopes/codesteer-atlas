@@ -37,7 +37,7 @@ from codesteer_atlas.config import (
     GRAPH_FILENAME,
     SUPPORTED_EXTENSIONS,
 )
-from codesteer_atlas.graph import load_graph, resolve_module_path
+from codesteer_atlas.graph import is_noise_hub, load_graph, resolve_module_path
 
 BRIEF_SCHEMA_VERSION = "1.0"
 
@@ -313,7 +313,9 @@ def _compute_hubs(graph: Optional[dict]) -> List[dict]:
     candidates = [
         node
         for node in graph.get("nodes", [])
-        if node.get("kind") in {"file", "doc", "symbol"} and (node.get("degree") or 0) >= 1
+        if node.get("kind") in {"file", "doc", "symbol"}
+        and (node.get("degree") or 0) >= 1
+        and not is_noise_hub(node)
     ]
     candidates.sort(key=lambda node: (-(node.get("degree") or 0), node["id"]))
     return [
@@ -829,6 +831,9 @@ def render_brief(
     *,
     current_git_sha: Optional[str] = None,
     computed_at_query_time: bool = False,
+    semantic_enabled: bool = False,
+    semantic_sidecar: Optional[dict] = None,
+    semantic_ready: bool = False,
 ) -> dict:
     """
     Projeta o brief no nível pedido e garante o teto de caracteres como PÓS-CONDIÇÃO.
@@ -842,6 +847,8 @@ def render_brief(
         warnings.append("index_stale")
     if computed_at_query_time:
         warnings.append("brief_recomputed_at_query_time")
+    if semantic_enabled and not semantic_ready:
+        warnings.append("semantic_layer_unavailable")
 
     payload: Dict[str, Any] = {
         "brief_version": brief["brief_version"],
@@ -865,6 +872,12 @@ def render_brief(
         payload["source"] = brief.get("source", {})
         payload["identity"] = brief["identity"]
         payload["layers"] = [dict(layer) for layer in brief["layers"]]
+        if semantic_enabled and semantic_ready and semantic_sidecar:
+            summaries = semantic_sidecar.get("layer_summaries") or {}
+            for layer in payload["layers"]:
+                entry = summaries.get(layer.get("path"))
+                if isinstance(entry, dict) and entry.get("summary"):
+                    layer["summary"] = entry["summary"]
         payload["layers_truncated"] = brief.get("layers_truncated", 0)
         payload["entrypoints"] = brief["entrypoints"]
         payload["hubs"] = brief["hubs"]
@@ -890,7 +903,14 @@ def _enforce_budget(payload: Dict[str, Any], max_chars: int) -> None:
         warnings.add("truncated_for_budget")
         payload["warnings"] = sorted(warnings)
 
-    # 1. cauda de layers[].top
+    # 1. prosa semântica cede antes dos fatos estruturais.
+    for layer in payload.get("layers", []):
+        if isinstance(layer, dict) and layer.pop("summary", None) is not None:
+            _mark()
+            if _serialized_len(payload) <= max_chars:
+                return
+
+    # 2. cauda de layers[].top
     for layer in payload.get("layers", []):
         while isinstance(layer, dict) and layer.get("top"):
             layer["top"].pop()
@@ -898,20 +918,51 @@ def _enforce_budget(payload: Dict[str, Any], max_chars: int) -> None:
             if _serialized_len(payload) <= max_chars:
                 return
 
-    # 2. cauda de hubs
+    # 3. cauda de hubs
     while payload.get("hubs"):
         payload["hubs"].pop()
         _mark()
         if _serialized_len(payload) <= max_chars:
             return
 
-    # 3. cauda de layers
+    # 4. cauda de layers
     while len(payload.get("layers", [])) > 1:
         payload["layers"].pop()
         payload["layers_truncated"] = payload.get("layers_truncated", 0) + 1
         _mark()
         if _serialized_len(payload) <= max_chars:
             return
+
+
+def brief_cut_once(payload: dict) -> bool:
+    """
+    Um passo de corte para o finalizador compartilhado do servidor (D3):
+    reaproveita a ordem de prioridade de `_enforce_budget`, mirando o tamanho
+    atual menos 1 caractere para remover só o próximo item da fila.
+    """
+    before = _serialized_len(payload)
+    if before <= 1:
+        return False
+    _enforce_budget(payload, before - 1)
+    return _serialized_len(payload) < before
+
+
+def brief_minimal_envelope(payload: dict) -> dict:
+    """Envelope mínimo de `atlas_brief`: identidade vazia, nunca inventada (D3)."""
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    return {
+        "brief_version": payload.get("brief_version"),
+        "level": payload.get("level"),
+        "identity": {},
+        "layers": [],
+        "layers_truncated": payload.get("layers_truncated", 0),
+        "entrypoints": [],
+        "hubs": [],
+        "warnings": sorted(warnings),
+        "next": [],
+        "truncated": True,
+    }
 
 
 def build_brief_lazily(manifest, index_dir: Path, workspace_root: Path) -> dict:

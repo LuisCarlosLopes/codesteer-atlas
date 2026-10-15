@@ -23,6 +23,11 @@ class CodeChunk(BaseModel):
     content: str = Field(..., description="Conteúdo textual do fragmento de código")
     indexed_at: str = Field(..., description="Timestamp ISO do momento de indexação")
     vector: Optional[List[float]] = Field(None, description="Embedding vetorial (dimensão 384)")
+    purpose: Optional[str] = Field(None, description="Propósito semântico opcional do símbolo")
+    purpose_hash: Optional[str] = Field(None, description="Hash do conteúdo do símbolo")
+    purpose_vector: Optional[List[float]] = Field(
+        None, description="Embedding do propósito semântico (dimensão 384)"
+    )
     references: List[str] = Field(
         default_factory=list, description="Refs de rationale persistidas no chunk"
     )
@@ -69,6 +74,34 @@ class IndexManifest(BaseModel):
         default_factory=dict,
         description="Mapa de path POSIX -> imports crus extraídos para o grafo",
     )
+    files_declares: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapa de path POSIX -> namespace/package declarado no arquivo"
+        " (Java, C#, Kotlin, Scala). É o outro lado da aresta em linguagens cujo"
+        " namespace não é o caminho (DECISÃO-003); ausente em índices < 2.2.0",
+    )
+
+
+class CommitRecord(BaseModel):
+    """
+    Registro histórico de um commit local (F5.1). Vive na tabela histórica
+    dedicada, nunca em `chunks`: identidade lógica é `(repo, id)`, com `id`
+    sempre o SHA completo [ADR-009].
+    """
+
+    id: str = Field(..., description="SHA completo do commit")
+    repo: str = Field(..., description="Repositório ao qual o SHA pertence")
+    subject: str = Field(..., description="Assunto da mensagem")
+    body: str = Field("", description="Corpo da mensagem, vazio quando ausente")
+    authored_at: str = Field(..., description="Data de autoria em ISO-8601")
+    committed_at: str = Field(..., description="Data de commit em ISO-8601")
+    files_touched: List[str] = Field(
+        default_factory=list, description="Caminhos POSIX alterados, ordenados e únicos"
+    )
+    is_revert: bool = Field(False, description="Marca determinística de revert")
+    reverted_commit_id: Optional[str] = Field(
+        None, description="SHA declarado como revertido, quando a mensagem o informa"
+    )
 
 
 class SearchResult(BaseModel):
@@ -86,12 +119,78 @@ class SearchResult(BaseModel):
     score: float
     repo: str
     references: List[str] = Field(default_factory=list)
+    # Identidade LanceDB do chunk; usada por expansão e dedup, sem alterar o schema.
+    chunk_id: Optional[str] = None
+    # @MindDecision: extensão aditiva para a variante histórica (F5.1); em type="commit"
+    # os campos de localização ficam em sentinela e a associação vem de commit.files_touched.
+    type: str = Field("code", description="Tipo do resultado: 'code' | 'commit'")
+    commit: Optional[CommitRecord] = Field(
+        None, description="Registro histórico quando type='commit'"
+    )
     match_arms: List[str] = Field(
         default_factory=list,
         description="Braços da busca híbrida que recuperaram este chunk:"
-        " 'vector' (semântico) e/ou 'fts' (BM25). Um resultado presente nos dois"
-        " braços teve consenso entre eles",
+        " 'vector' (código), 'fts' (BM25), 'semantic' (propósito) e/ou 'graph' (ativação estrutural,"
+        " só quando structural=True). Um resultado presente em mais de um"
+        " braço teve consenso entre eles",
     )
+    # Identidades cobertas por deduplicação (refs curtas); não serializadas no full.
+    covered_ids: List[str] = Field(default_factory=list)
+
+
+class CandidateEvaluation(BaseModel):
+    """Avaliação interna Jev por candidato; não vai integral à resposta compacta."""
+
+    candidate_id: str
+    score: Optional[float] = None
+    confidence: Optional[float] = None
+    state: str = Field(
+        "unevaluated",
+        description="evaluated | uncertain | unevaluated | batch_failed",
+    )
+    chunk_id: Optional[str] = None
+    file_path: Optional[str] = None
+    scope_name: Optional[str] = None
+    # Nível mais alto da rubrica que avaliou (2 na v1, 3 na v2); limiares são frações dele.
+    score_max: float = 2.0
+
+
+class RelevanceUsage(BaseModel):
+    """
+    Ledger request-local do avaliador Jev. Não entra no payload MCP de resultados.
+    """
+
+    search_id: str
+    status: str = Field("disabled", description="disabled | skipped | success | fallback | partial")
+    reason: Optional[str] = None
+    requested_model: Optional[str] = None
+    rubric_version: Optional[str] = None
+    resolved_model: Optional[str] = None
+    resolved_models: List[str] = Field(default_factory=list)
+    provider: Optional[str] = None
+    request_id: Optional[str] = None
+    request_count: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_usd: Optional[float] = 0.0
+    cost_status: str = Field(
+        "not_incurred",
+        description="not_incurred | unknown | reported | partially_known",
+    )
+    duration_ms: Optional[float] = None
+    ranking_changed: bool = False
+    confident_evaluations: int = 0
+    candidates_evaluated: int = 0
+    candidates_uncertain: int = 0
+    candidates_unevaluated: int = 0
+    removed_by_relevance: int = 0
+    removed_by_redundancy: int = 0
+    removed_by_budget: int = 0
+    bytes_recovered: int = 0
+    bytes_selected: int = 0
+    bytes_delivered: int = 0
+    expansions: int = 0
+    evaluations: List[CandidateEvaluation] = Field(default_factory=list)
 
 
 class SearchOutcome(BaseModel):
@@ -106,8 +205,28 @@ class SearchOutcome(BaseModel):
     results: List[SearchResult] = Field(default_factory=list)
     warnings: List[str] = Field(
         default_factory=list,
-        description="Códigos de degradação: 'vector_search_unavailable' | 'fts_unavailable'",
+        description="Códigos de degradação: 'vector_search_unavailable' |"
+        " 'fts_unavailable' | 'cross_encoder_unavailable' |"
+        " 'structural_arm_unavailable' | 'semantic_layer_unavailable' |"
+        " 'semantic_arm_unavailable' | 'git_history_unavailable' |"
+        " 'relevance_unavailable' | 'relevance_invalid_response' |"
+        " 'relevance_low_confidence' | 'relevance_budget_exceeded' |"
+        " 'relevance_cost_unknown' | 'relevance_unconfirmed_fallback'."
+        " Os resultados estruturais"
+        " continuam disponíveis"
+        " quando um aviso semântico aparece.",
     )
+    relevance_usage: Optional[RelevanceUsage] = Field(
+        None,
+        description="Ledger interno da avaliação Jev desta busca; não serializado no MCP.",
+    )
+    candidate_pool: Optional[List[SearchResult]] = None
+    pool_evaluations: List[CandidateEvaluation] = Field(default_factory=list)
+    local_fallback: List[SearchResult] = Field(default_factory=list)
+    history_candidates: List[SearchResult] = Field(default_factory=list)
+
+    # Avaliações alinhadas à ordem de `results` (após rerank); usadas só no compacto.
+    evaluations: List[CandidateEvaluation] = Field(default_factory=list)
 
 
 class IndexStats(BaseModel):
@@ -160,9 +279,38 @@ class IndexStats(BaseModel):
         None,
         description="Status da geração do brief (full | degraded-no-graph | failed)",
     )
+    scip_status: Optional[str] = Field(
+        None,
+        description="Status da fase de ingestão SCIP (disabled | toolchain_missing |"
+        " timeout | parse_failed | ok)",
+    )
+    scip_edges: int = Field(0, description="Total de arestas `calls` ingeridas via SCIP")
     brief_bytes: int = Field(0, description="Tamanho final de brief.json em bytes")
     brief_layers: int = Field(0, description="Total de camadas mantidas no brief")
     brief_entrypoints: int = Field(0, description="Total de entrypoints detectados no brief")
+    semantic_status: str = Field(
+        "disabled", description="Estado da geração semântica nesta execução"
+    )
+    semantic_generated: int = Field(0, description="Símbolos que pagaram geração semântica")
+    semantic_reused: int = Field(0, description="Símbolos reutilizados pelo cache semântico")
+    semantic_file_generated: int = Field(0, description="Sumários de arquivo gerados")
+    semantic_file_reused: int = Field(0, description="Sumários de arquivo reutilizados")
+    semantic_layer_generated: int = Field(0, description="Sumários de camada gerados")
+    semantic_layer_reused: int = Field(0, description="Sumários de camada reutilizados")
+    semantic_origin: Optional[str] = Field(None, description="Origem usada na geração semântica")
+    semantic_egress: Optional[str] = Field(None, description="Fronteira de dados da origem")
+    semantic_origins: List[str] = Field(
+        default_factory=list, description="Origens efetivamente usadas na execução, incluindo sumários"
+    )
+    semantic_egresses: List[str] = Field(
+        default_factory=list, description="Egressos efetivamente usados na execução, sem credenciais"
+    )
+    git_history_status: str = Field(
+        "unavailable",
+        description="Estado da publicação histórica (ok | partial | unavailable | empty)",
+    )
+    git_history_commits: int = Field(0, description="Commits no snapshot histórico ativo")
+    git_history_touches: int = Field(0, description="Relações touches do snapshot ativo")
     skipped_reason: Optional[str] = Field(
         None,
         description="Motivo de a indexação ter sido pulada (ex: 'reindex_in_progress')",

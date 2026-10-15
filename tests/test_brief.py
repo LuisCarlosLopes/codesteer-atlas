@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from codesteer_atlas import brief as briefmod
 from codesteer_atlas.brief import (
     BRIEF_SCHEMA_VERSION,
     _clear_brief_cache,
@@ -300,6 +301,26 @@ def test_hubs_ignora_secoes_e_rationale():
     assert hubs[0]["label"] == "core.py"
 
 
+def test_compute_hubs_uses_shared_is_noise_hub():
+    """Label json/Path não ranqueia; um file real de grau menor permanece."""
+    nodes = [
+        _symbol_node("lib/codec.py", "json", degree=50),
+        _symbol_node("lib/paths.py", "Path", degree=40),
+        _file_node("core.py", degree=5),
+        {"id": "sec:doc.md#T", "kind": "section", "label": "T", "file_path": "doc.md", "degree": 99},
+    ]
+    hubs = build_brief(
+        _make_manifest(["lib/codec.py", "lib/paths.py", "core.py", "doc.md"]),
+        _graph(nodes),
+        Path("."),
+    )["hubs"]
+
+    labels = {hub["label"] for hub in hubs}
+    assert "json" not in labels
+    assert "Path" not in labels
+    assert "core.py" in labels
+
+
 def test_hubs_vazio_quando_sem_arestas_cruzadas():
     """Sem conectividade real, a resposta é lista vazia — não uma ordem alfabética."""
     nodes = [_file_node("a.py", degree=0), _file_node("b.py", degree=0)]
@@ -464,3 +485,53 @@ def test_level0_e_subconjunto_de_level1():
     assert [layer["path"] for layer in level0["layers"]] == [
         layer["path"] for layer in level1["layers"]
     ]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "ready", "sidecar", "has_summary", "has_warning"),
+    [
+        (True, True, {"layer_summaries": {"src/app": {"summary": "Coordena o app."}}}, True, False),
+        (False, True, {"layer_summaries": {"src/app": {"summary": "Coordena o app."}}}, False, False),
+        (True, False, {"layer_summaries": {"src/app": {"summary": "Coordena o app."}}}, False, True),
+        (True, True, None, False, False),
+    ],
+)
+def test_render_brief_join_semantico_respeita_enabled_ready(
+    enabled, ready, sidecar, has_summary, has_warning
+):
+    """Summary só entra no brief quando a camada está ligada e pronta."""
+    manifest = _make_manifest(["src/app/a.py"])
+    brief = build_brief(manifest, _graph([_file_node("src/app/a.py")]), Path("."))
+
+    payload = render_brief(
+        brief,
+        1,
+        semantic_enabled=enabled,
+        semantic_ready=ready,
+        semantic_sidecar=sidecar,
+    )
+
+    layer = payload["layers"][0]
+    assert ("summary" in layer) is has_summary
+    assert ("semantic_layer_unavailable" in payload["warnings"]) is has_warning
+
+
+def test_render_brief_remove_summary_antes_dos_fatos_no_teto(monkeypatch):
+    """Ao exceder a cota, prosa semântica cede antes de identidade e camadas."""
+    manifest = _make_manifest(["src/app/a.py"])
+    brief = build_brief(manifest, _graph([_file_node("src/app/a.py", degree=1)]), Path("."))
+    sem_summary = {"layer_summaries": {"src/app": {"summary": "x" * 1000}}}
+
+    baseline = render_brief(brief, 1)
+    baseline_size = len(json.dumps(baseline, separators=(",", ":"), ensure_ascii=False))
+    monkeypatch.setattr(briefmod, "BRIEF_LEVEL1_MAX_CHARS", baseline_size + 80)
+
+    payload = render_brief(
+        brief, 1, semantic_enabled=True, semantic_ready=True, semantic_sidecar=sem_summary
+    )
+
+    assert len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False)) <= baseline_size + 80
+    assert "summary" not in payload["layers"][0]
+    assert "identity" in payload
+    assert payload["layers"]
+    assert "truncated_for_budget" in payload["warnings"]

@@ -1,6 +1,7 @@
 from codesteer_atlas.markdown_links import (
     MarkdownLinkTarget,
     extract_markdown_link_targets,
+    resolve_heading_section,
     slugify_heading,
 )
 
@@ -159,6 +160,104 @@ def test_wikilink_non_md_extension_is_ignored():
     targets = extract_markdown_link_targets(content, "docs/index.md", name_to_paths={})
 
     assert targets == []
+
+
+def test_wikilink_vault_path_resolves_from_indexed_suffix_not_source_dir():
+    """[[meta/glossary]] resolve pelo sufixo indexado, não pelo diretório da origem."""
+    name_to_paths = {"glossary": ["cognitive-base/meta/glossary.md"]}
+    sources = (
+        "cognitive-base/system/sys-008.md",
+        "cognitive-base/specs/spc-005.md",
+        "cognitive-base/guides/architecture/gd-041.md",
+        "cognitive-base/meta/glossary.md",
+    )
+
+    for source in sources:
+        targets = extract_markdown_link_targets(
+            "[[meta/glossary#crudservice]]", source, name_to_paths=name_to_paths
+        )
+        assert targets == [
+            MarkdownLinkTarget(
+                "cognitive-base/meta/glossary.md", [], "crudservice", None
+            )
+        ], source
+
+
+def test_wikilink_vault_path_without_index_is_unresolved():
+    """Sem match no índice, [[meta/glossary]] não inventa path relativo à origem."""
+    targets = extract_markdown_link_targets(
+        "[[meta/glossary#crudservice]]",
+        "cognitive-base/system/sys-008.md",
+        name_to_paths={},
+    )
+
+    assert targets == [MarkdownLinkTarget(None, [], "crudservice", None)]
+
+
+def test_wikilink_vault_path_falls_back_to_basename_when_suffix_missing():
+    """Se o sufixo pasta/nota não existe, cai no lookup por basename."""
+    name_to_paths = {"glossary": ["docs/glossary.md"]}
+
+    targets = extract_markdown_link_targets(
+        "[[meta/glossary]]",
+        "cognitive-base/system/sys-008.md",
+        name_to_paths=name_to_paths,
+    )
+
+    assert targets == [MarkdownLinkTarget("docs/glossary.md", [], None, None)]
+
+
+def test_wikilink_vault_path_ambiguous_suffix_returns_candidates():
+    """Dois arquivos com o mesmo sufixo de vault deixam file_path vazio e candidates."""
+    name_to_paths = {
+        "glossary": [
+            "cognitive-base/meta/glossary.md",
+            "other-vault/meta/glossary.md",
+        ]
+    }
+
+    targets = extract_markdown_link_targets(
+        "[[meta/glossary]]",
+        "cognitive-base/guides/note.md",
+        name_to_paths=name_to_paths,
+    )
+
+    assert targets == [
+        MarkdownLinkTarget(
+            None,
+            ["cognitive-base/meta/glossary.md", "other-vault/meta/glossary.md"],
+            None,
+            None,
+        )
+    ]
+
+
+def test_wikilink_leading_slash_is_vault_root_not_fs_absolute():
+    """[[/meta/glossary]] é raiz da vault, não path absoluto do filesystem."""
+    name_to_paths = {"glossary": ["cognitive-base/meta/glossary.md"]}
+
+    targets = extract_markdown_link_targets(
+        "[[/meta/glossary]]",
+        "cognitive-base/system/sys-008.md",
+        name_to_paths=name_to_paths,
+    )
+
+    assert targets == [MarkdownLinkTarget("cognitive-base/meta/glossary.md", [], None, None)]
+
+
+def test_resolve_heading_section_matches_github_and_obsidian_slug():
+    heading = "Multi-tenancy: Master DB vs Tenant DB"
+    assert (
+        resolve_heading_section("multi-tenancy-master-db-vs-tenant-db", [heading])
+        == heading
+    )
+    assert (
+        resolve_heading_section(
+            heading, [{"scope_name": heading}, {"scope_name": "Outro"}]
+        )
+        == heading
+    )
+    assert resolve_heading_section("inexistente", [heading]) is None
 
 
 def test_chunk_with_standard_link_and_wikilink_both_present_without_duplication():

@@ -29,6 +29,35 @@ RERANK_POOL_MULTIPLIER = 4
 # RRF puro. Existe para A/B no harness de avaliação e para rollback sem redeploy.
 RERANK_ENV_FLAG = "ATLAS_RERANK"
 
+# Ausente (default) → ranking.rerank lexical. Presente → cross-encoder ONNX.
+# ATLAS_RERANK=0 tem precedência e desliga TODA reordenação, inclusive a do CE.
+RERANK_MODEL_ENV_FLAG = "ATLAS_RERANK_MODEL"
+
+# Único ~30M/ONNX listado pelo fastembed que casa com a descrição do roadmap (A1).
+CROSS_ENCODER_DEFAULT_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+# Truncar o documento limita a latência dos pares query×documento no pool.
+CROSS_ENCODER_MAX_DOC_CHARS = 2000
+
+# Spreading activation do braço estrutural (A2): faixa conservadora sobre 50 candidatos.
+STRUCTURAL_SEED_TOP_N = 10
+STRUCTURAL_MAX_HOPS = 2
+STRUCTURAL_HOP_DECAY = 0.5
+STRUCTURAL_MAX_NEIGHBORS_PER_NODE = 25
+# Guarda agnóstica de repositório contra explosão por hub (DECISÃO-002).
+STRUCTURAL_HUB_DEGREE_CEILING = 40
+
+# Rótulos de arquivo genéricos usados só na expansão do braço (não no ranking de hubs).
+GRAPH_NOISE_LABELS = frozenset(
+    {
+        "__init__.py",
+        "utils.py",
+        "index.ts",
+        "types.ts",
+        "constants.py",
+    }
+)
+
 # Termos ignorados pela reordenação pós-RRF ao calcular boost de título e proximidade:
 # aparecem em quase todo chunk e dariam boost a candidato irrelevante. Cobre pt-BR,
 # inglês e genéricos de código. Comparação sobre o token normalizado (minúsculo, sem
@@ -65,7 +94,7 @@ QUERY_STOPWORDS = frozenset(
 # Versão mínima de manifest aceita pelo server; manifests anteriores usam backend
 # de embeddings incompatível (sentence-transformers/torch) e exigem reindexação
 MIN_INDEX_VERSION = "2.0.0"
-CURRENT_INDEX_VERSION = "2.1.0"
+CURRENT_INDEX_VERSION = "2.3.0"
 
 # Nome do arquivo de exclusão declarativa por workspace (sintaxe .gitignore)
 ATLASIGNORE_FILENAME = ".atlasignore"
@@ -78,7 +107,43 @@ GRAPH_HTML_FILENAME = "graph.html"
 GRAPH_TOP_HUBS_LIMIT = 25
 GRAPH_PATH_MAX_HOPS = 10
 GRAPH_VIEWER_MAX_FULL_NODES = 3000
+GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND = 12
+GRAPH_AFFECTED_MAX_RESULTS = 40
+GRAPH_RESPONSE_MAX_CHARS = 6000
+CONTEXT_RESPONSE_MAX_CHARS = 12000
+# Cotas por seção do atlas_context (DECISÃO-002). Cada intent soma abaixo do teto
+# para o leftover pool ter folga; o serializador aplica CONTEXT_RESPONSE_MAX_CHARS.
+CONTEXT_BUDGET_BY_SECTION = {
+    "symbol": 1800,
+    "callers": 1600,
+    "callees": 1600,
+    "tests": 1200,
+    "rationale": 1000,
+    "call_chain_to_entrypoints": 1600,
+    "error_handling": 600,
+    "recent_history": 600,
+    "diff": 800,
+    "impact": 1600,
+    "adrs": 1000,
+    "layer": 800,
+    "neighbors": 1600,
+    "brief_layer": 1000,
+}
+GRAPH_NOISE_HUB_LABELS = frozenset(
+    {
+        "path",
+        "optional",
+        "logger",
+        "utils",
+        "json",
+        "dict",
+        "list",
+        "str",
+        "any",
+    }
+)
 BACKGROUND_REINDEX_MIN_INTERVAL_S = 300
+BACKGROUND_REINDEX_LOG_MAX_BYTES = 256 * 1024
 
 # Briefing pré-computado do projeto (atlas_brief). Todos os limites abaixo existem para
 # garantir custo de token com teto fixo, independente do tamanho do repositório:
@@ -164,3 +229,271 @@ SUPPORTED_EXTENSIONS = {
     ".ex": "elixir",
     ".exs": "elixir",
 }
+
+# ---------------------------------------------------------------------------
+# Fase 3 — "o índice reflete a realidade" (§3.1 watcher, §3.2 SCIP, §3.3 imports)
+# Bloco acrescentado ao FINAL do arquivo de propósito: a F2 edita constantes acima
+# e as duas fases não devem disputar as mesmas linhas.
+# ---------------------------------------------------------------------------
+
+# Watcher de workspace (§3.1) — desligado por padrão; ligar muda o comportamento
+# de todo usuário existente sem opt-in.
+WATCH_ENV_FLAG = "ATLAS_WATCH"
+# Coalesce a rajada de eventos de um `git pull`/save do editor em um único spawn.
+WATCH_DEBOUNCE_S = 2.0
+
+# Ingestão SCIP (§3.2) — também desligada por padrão: executa binário externo.
+SCIP_ENV_FLAG = "ATLAS_SCIP"
+SCIP_TIMEOUT_S = 300
+SCIP_INDEX_FILENAME = "index.scip"
+# Teto próprio de leitura: MAX_FILE_SIZE não se aplica a artefato de toolchain.
+SCIP_MAX_INDEX_BYTES = 256 * 1024 * 1024
+# Binário por linguagem, na ordem em que `shutil.which` deve procurá-lo. O argv
+# completo (saída, workspace) é montado por quem invoca o subprocesso (§3.2).
+SCIP_INDEXERS: dict[str, list[str]] = {
+    "python": ["scip-python", "index"],
+    "typescript": ["scip-typescript", "index"],
+    "javascript": ["scip-typescript", "index"],
+    "go": ["scip-go"],
+    "rust": ["rust-analyzer", "scip"],
+}
+
+# ---------------------------------------------------------------------------
+# Fase 4 — camada semântica opt-in (desligada por padrão)
+# ---------------------------------------------------------------------------
+
+SEMANTIC_ENV_FLAG = "ATLAS_SEMANTIC"
+SEMANTIC_LOCAL_URL_ENV = "ATLAS_SEMANTIC_LOCAL_URL"
+SEMANTIC_API_URL_ENV = "ATLAS_SEMANTIC_API_URL"
+SEMANTIC_API_KEY_ENV = "ATLAS_SEMANTIC_API_KEY"
+SEMANTIC_MODEL_ENV = "ATLAS_SEMANTIC_MODEL"
+SEMANTIC_TIMEOUT_S = 30.0
+SEMANTIC_FILENAME = "semantic.json"
+SEMANTIC_MAX_TEXT_CHARS = 4000
+SEMANTIC_MAX_SUMMARY_CHARS = 1200
+
+# ---------------------------------------------------------------------------
+# Avaliador de relevância Jev (opt-in, desligado por padrão)
+# ---------------------------------------------------------------------------
+
+RELEVANCE_ENV_FLAG = "ATLAS_RELEVANCE"
+RELEVANCE_GATE_ENV_FLAG = "ATLAS_RELEVANCE_GATE"
+RELEVANCE_API_URL_ENV = "ATLAS_RELEVANCE_API_URL"
+RELEVANCE_API_KEY_ENV = "ATLAS_RELEVANCE_API_KEY"
+RELEVANCE_MODEL_ENV = "ATLAS_RELEVANCE_MODEL"
+RELEVANCE_DEFAULT_MODEL = "~typesafe/jev-latest"
+RELEVANCE_TIMEOUT_S = 3.0
+RELEVANCE_MAX_CANDIDATES = 50
+RELEVANCE_MAX_CONTENT_CHARS = 2000
+# Uma chamada leva o pool inteiro (até 50 candidatos na rubrica v2), abaixo do
+# limite do modelo: 64 mil tokens por requisição, 32 mil para state + maior pergunta.
+# RELEVANCE_MAX_BATCH_CALLS fica como reserva para overflow.
+RELEVANCE_MAX_REQUEST_BYTES = 192_000
+RELEVANCE_MAX_RESPONSE_BYTES = 256 * 1024
+RELEVANCE_MIN_CONFIDENCE = 0.70
+RELEVANCE_MAX_BATCH_CALLS = 2
+# Rubrica do score: v2 (4 níveis concretos com exemplos, estado com kind/language)
+# é o default; v1 (3 níveis) segue selecionável.
+RELEVANCE_RUBRIC_ENV = "ATLAS_RELEVANCE_RUBRIC"
+RELEVANCE_DEFAULT_RUBRIC = "v2"
+RELEVANCE_RUBRIC_VERSIONS = {"v1": "jev-relevance-score-v1", "v2": "jev-relevance-score-v2"}
+RELEVANCE_RUBRIC_VERSION = RELEVANCE_RUBRIC_VERSIONS[RELEVANCE_DEFAULT_RUBRIC]
+# Limiares na escala normalizada (score / nível máximo da rubrica).
+# Seleção conservadora (ATLAS_RELEVANCE_CUT=0): score ≤ 1/8 da escala (0,25 na v1,
+# 0,375 na v2) e confiança ≥ 0,90.
+RELEVANCE_DROP_NORMALIZED_MAX = 0.125
+RELEVANCE_DROP_CONFIDENCE_MIN = 0.90
+# Corte do top_k no perfil compacto, ligado por padrão quando o Jev avalia (`0`
+# desliga): dentro dos top_k na ordem Jev, sai quem tem score abaixo da metade da
+# escala (1,0 na v1, onde equivale a p(irrelevante) > p(evidência direta); 1,5 na
+# v2), sem repor a vaga. Medição em tests/eval/jev_curation_study_20260924.md.
+RELEVANCE_CUT_ENV_FLAG = "ATLAS_RELEVANCE_CUT"
+RELEVANCE_CUT_POLICY = "top_k_no_refill_v1"
+RELEVANCE_CUT_NORMALIZED_BELOW = 0.5
+OPENROUTER_CHAT_COMPLETIONS_PATH = "/api/v1/chat/completions"
+OPENROUTER_SYSTEMONE_PATH = "/api/v1/systemone"
+OPENROUTER_HOST = "openrouter.ai"
+
+# ---------------------------------------------------------------------------
+# Otimização de contexto (opt-in, desligada por padrão; independente do Jev)
+# ---------------------------------------------------------------------------
+
+CONTEXT_OPTIMIZATION_ENV_FLAG = "ATLAS_CONTEXT_OPTIMIZATION"
+# Fração do teto vigente aplicada no perfil compacto (busca e contexto).
+CONTEXT_OPTIMIZATION_BUDGET_RATIO = 0.70
+CONTEXT_EXPAND_MAX_REFS = 5
+# Classe grande expande como cabeçalho + lista de métodos com `ref` (default ligado;
+# `0` desliga). Abaixo do limiar (~1.500 tokens), ler a classe inteira sai mais barato.
+EXPAND_OUTLINE_ENV_FLAG = "ATLAS_EXPAND_OUTLINE"
+EXPAND_OUTLINE_MIN_CHARS = 6000
+EXPAND_OUTLINE_MAX_MEMBERS = 100
+CHUNK_TRUNCATION_MARKER = "# ... [conteúdo truncado para respeitar limites do modelo] ..."
+
+# Tier de resolução de import por linguagem (DECISÃO-005). Cada linguagem de
+# SUPPORTED_EXTENSIONS aparece em EXATAMENTE um tier — `tests/test_resolution_coverage.py`
+# falha quando uma extensão nova entra sem decisão de tier, que é o modo de falha
+# por esquecimento que o roadmap pede para guardar.
+#
+# `scip` nasce vazio: nenhuma linguagem é SCIP por natureza; a fase §3.2 promove
+# em tempo de execução a linguagem cuja ingestão realmente casou uma ocorrência.
+# `treesitter` é exatamente o conjunto coberto por `graph._IMPORT_RESOLVERS`.
+IMPORT_RESOLUTION_TIERS: dict[str, frozenset[str]] = {
+    "scip": frozenset(),
+    "treesitter": frozenset(
+        {
+            "python",
+            "javascript",
+            "typescript",
+            "go",
+            "java",
+            "csharp",
+            "kotlin",
+            "scala",
+            "rust",
+            "php",
+            "ruby",
+            "swift",
+        }
+    ),
+    "none": frozenset(
+        {
+            "markdown",
+            "text",
+            "xml",
+            "razor",
+            "dart",
+            "pascal",
+            "vb6",
+            "c",
+            "cpp",
+            "sql",
+            "bash",
+            "yaml",
+            "json",
+            "toml",
+            "vue",
+            "lua",
+            "html",
+            "css",
+            "scss",
+            # Imports são extraídos (chunker), mas nenhum resolver mapeia
+            # `MyApp.Core` -> `lib/my_app/core.ex` — declarado, não silenciado.
+            "elixir",
+        }
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Fase 5.1 — arqueologia de Git (história local bounded, ancorada por `touches`)
+# ---------------------------------------------------------------------------
+
+# Teto aprovado da janela histórica: o primeiro limite atingido prevalece.
+# Configuração só pode REDUZIR estes valores (V01-V03 do TSD).
+GIT_HISTORY_MAX_COMMITS_PER_FILE = 100
+GIT_HISTORY_MAX_MONTHS = 24
+
+# Artefatos locais da camada histórica. O ponteiro fica ao lado do manifest e
+# nomeia a geração ativa; tabelas de staging usam o mesmo prefixo com outro id.
+GIT_HISTORY_POINTER_FILENAME = "history.json"
+GIT_HISTORY_TABLE_PREFIX = "commits_"
+GIT_HISTORY_VERSION = "1.0"
+
+# Teto de leitura do Git em subprocesso, no padrão de `get_git_head_sha`.
+GIT_HISTORY_TIMEOUT_S = 60
+
+
+# ---------------------------------------------------------------------------
+# Observabilidade de tokens por consulta (opt-in) — plano
+# observabilidade-tokens-consultas. Ausência de ATLAS_OBSERVABILITY não cria
+# arquivo de eventos nem histórico; o contador usa o tokenizer embarcado ou
+# ATLAS_TOKENIZER_PATH, sempre local e lazy, mesmo com observabilidade desligada.
+# ---------------------------------------------------------------------------
+
+OBSERVABILITY_ENV_FLAG = "ATLAS_OBSERVABILITY"
+TOKENIZER_PATH_ENV_FLAG = "ATLAS_TOKENIZER_PATH"
+BUNDLED_TOKENIZER_NAME = "HuggingFaceTB/SmolLM2-135M"
+BUNDLED_TOKENIZER_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
+BUNDLED_TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
+
+OBSERVABILITY_EVENT_SCHEMA_VERSION = "1.0"
+OBSERVABILITY_TOOLS = (
+    "atlas_search",
+    "atlas_context",
+    "atlas_brief",
+    "atlas_graph",
+    "atlas_expand",
+)
+
+OBSERVABILITY_DIRNAME = "observability"
+OBSERVABILITY_EVENTS_FILENAME = "events.jsonl"
+OBSERVABILITY_LOCK_FILENAME = ".observability.lock"
+# Rotação: 1 arquivo ativo + 2 backups = 3 MiB no total (§4.1 do IPD).
+OBSERVABILITY_MAX_FILE_BYTES = 1 * 1024 * 1024
+OBSERVABILITY_MAX_BACKUPS = 2
+# O sink nunca bloqueia a consulta: contenção descarta a persistência daquele evento.
+OBSERVABILITY_LOCK_TIMEOUT_S = 0
+
+# ceil(chars/4) quando o tokenizer está indisponível.
+TOKEN_ESTIMATE_DIVISOR = 4
+
+# Orçamentos de resposta por tool (§4.1). context/graph/brief reaproveitam os
+# tetos de caracteres já existentes (evita duas fontes de verdade para o mesmo
+# número); só `search` ganha teto novo, pois nunca teve um global.
+RESPONSE_BUDGET_SEARCH_MAX_CHARS = 24000
+RESPONSE_BUDGET_SEARCH_MAX_BYTES = 24000
+RESPONSE_BUDGET_SEARCH_MAX_TOKENS = 6000
+
+RESPONSE_BUDGET_CONTEXT_MAX_BYTES = CONTEXT_RESPONSE_MAX_CHARS
+RESPONSE_BUDGET_CONTEXT_MAX_TOKENS = 4000
+
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS = int(
+    RESPONSE_BUDGET_SEARCH_MAX_CHARS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES = int(
+    RESPONSE_BUDGET_SEARCH_MAX_BYTES * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS = int(
+    RESPONSE_BUDGET_SEARCH_MAX_TOKENS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES = int(
+    CONTEXT_RESPONSE_MAX_CHARS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS = int(
+    RESPONSE_BUDGET_CONTEXT_MAX_TOKENS * CONTEXT_OPTIMIZATION_BUDGET_RATIO
+)
+
+RESPONSE_BUDGET_GRAPH_MAX_BYTES = GRAPH_RESPONSE_MAX_CHARS
+RESPONSE_BUDGET_GRAPH_MAX_TOKENS = 2000
+
+RESPONSE_BUDGET_BRIEF0_MAX_BYTES = BRIEF_LEVEL0_MAX_CHARS
+RESPONSE_BUDGET_BRIEF0_MAX_TOKENS = 700
+
+RESPONSE_BUDGET_BRIEF1_MAX_BYTES = BRIEF_LEVEL1_MAX_CHARS
+RESPONSE_BUDGET_BRIEF1_MAX_TOKENS = 1700
+
+# Teto de tentativas do laço de corte do finalizador compartilhado
+# (`response_budget.finalize_response`): progresso estrito por construção (cada
+# tentativa remove um item), mas um número finito evita qualquer risco de loop
+# indefinido diante de um `cut_once` malformado.
+RESPONSE_BUDGET_MAX_CUT_ATTEMPTS = 4000
+
+
+def resolve_git_history_window(
+    max_commits: int | None = None, max_months: int | None = None
+) -> tuple[int, int]:
+    """
+    Janela efetiva (commits por arquivo, meses). Recusa override acima do teto
+    aprovado em vez de silenciosamente ampliá-lo [V01-V03].
+    """
+    commits = GIT_HISTORY_MAX_COMMITS_PER_FILE if max_commits is None else int(max_commits)
+    months = GIT_HISTORY_MAX_MONTHS if max_months is None else int(max_months)
+    if commits < 1 or commits > GIT_HISTORY_MAX_COMMITS_PER_FILE:
+        raise ValueError(
+            "A janela histórica aceita de 1 a "
+            f"{GIT_HISTORY_MAX_COMMITS_PER_FILE} commits por arquivo."
+        )
+    if months < 1 or months > GIT_HISTORY_MAX_MONTHS:
+        raise ValueError(
+            f"A janela histórica aceita de 1 a {GIT_HISTORY_MAX_MONTHS} meses."
+        )
+    return commits, months

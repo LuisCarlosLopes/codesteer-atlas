@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -8,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import unquote, urlparse
 
 # 1. Duplica o file descriptor real do stdout (fd 1) para uso exclusivo do
@@ -39,17 +40,73 @@ import anyio  # noqa: E402
 from fastmcp import Context, FastMCP  # noqa: E402
 from mcp.shared.session import RequestResponder  # noqa: E402
 
-from codesteer_atlas.brief import build_brief_lazily, load_brief, render_brief  # noqa: E402
+from codesteer_atlas import observability, response_budget  # noqa: E402
+from codesteer_atlas.brief import (  # noqa: E402
+    brief_cut_once,
+    brief_minimal_envelope,
+    build_brief_lazily,
+    load_brief,
+    render_brief,
+)
 from codesteer_atlas.config import (  # noqa: E402
+    BACKGROUND_REINDEX_LOG_MAX_BYTES,
     BACKGROUND_REINDEX_MIN_INTERVAL_S,
+    BRIEF_LEVEL0_MAX_CHARS,
+    BRIEF_LEVEL1_MAX_CHARS,
+    CONTEXT_RESPONSE_MAX_CHARS,
+    CURRENT_INDEX_VERSION,
     DEFAULT_INDEX_DIR,
+    EXPAND_OUTLINE_MAX_MEMBERS,
+    EXPAND_OUTLINE_MIN_CHARS,
     GRAPH_FILENAME,
     GRAPH_HTML_FILENAME,
     GRAPH_PATH_MAX_HOPS,
+    GRAPH_RESPONSE_MAX_CHARS,
+    RESPONSE_BUDGET_BRIEF0_MAX_TOKENS,
+    RESPONSE_BUDGET_BRIEF1_MAX_TOKENS,
+    RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+    RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS,
+    RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
+    RESPONSE_BUDGET_GRAPH_MAX_TOKENS,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS,
+    RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS,
+    RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+    RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+    RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
     SUPPORTED_EXTENSIONS,
 )
+from codesteer_atlas.context import (  # noqa: E402
+    VALID_INTENTS,
+    build_context,
+    context_cut_once,
+    context_minimal_envelope,
+)
+from codesteer_atlas.context_optimization import (  # noqa: E402
+    build_class_outline,
+    compact_context_payload,
+    compact_search_envelope,
+    context_optimization_status,
+    decode_expand_ref,
+    deduplicate_results,
+    expand_outline_enabled,
+    project_compact_search_results,
+    record_selection_usage,
+    resolve_response_profile,
+    select_conservative,
+    select_within_top_k,
+    validate_expand_refs,
+)
 from codesteer_atlas.embeddings import FASTEMBED_MODEL_NAME, EmbeddingEngine  # noqa: E402
-from codesteer_atlas.graph import bfs_path, explain, hubs, load_graph  # noqa: E402
+from codesteer_atlas.graph import (  # noqa: E402
+    affected,
+    bfs_path,
+    explain,
+    graph_cut_once,
+    graph_minimal_envelope,
+    hubs,
+    load_graph,
+)
 from codesteer_atlas.indexer import (  # noqa: E402
     get_git_head_sha,
     index_workspace,
@@ -59,10 +116,24 @@ from codesteer_atlas.indexer import (  # noqa: E402
 from codesteer_atlas.locking import is_reindex_locked  # noqa: E402
 from codesteer_atlas.markdown_links import (  # noqa: E402
     extract_markdown_link_targets,
-    slugify_heading,
+    resolve_heading_section,
 )
+from codesteer_atlas.models import IndexManifest, RelevanceUsage, SearchOutcome  # noqa: E402
+from codesteer_atlas.origin import OriginResolver  # noqa: E402
 from codesteer_atlas.rationale import deserialize_rationale_ref  # noqa: E402
-from codesteer_atlas.storage import StorageBackend  # noqa: E402
+from codesteer_atlas.relevance import (  # noqa: E402
+    new_usage,
+    public_usage_fields,
+    relevance_cut_enabled,
+)
+from codesteer_atlas.relevance import status_block as relevance_status  # noqa: E402
+from codesteer_atlas.semantic import (  # noqa: E402
+    load_semantic_sidecar,
+    semantic_enabled,
+    semantic_index_state,
+)
+from codesteer_atlas.storage import StorageBackend, _version_tuple  # noqa: E402
+from codesteer_atlas.watcher import WATCH_DISABLED, start_watcher_if_enabled  # noqa: E402
 
 # 4. Patch defensivo no SDK do MCP: se um tool handler síncrono demorar o
 # suficiente para o cliente desistir (timeout) e enviar `notifications/cancelled`,
@@ -369,6 +440,10 @@ def _index_not_found_error(storage: "StorageBackend") -> FileNotFoundError:
 # resolvido por discovery ascendente a partir do CWD.
 INDEX_DIR_PATH = resolve_index_dir()
 
+# Estado do watcher (§3.1), reportado em `atlas_status`. Nasce "disabled": só
+# `main()` ativa, e apenas atrás de ATLAS_WATCH — importar o módulo não observa nada.
+WATCH_STATE = WATCH_DISABLED
+
 
 def _index_workspace_root() -> Path:
     """
@@ -382,7 +457,60 @@ def _index_workspace_root() -> Path:
     return resolved.parent if resolved.parent != resolved else resolved
 
 
-def get_status_data() -> dict:
+def _read_resolution_coverage(graph_path: Path) -> dict:
+    """
+    Bloco `resolution_coverage` do grafo (DECISÃO-005).
+
+    Índice anterior a 2.2.0 não tem o bloco: responde `unknown` com o motivo, nunca
+    listas vazias — uma lista vazia se leria como "nada a resolver", que é exatamente
+    o índice antigo se apresentando como se tivesse resolução (Princípio VI).
+    """
+    unknown = {"status": "unknown", "reason": "index_version_below_2_2_0"}
+    if not graph_path.exists():
+        return unknown
+    try:
+        with open(graph_path, "r", encoding="utf-8") as f:
+            coverage = json.load(f).get("resolution_coverage")
+    except Exception as e:
+        print(f"[atlas] Falha ao ler resolution_coverage de graph.json: {e}", file=sys.stderr)
+        return unknown
+    return coverage if isinstance(coverage, dict) else unknown
+
+
+def _semantic_status(storage: StorageBackend, ctx: "Optional[Context]" = None, error: Optional[Exception] = None) -> dict:
+    enabled = semantic_enabled()
+    origin, egress = OriginResolver(ctx=ctx).describe()
+    sidecar = load_semantic_sidecar(storage.index_dir)
+    reason: Optional[str]
+    if error is not None or not storage.exists():
+        index, reason = "absent", "index_missing" if error is None else "manifest_unreadable"
+    else:
+        try:
+            index, reason = semantic_index_state(storage.index_dir, storage.get_manifest())
+        except Exception:
+            index, reason = "absent", "manifest_unreadable"
+    return {
+        "enabled": enabled,
+        "origin": origin,
+        "egress": egress,
+        "index": index,
+        **({"index_reason": reason} if reason else {}),
+        "last_generation": (sidecar or {}).get("last_generation"),
+    }
+
+
+def _observability_status_block() -> dict:
+    """
+    Bloco `observability` de `atlas_status`: AUSENTE quando
+    `ATLAS_OBSERVABILITY` não é `"1"` (DOD3) — nunca `{"enabled": false}`, para
+    não sugerir que existe estado a inspecionar quando não há nenhum.
+    """
+    if not observability.observability_enabled():
+        return {}
+    return {"observability": observability.get_observability_status()}
+
+
+def get_status_data(ctx: "Optional[Context]" = None) -> dict:
     """Função auxiliar para obter os metadados e status de diagnóstico do índice."""
     storage = StorageBackend(index_dir=INDEX_DIR_PATH)
     reindexing = is_reindex_locked(INDEX_DIR_PATH)
@@ -406,6 +534,12 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": False,
             "graph_viewer_path": None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
+            **_observability_status_block(),
         }
 
     try:
@@ -434,6 +568,12 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": graph_path.exists(),
             "graph_viewer_path": str(graph_viewer_path.resolve()) if graph_viewer_path.exists() else None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
+            **_observability_status_block(),
         }
     except Exception as e:
         print(f"Erro ao ler diagnóstico do índice: {e}", file=sys.stderr)
@@ -444,7 +584,64 @@ def get_status_data() -> dict:
             "reindexing": reindexing,
             "graph_available": False,
             "graph_viewer_path": None,
+            "resolution_coverage": _read_resolution_coverage(graph_path),
+            "watch": WATCH_STATE,
+            "semantic": _semantic_status(storage, ctx, e),
+            "relevance": relevance_status(),
+            "context_optimization": context_optimization_status(),
+            **_observability_status_block(),
         }
+
+
+def _finish_observed(tool: str, start: float, text: str, *, extra: Optional[dict] = None) -> str:
+    """
+    Publica um evento de observabilidade de sucesso para `tool` quando
+    `ATLAS_OBSERVABILITY=1`, medindo a duração (relógio monotônico) desde
+    `start` até aqui — já incluindo enriquecimento, corte e contagem de
+    tokens; a persistência do evento em si fica FORA dessa janela (D1).
+    Nunca altera `text` nem propaga falha própria: erro de observabilidade
+    nunca substitui o resultado de negócio da tool.
+    """
+    if not observability.observability_enabled():
+        return text
+    try:
+        duration_ms = (time.monotonic() - start) * 1000
+        extra = dict(extra or {})
+        warnings = extra.pop("warnings", []) or []
+        truncated = extra.pop("truncated", bool(warnings))
+        measurement = response_budget.measure_response(text)
+        event = observability.build_event(
+            tool=tool,
+            outcome="success",
+            duration_ms=duration_ms,
+            measurement=measurement,
+            truncated=truncated,
+            warnings=warnings,
+            extra=extra,
+        )
+        observability.record_event(INDEX_DIR_PATH, event)
+    except Exception as e:
+        print(f"[atlas] Observabilidade: falha ao registrar evento de {tool}: {e}", file=sys.stderr)
+    return text
+
+
+def _finish_observed_error(
+    tool: str, start: float, error: BaseException, *, extra: Optional[dict] = None
+) -> None:
+    """Publica o evento de erro simétrico a `_finish_observed`; nunca propaga."""
+    if not observability.observability_enabled():
+        return
+    try:
+        duration_ms = (time.monotonic() - start) * 1000
+        event = observability.build_event(
+            tool=tool, outcome="error", duration_ms=duration_ms, error=error, extra=extra
+        )
+        observability.record_event(INDEX_DIR_PATH, event)
+    except Exception as e:
+        print(
+            f"[atlas] Observabilidade: falha ao registrar evento de erro de {tool}: {e}",
+            file=sys.stderr,
+        )
 
 
 def _resolve_note_candidates(name_to_paths: dict, key: str) -> list[str]:
@@ -470,6 +667,8 @@ def atlas_search(
     path_prefix: Optional[str] = None,
     include_content: bool = False,
     limit: Optional[int] = None,
+    structural: bool = False,
+    response_profile: str = "default",
     ctx: "Context | None" = None,
 ) -> str:
     """
@@ -489,6 +688,15 @@ def atlas_search(
     not exist yet, this raises an actionable error explaining how to build it (see
     `atlas_index`).
 
+    Omit response_profile to respect the operator configuration. Do not select
+    "full" routinely: it overrides ATLAS_CONTEXT_OPTIMIZATION even when enabled.
+    Start with metadata and expand only symbols needed to close an evidence gap.
+    Start with only one or two directly relevant symbols; inspect their contents
+    before expanding helpers, types or additional results. Do not expand every
+    search hit automatically. Stop when the task has sufficient evidence.
+    Use atlas_expand(refs) for omitted content; use "full" only when explicitly
+    requested or when fields omitted by the compact format are required.
+
     Args:
         query: Natural language description or exact symbols to find.
         top_k: Max results, 1-50. Defaults to 5.
@@ -496,18 +704,36 @@ def atlas_search(
         language: Optional language filter (e.g. 'python', 'javascript', 'go').
         path_prefix: Optional path prefix filter (e.g. 'src/controllers').
         include_content: When true, includes each result's 'content'. Defaults to false
-            (metadata/location only) to save tokens.
+            (metadata/location only) to save tokens. Compact profile never turns content on.
         limit: Alias for 'top_k'; overrides it when provided.
+        structural: When true, adds a graph spreading-activation arm to the RRF fusion
+            for this call only. Defaults to false (opt-in; does not change default ranking).
+        response_profile: `default` follows ATLAS_CONTEXT_OPTIMIZATION; `full` keeps the
+            current delivery format; `compact` applies deterministic compaction and,
+            when ATLAS_RELEVANCE is on, Jev's top_k cut (or the conservative selection
+            with ATLAS_RELEVANCE_CUT=0).
 
     Returns:
         JSON with `results` (each: file_path, lines, symbol, type, language, score, repo,
         `match_arms`, and `content` only when include_content=true),
         `total_chunks_searched`, and `query_time_ms`.
 
+        Compact profile omits score/match_arms/language/timing from results and adds
+        expansion `ref`s; use `atlas_expand` for omitted content. When Jev evaluated the
+        hits, a compact response may hold fewer than top_k results: `omitted.relevance`
+        counts hits Jev judged more likely irrelevant than direct evidence. Pass
+        response_profile="full" only if you need those hits back.
+
+        A commit message result has `type="commit"`, `language="git"`, a `commit`
+        object (id, repo, subject, body, dates, files_touched, is_revert,
+        reverted_commit_id) and no code lines — it is matched to files through
+        `commit.files_touched`.
+
         `match_arms` names which arms of the hybrid search retrieved the chunk:
-        `vector` (semantic) and/or `fts` (BM25). A hit found by both arms had consensus
-        between them; a hit from a single arm is weaker evidence and worth confirming
-        before acting on it.
+        `vector` (semantic), `fts` (BM25), and `graph` (structural, only when
+        structural=true). A hit found by both vector and fts had consensus between them;
+        a hit from a single arm is weaker evidence and worth confirming before acting
+        on it.
 
         Markdown results may also include `markdown_references`
         ({file_path, anchor, resolved_section}) for links to other `.md` files.
@@ -516,51 +742,122 @@ def atlas_search(
         A `warnings` array appears ONLY when the hybrid search ran degraded:
         `fts_unavailable` (BM25 arm failed — results are vector-only, so exact symbol
         and error-string matches may be missing), `vector_search_unavailable`
-        (semantic arm failed — results are keyword-only, so paraphrased queries may miss).
-        Treat a degraded result as incomplete: reindex with `atlas_index(full=true)`
-        before concluding that something does not exist in the codebase. When both arms
+        (semantic arm failed — results are keyword-only, so paraphrased queries may miss),
+        `cross_encoder_unavailable` (ATLAS_RERANK_MODEL was set but the model failed to
+        load — order fell back to lexical rerank), `structural_arm_unavailable`
+        (structural=true but graph.json is missing or unreadable — the graph arm was
+        skipped), `git_history_unavailable` (the local Git history layer is missing or
+        unreadable — code results are unaffected),
+        `semantic_layer_unavailable` (the opt-in semantic index is not
+        ready) and `semantic_arm_unavailable` (the semantic vector arm failed).
+        The last two keep vector+FTS results available but indicate that semantic
+        recall is incomplete. Opt-in Jev relevance (`ATLAS_RELEVANCE=1`) may add
+        `relevance_unavailable`, `relevance_invalid_response`,
+        `relevance_low_confidence`, `relevance_budget_exceeded` or
+        `relevance_cost_unknown`. When Jev fails or times out, ranking falls back
+        to the local reranker — do NOT reindex solely for a Jev warning.
+        `relevance_cost_unknown` only means billing was unavailable; it is not by
+        itself a ranking degradation. Treat index-arm degradation (fts/vector/
+        semantic/structural) as incomplete: reindex with `atlas_index(full=true)`
+        before concluding that something does not exist. When both original arms
         fail the call raises instead of returning an empty result set.
     """
-    start_time = time.time()
+    _obs_start = time.monotonic()
+    usage = new_usage()
+    extra: dict[str, Any] = {
+        "top_k": top_k,
+        "include_content": include_content,
+        "response_profile": response_profile,
+    }
+    try:
+        return _atlas_search_impl(
+            query=query,
+            top_k=top_k,
+            repo=repo,
+            language=language,
+            path_prefix=path_prefix,
+            include_content=include_content,
+            limit=limit,
+            structural=structural,
+            response_profile=response_profile,
+            ctx=ctx,
+            relevance_usage=usage,
+            _obs_start=_obs_start,
+        )
+    except Exception as e:
+        extra["relevance_usage"] = public_usage_fields(usage)
+        _finish_observed_error(
+            "atlas_search",
+            _obs_start,
+            e,
+            extra=extra,
+        )
+        raise
+    finally:
+        observability.log_relevance_cost(usage)
 
-    if limit is not None:
-        top_k = limit
 
-    # Validação obrigatória da entrada [V01]
-    if not query or not query.strip():
-        raise ValueError("O parâmetro 'query' é obrigatório e não pode ser vazio.")
+def _search_cut_once(payload: dict) -> bool:
+    """
+    Corte de `atlas_search` (§4.1 do plano observabilidade-tokens-consultas):
+    remove UM resultado inteiro da cauda por vez — nunca mutila `content`/
+    `commit`/paths/símbolos internamente — preservando ordem e identidade dos
+    sobreviventes.
+    """
+    results = payload.get("results")
+    if isinstance(results, list) and results:
+        results.pop()
+        truncated = dict(payload.get("truncated") or {})
+        truncated["results"] = truncated.get("results", 0) + 1
+        payload["truncated"] = truncated
+        if "omitted" in payload:
+            payload["omitted"]["budget"] = truncated["results"]
+        warnings = set(payload.get("warnings") or [])
+        warnings.add("truncated_for_budget")
+        payload["warnings"] = sorted(warnings)
+        return True
+    return False
 
-    # Validação do limite de resultados [V02, L01]
-    if top_k < 1 or top_k > 50:
-        raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
 
-    _resolve_index_dir_via_roots(ctx)
-    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
-    if not storage.exists():
-        raise _index_not_found_error(storage)
+def _search_minimal_envelope(payload: dict) -> dict:
+    """
+    Envelope mínimo de `atlas_search`: mesmo com `results=[]`, `truncated.results`
+    declara quantos resultados existiam — nunca finge ausência de correspondências
+    quando o corte, não a busca, é a causa (guardrail do IPD/D3).
+    """
+    already_truncated = (payload.get("truncated") or {}).get("results", 0)
+    total_results = len(payload.get("results") or []) + already_truncated
+    warnings = set(payload.get("warnings") or [])
+    warnings.add("truncated_for_budget")
+    minimal = {
+        "results": [],
+        "total_chunks_searched": payload.get("total_chunks_searched"),
+        "query_time_ms": payload.get("query_time_ms"),
+        "truncated": {"results": total_results},
+        "warnings": sorted(warnings),
+    }
+    if "omitted" in payload:
+        minimal["omitted"] = {**payload["omitted"], "budget": total_results}
+    return minimal
 
-    # Coleta filtros informados
-    filters = {}
-    if repo:
-        filters["repo"] = repo
-    if language:
-        filters["language"] = language
-    if path_prefix:
-        filters["path_prefix"] = path_prefix
 
-    # Inicializa o EmbeddingEngine e gera o embedding da query (Lazy Loading) [GA-07]
-    embedding_engine = EmbeddingEngine()
-    query_vector = embedding_engine.encode_single(query)
-
-    # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
-    outcome = storage.search_hybrid(
-        query_vector=query_vector, query_text=query, filters=filters, top_k=top_k
-    )
-    results = outcome.results
-
-    query_time_ms = (time.time() - start_time) * 1000
-    manifest = storage.get_manifest()
-
+def assemble_search_payload(
+    storage: "StorageBackend",
+    results: list,
+    manifest,
+    *,
+    include_content: bool,
+    query_time_ms: float,
+    warnings: Optional[list] = None,
+) -> dict:
+    """
+    Monta o payload de `atlas_search` ANTES do orçamento de resposta: serializa
+    cada resultado recuperado (incluindo o enriquecimento markdown/rationale),
+    mas não aplica corte nem mede tokens — isso é `response_budget.finalize_response`
+    na tool MCP. Compartilhado com `scripts/eval_search.py --delivery` (§4.4 do
+    plano observabilidade-tokens-consultas) para o harness nunca duplicar a
+    regra de serialização do servidor.
+    """
     # Cache local de seções por arquivo referenciado, para evitar lookups
     # repetidos ao resolver #anchor de múltiplos links para o mesmo .md [F]
     sections_cache: dict = {}
@@ -575,6 +872,21 @@ def atlas_search(
 
     serialized_results = []
     for r in results:
+        # Resultado histórico (F5.1): sem linhas de código; a associação a arquivos
+        # é `commit.files_touched` e a mensagem só vai quando include_content=true
+        if r.type == "commit" and r.commit is not None:
+            commit_item = {
+                "type": "commit",
+                "language": r.language,
+                "score": r.score,
+                "repo": r.repo,
+                "match_arms": r.match_arms,
+                "commit": r.commit.model_dump(),
+            }
+            if include_content:
+                commit_item["content"] = r.content
+            serialized_results.append(commit_item)
+            continue
         item = {
             "file_path": r.file_path,
             "lines": [r.start_line, r.end_line],
@@ -603,12 +915,10 @@ def atlas_search(
                             sections_cache[target.file_path] = storage.get_sections_by_file_path(
                                 target.file_path
                             )
-                        target_slug = slugify_heading(target.anchor)
-                        for section in sections_cache[target.file_path]:
-                            if slugify_heading(section["scope_name"]) == target_slug:
-                                resolved_section = section["scope_name"]
-                                break
-                    markdown_ref = {
+                        resolved_section = resolve_heading_section(
+                            target.anchor, sections_cache[target.file_path]
+                        )
+                    markdown_ref: dict = {
                         "file_path": target.file_path,
                         "anchor": target.anchor,
                         "resolved_section": resolved_section,
@@ -657,10 +967,222 @@ def atlas_search(
 
     # Só presente quando algum braço da busca falhou: a ausência do campo é o
     # sinal de que o resultado veio da busca híbrida completa
-    if outcome.warnings:
-        response["warnings"] = sorted(set(outcome.warnings))
+    if warnings:
+        response["warnings"] = sorted(set(warnings))
 
-    return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
+    return response
+
+
+def prepare_search_delivery(
+    storage: StorageBackend,
+    manifest: IndexManifest,
+    outcome: SearchOutcome,
+    *,
+    query: str = "",
+    top_k: int = 10,
+    include_content: bool = False,
+    profile: str = "full",
+    query_time_ms: float = 0.0,
+    budget: Optional[response_budget.ResponseBudget] = None,
+    optimization_stage: str = "selection",
+    relevance_usage: Optional[RelevanceUsage] = None,
+) -> tuple[str, response_budget.ResponseMeasurement]:
+    """Montagem única para MCP e avaliação; não recupera nem avalia candidatos."""
+    if profile not in {"full", "compact"} or optimization_stage not in {"projection", "dedup", "selection"}:
+        raise ValueError("Perfil ou estágio de entrega inválido")
+    relevance_usage = relevance_usage if relevance_usage is not None else RelevanceUsage(search_id="delivery")
+    results = list(outcome.results)
+    warnings = list(outcome.warnings or [])
+    pool = getattr(outcome, "candidate_pool", None)
+    recovered = list(pool) if pool is not None else list(results)
+    local_fallback = getattr(outcome, "local_fallback", None) or recovered
+
+    omitted = {"redundancy": 0, "relevance": 0, "budget": 0}
+
+    if profile == "compact":
+        candidates = recovered if optimization_stage != "projection" else results
+        results = list(candidates)
+        evaluations = getattr(outcome, "pool_evaluations", None) or outcome.evaluations
+        history_slots = top_k
+        if evaluations and optimization_stage == "selection" and relevance_cut_enabled():
+            # top_k vira teto: dedup, janela na ordem Jev e corte sem repor; commits só
+            # ocupam vagas que o pool já não preenchia.
+            deduped = deduplicate_results(results)
+            omitted["redundancy"] = deduped.removed_by_redundancy
+            selected = select_within_top_k(
+                deduped.results, query, evaluations, top_k=top_k,
+                local_fallback=local_fallback,
+            )
+            results = selected.results
+            omitted["relevance"] = selected.removed_by_relevance
+            warnings.extend(selected.warnings)
+            history_slots = max(len(results), top_k - selected.removed_by_relevance)
+        else:
+            if evaluations and optimization_stage == "selection":
+                selected = select_conservative(
+                    results, query, evaluations, top_k=len(results),
+                    local_fallback=local_fallback,
+                )
+                results = selected.results
+                omitted["relevance"] = selected.removed_by_relevance
+                warnings.extend(selected.warnings)
+            if optimization_stage != "projection":
+                deduped = deduplicate_results(results)
+                results = deduped.results
+                omitted["redundancy"] = deduped.removed_by_redundancy
+        results = results[:top_k]
+        if pool is not None and optimization_stage != "projection":
+            results = storage._merge_typed(results, outcome.history_candidates, history_slots)
+        record_selection_usage(
+            relevance_usage,
+            recovered=recovered,
+            selected=results,
+            removed_by_redundancy=omitted["redundancy"],
+            removed_by_relevance=omitted["relevance"],
+        )
+        items, envelope_repo = project_compact_search_results(
+            results,
+            include_content=include_content,
+            file_hashes=manifest.files,
+        )
+        response = compact_search_envelope(
+            results=items,
+            repo=envelope_repo,
+            warnings=warnings,
+            omitted=omitted,
+            total_chunks_searched=manifest.total_chunks,
+        )
+        budget = budget or response_budget.ResponseBudget(
+            "search",
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_CHARS,
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_SEARCH_COMPACT_MAX_TOKENS,
+        )
+    else:
+        response = assemble_search_payload(
+            storage,
+            results,
+            manifest,
+            include_content=include_content,
+            query_time_ms=query_time_ms,
+            warnings=warnings,
+        )
+        budget = budget or response_budget.ResponseBudget(
+            "search",
+            RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+            RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+            RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+        )
+
+    text, measurement = response_budget.finalize_response(
+        response,
+        budget,
+        cut_once=_search_cut_once,
+        minimal_envelope=_search_minimal_envelope,
+        budget_block="on_cut" if profile == "compact" else "always",
+    )
+    relevance_usage.bytes_delivered = measurement.bytes
+    relevance_usage.removed_by_budget = (json.loads(text).get("truncated") or {}).get("results", 0)
+    return text, measurement
+
+
+def _atlas_search_impl(
+    query: str,
+    top_k: int,
+    repo: Optional[str],
+    language: Optional[str],
+    path_prefix: Optional[str],
+    include_content: bool,
+    limit: Optional[int],
+    structural: bool,
+    response_profile: str,
+    ctx: "Context | None",
+    relevance_usage,
+    _obs_start: float,
+) -> str:
+    start_time = time.time()
+
+    if limit is not None:
+        top_k = limit
+
+    # Validação obrigatória da entrada [V01]
+    if not query or not query.strip():
+        raise ValueError("O parâmetro 'query' é obrigatório e não pode ser vazio.")
+
+    # Validação do limite de resultados [V02, L01]
+    if top_k < 1 or top_k > 50:
+        raise ValueError("O parâmetro 'top_k' deve estar entre 1 e 50.")
+
+    profile = resolve_response_profile(response_profile)
+
+    _resolve_index_dir_via_roots(ctx)
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+
+    # Coleta filtros informados
+    filters = {}
+    if repo:
+        filters["repo"] = repo
+    if language:
+        filters["language"] = language
+    if path_prefix:
+        filters["path_prefix"] = path_prefix
+
+    # Inicializa o EmbeddingEngine e gera o embedding da query (Lazy Loading) [GA-07]
+    embedding_engine = EmbeddingEngine()
+    query_vector = embedding_engine.encode_single(query)
+
+    # Executa a busca híbrida (cosseno + BM25 FTS + RRF) no LanceDB
+    outcome = storage.search_hybrid(
+        query_vector=query_vector,
+        query_text=query,
+        filters=filters,
+        top_k=top_k,
+        structural=structural,
+        relevance_usage=relevance_usage,
+        include_candidates=(profile == "compact"),
+    )
+    text, measurement = prepare_search_delivery(
+        storage, storage.get_manifest(), outcome, query=query, top_k=top_k,
+        include_content=include_content, profile=profile,
+        query_time_ms=(time.time() - start_time) * 1000,
+        relevance_usage=relevance_usage,
+    )
+    final = json.loads(text)
+    omitted_budget = relevance_usage.removed_by_budget
+    return _finish_observed(
+        "atlas_search",
+        _obs_start,
+        text,
+        extra={
+            "top_k": top_k,
+            "include_content": include_content,
+            "response_profile": profile,
+            "results_returned": len(final.get("results") or []),
+            "results_omitted": omitted_budget,
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+            "relevance_usage": public_usage_fields(relevance_usage),
+        },
+    )
+
+
+def _dump_graph_payload(
+    payload: dict, *, mode: str, tool_start: float, extra: Optional[dict] = None
+) -> str:
+    budget = response_budget.ResponseBudget(
+        "graph", GRAPH_RESPONSE_MAX_CHARS, GRAPH_RESPONSE_MAX_CHARS, RESPONSE_BUDGET_GRAPH_MAX_TOKENS
+    )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=graph_cut_once, minimal_envelope=graph_minimal_envelope
+    )
+    final = json.loads(text)
+    observed_extra = dict(extra or {})
+    observed_extra["mode"] = mode
+    observed_extra["warnings"] = final.get("warnings") or []
+    observed_extra["truncated"] = bool(final.get("truncated"))
+    return _finish_observed("atlas_graph", tool_start, text, extra=observed_extra)
 
 
 @app.tool()
@@ -672,26 +1194,52 @@ def atlas_graph(
     ctx: "Context | None" = None,
 ) -> str:
     """
-    Query the derived knowledge graph for hubs, paths, or neighborhood explanations.
+    Query the derived knowledge graph for hubs, paths, neighborhood explanations,
+    or the reverse-impact radius of a node.
 
-    Call this directly when the question is about connectivity, rationale, or
-    centrality in the indexed workspace. It reads the derived `graph.json`
-    produced by `atlas_index`; it does not rebuild the graph itself.
+    Call this directly when the question is about connectivity, rationale,
+    centrality, or "what breaks if I change this?" in the indexed workspace.
+    It reads the derived `graph.json` produced by `atlas_index`; it does not
+    rebuild the graph itself.
 
     Args:
-        mode: One of `hubs`, `path`, or `explain`.
-        target: Required for `path` and `explain`. Accepts exact node id, exact label,
-            or a unique suffix.
+        mode: One of `hubs`, `path`, `explain`, or `affected`.
+        target: Required for `path`, `explain`, and `affected`. Accepts exact node id,
+            exact label, or a unique suffix.
         source: Required for `path`. Accepts exact node id, exact label, or a unique suffix.
         top_n: Number of hubs to return for `hubs` mode. Must be between 1 and 50.
 
     Returns:
         JSON string for the selected mode.
+
+        When the workspace has an indexed Git history, the graph also holds
+        `commit` nodes linked to the symbols they changed by `touches` edges.
+        `explain` groups those commits under `neighbors.commit` (with
+        `edge_kind="touches"`) and `path` may traverse a `touches` edge, so a
+        symbol can be reached from a commit and vice versa. `affected` and `hubs`
+        ignore both: a commit is history, not a code dependency, and `touches`
+        never contributes to node degree.
     """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_graph_impl(mode, target, source, top_n, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_graph", _obs_start, e, extra={"mode": mode})
+        raise
+
+
+def _atlas_graph_impl(
+    mode: str,
+    target: Optional[str],
+    source: Optional[str],
+    top_n: int,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
     _resolve_index_dir_via_roots(ctx)
 
-    if mode not in {"hubs", "path", "explain"}:
-        raise ValueError("O parâmetro 'mode' deve ser 'hubs', 'path' ou 'explain'.")
+    if mode not in {"hubs", "path", "explain", "affected"}:
+        raise ValueError("O parâmetro 'mode' deve ser 'hubs', 'path', 'explain' ou 'affected'.")
     if top_n < 1 or top_n > 50:
         raise ValueError("O parâmetro 'top_n' deve estar entre 1 e 50.")
 
@@ -699,20 +1247,408 @@ def atlas_graph(
 
     if mode == "hubs":
         payload = {"mode": "hubs", "items": hubs(graph, top_n)}
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
     if mode == "path":
         if not source or not target:
             raise ValueError("Os parâmetros 'source' e 'target' são obrigatórios em mode='path'.")
         payload = bfs_path(graph, source, target, max_hops=GRAPH_PATH_MAX_HOPS)
         payload["mode"] = "path"
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
+
+    if mode == "affected":
+        if not target:
+            raise ValueError("O parâmetro 'target' é obrigatório em mode='affected'.")
+        payload = affected(graph, target)
+        payload["mode"] = "affected"
+        return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
 
     if not target:
         raise ValueError("O parâmetro 'target' é obrigatório em mode='explain'.")
     payload = explain(graph, target)
     payload["mode"] = "explain"
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return _dump_graph_payload(payload, mode=mode, tool_start=_obs_start)
+
+
+@app.tool()
+def atlas_context(
+    target: str,
+    intent: str,
+    response_profile: str = "default",
+    ctx: "Context | None" = None,
+) -> str:
+    """
+    Assemble a task-oriented context pack for a symbol or file in one call.
+
+    Use this first when you already know which symbol or file you will edit,
+    debug, review, or understand. It composes neighborhood, impact radius,
+    inferred tests and brief layer under a token budget so you do not need
+    to chain atlas_graph / atlas_brief / atlas_search yourself.
+
+    Omit response_profile to respect the operator configuration. An explicit
+    "full" overrides ATLAS_CONTEXT_OPTIMIZATION; use it only when requested or
+    when the full representation is required.
+
+    Args:
+        target: Node id, exact label, or unique suffix (same resolution as atlas_graph).
+        intent: One of `edit`, `debug`, `review`, or `understand`.
+        response_profile: `default` follows ATLAS_CONTEXT_OPTIMIZATION; `full` keeps
+            the current format; `compact` drops duplicated target/symbol and
+            layer/brief_layer representations. Does not call Jev.
+
+    Returns:
+        JSON string with `target`, `intent`, `sections`, optional `truncated`,
+        `warnings` and `budget` (compact profile: `budget` limits appear only when
+        something was cut).
+
+        Only `intent="debug"` carries `sections.recent_history`: commits linked to the
+        target by `touches`, newest first, each with `commit`, `via`, optional
+        `via_location` and `stale`. Its degradation is declared in `warnings` as
+        `git_history_unavailable`, `git_history_partial`, `git_history_stale` or
+        `git_history_empty`.
+    """
+    # @MindSpec: Input target+intent | Output JSON ≤ CONTEXT_RESPONSE_MAX_CHARS | Error ValueError / índice ausente
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_context_impl(target, intent, response_profile, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_context", _obs_start, e, extra={"intent": intent})
+        raise
+
+
+def _atlas_context_impl(
+    target: str,
+    intent: str,
+    response_profile: str,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
+    _resolve_index_dir_via_roots(ctx)
+
+    if not target or not str(target).strip():
+        raise ValueError("O parâmetro 'target' é obrigatório.")
+    if intent not in VALID_INTENTS:
+        raise ValueError(
+            "O parâmetro 'intent' deve ser 'edit', 'debug', 'review' ou 'understand'."
+        )
+
+    profile = resolve_response_profile(response_profile)
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+
+    graph = load_graph(INDEX_DIR_PATH)
+    payload = build_context(
+        graph,
+        target=target,
+        intent=intent,
+        manifest=storage.get_manifest(),
+        brief=load_brief(INDEX_DIR_PATH),
+        semantic_enabled=semantic_enabled(),
+        semantic_ready=semantic_index_state(INDEX_DIR_PATH, storage.get_manifest())[0] == "ready",
+        semantic_sidecar=load_semantic_sidecar(INDEX_DIR_PATH),
+        purpose_lookup=storage.lookup_purpose,
+        history_lookup=storage.lookup_commits,
+        history_state=storage.get_history_state(),
+    )
+    if profile == "compact":
+        payload = compact_context_payload(payload)
+        budget = response_budget.ResponseBudget(
+            "context",
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_BYTES,
+            RESPONSE_BUDGET_CONTEXT_COMPACT_MAX_TOKENS,
+        )
+    else:
+        budget = response_budget.ResponseBudget(
+            "context",
+            CONTEXT_RESPONSE_MAX_CHARS,
+            CONTEXT_RESPONSE_MAX_CHARS,
+            RESPONSE_BUDGET_CONTEXT_MAX_TOKENS,
+        )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=context_cut_once, minimal_envelope=context_minimal_envelope,
+        budget_block="on_cut" if profile == "compact" else "always",
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_context",
+        _obs_start,
+        text,
+        extra={
+            "intent": intent,
+            "response_profile": profile,
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+        },
+    )
+
+
+@app.tool()
+def atlas_expand(
+    refs: list[str],
+    include_content: bool = True,
+    ctx: "Context | None" = None,
+) -> str:
+    """
+    Expand compact search references by chunk id — no embedding and no Jev.
+
+    Start with only one or two refs, then inspect the response before expanding
+    more. Each additional ref must fill a specific evidence gap. Use three to five
+    only when the task already requires comparing those symbols; never open all
+    hits automatically. Stop when there is enough evidence to answer.
+
+    Pass up to five `ref` values from a compact `atlas_search` response. Each ref
+    identifies a chunk in the current index (not a historical snapshot).
+    Legacy Base64 references are also supported. If the file changed or the
+    chunk is gone, the item is marked obsolete without returning stale lines.
+    Content comes from the original symbol's indexed line range, including text
+    truncated during indexing. If content_complete is false, pass next_ref to
+    atlas_expand again and concatenate content in content_range order (character
+    offsets, exclusive end). Follow next_ref only if the remaining content is
+    needed; a complete symbol requires all its pages. Continuations are tied to
+    the file hash and need no session cache.
+
+    A large class comes back as its header plus `outline`: the class's methods,
+    each with its own `ref` and line range. Expand only the methods you need;
+    follow next_ref only if you really need the whole class body.
+
+    Args:
+        refs: Start with 1–2 search refs; add only needed evidence (hard limit 5).
+        include_content: When true (default), include symbol content when it fits
+            the search response budget.
+
+    Returns:
+        JSON with `results` (location, optional content, optional obsolescence
+        warnings); `budget` appears only when the page was cut to fit.
+    """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_expand_impl(refs, include_content, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error(
+            "atlas_expand",
+            _obs_start,
+            e,
+            extra={"refs_count": len(refs) if isinstance(refs, list) else 0},
+        )
+        raise
+
+
+def prepare_expand_delivery(
+    storage: StorageBackend, workspace: Path, refs: list[str], *, include_content: bool = True,
+    budget: Optional[response_budget.ResponseBudget] = None,
+) -> tuple[str, response_budget.ResponseMeasurement]:
+    """Mesma validação e serialização para expansões no MCP e no benchmark."""
+    from codesteer_atlas.rationale import decode_references_json, deserialize_rationale_ref
+
+    validate_expand_refs(refs)
+    budget = budget or response_budget.ResponseBudget(
+        "search",
+        RESPONSE_BUDGET_SEARCH_MAX_CHARS,
+        RESPONSE_BUDGET_SEARCH_MAX_BYTES,
+        RESPONSE_BUDGET_SEARCH_MAX_TOKENS,
+    )
+    workspace = workspace.resolve()
+    manifest = storage.get_manifest()
+    items: list[dict] = []
+    warnings: list[str] = []
+
+    for ref in refs:
+        decoded = decode_expand_ref(ref)
+        if decoded is None:
+            items.append({"ref": ref, "status": "invalid_ref"})
+            warnings.append("expand_invalid_ref")
+            continue
+        chunk = storage.get_chunk_by_id(decoded["chunk_id"])
+        if chunk is None:
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "obsolete",
+                    "reason": "chunk_missing",
+                }
+            )
+            warnings.append("expand_obsolete")
+            continue
+        rel_path = chunk["file_path"]
+        abs_path = (workspace / rel_path).resolve()
+        if not abs_path.is_relative_to(workspace):
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "forbidden",
+                    "reason": "path_outside_workspace",
+                }
+            )
+            warnings.append("expand_path_outside_workspace")
+            continue
+        try:
+            source_bytes = abs_path.read_bytes()
+        except OSError:
+            source_bytes = None
+        current_hash = hashlib.sha256(source_bytes).hexdigest() if source_bytes is not None else None
+        expected = manifest.files.get(rel_path)
+        legacy_mismatch = (
+            decoded["file_hash"] is not None
+            and (decoded["file_hash"] != current_hash
+                 or (decoded["repo"] is not None and decoded["repo"] != chunk.get("repo")))
+        )
+        if not expected or current_hash != expected or legacy_mismatch:
+            items.append(
+                {
+                    "ref": ref,
+                    "status": "obsolete",
+                    "reason": "file_changed",
+                    "file_path": rel_path,
+                    "lines": [chunk["start_line"], chunk["end_line"]],
+                    "symbol": chunk["scope_name"],
+                }
+            )
+            warnings.append("expand_obsolete")
+            continue
+
+        entry: dict[str, Any] = {
+            "ref": ref,
+            "status": "ok",
+            "file_path": rel_path,
+            "lines": [chunk["start_line"], chunk["end_line"]],
+            "symbol": chunk["scope_name"],
+            "type": chunk["scope_type"],
+            "repo": chunk.get("repo"),
+        }
+        if include_content:
+            # Hash e conteúdo vêm dos mesmos bytes; não há segunda leitura sujeita a corrida.
+            assert source_bytes is not None
+            try:
+                # Linhas seguem LF do parser; preserva CRLF e separadores Unicode.
+                lines = source_bytes.decode("utf-8").split("\n")
+                source_lines = [line + "\n" for line in lines[:-1]] + [lines[-1]]
+            except UnicodeDecodeError:
+                items.append({"ref": ref, "status": "unavailable", "reason": "invalid_encoding"})
+                warnings.append("expand_invalid_encoding")
+                continue
+            start, end = chunk["start_line"], chunk["end_line"]
+            if start < 1 or end < start or end > len(source_lines):
+                items.append({"ref": ref, "status": "obsolete", "reason": "invalid_line_range"})
+                warnings.append("expand_obsolete")
+                continue
+            content = "".join(source_lines[start - 1:end])
+            offset = decoded.get("offset", 0)
+            if offset > len(content) or (offset and offset == len(content)):
+                items.append({"ref": ref, "status": "invalid_ref", "reason": "invalid_offset"})
+                warnings.append("expand_invalid_ref")
+                continue
+            outline = None
+            if offset == 0 and len(content) > EXPAND_OUTLINE_MIN_CHARS and expand_outline_enabled():
+                outline = build_class_outline(chunk, storage.get_chunks_in_range(rel_path, start, end))
+            if outline is not None:
+                # Classe grande: cabeçalho + métodos com `ref`; `next_ref` segue o corpo inteiro.
+                header_end, members = outline
+                header = "".join(source_lines[start - 1:header_end])
+                entry["content"] = header
+                entry["content_range"] = [0, len(header)]
+                entry["content_complete"] = False
+                entry["outline"] = members[:EXPAND_OUTLINE_MAX_MEMBERS]
+                if len(members) > EXPAND_OUTLINE_MAX_MEMBERS:
+                    entry["outline_omitted"] = len(members) - EXPAND_OUTLINE_MAX_MEMBERS
+                entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{len(header)}'
+                warnings.append("expand_class_outline")
+            else:
+                # Limita o trabalho do serializador antes da verificação final de bytes/tokens.
+                stop = min(len(content), offset + budget.max_chars)
+                entry["content"] = content[offset:stop]
+                entry["content_range"] = [offset, stop]
+                entry["content_complete"] = stop == len(content)
+                if stop < len(content):
+                    entry["next_ref"] = f'{decoded["chunk_id"]}:{expected}:{stop}'
+                    warnings.append("expand_more_available")
+
+        refs_json = chunk.get("references_json")
+        if refs_json:
+            rationale_refs = []
+            for raw_ref in decode_references_json(refs_json):
+                rationale_ref = deserialize_rationale_ref(raw_ref)
+                if rationale_ref is None:
+                    continue
+                if rationale_ref.kind == "annotation":
+                    rationale_refs.append(
+                        {
+                            "kind": "annotation",
+                            "key": rationale_ref.key,
+                            "text": rationale_ref.text,
+                        }
+                    )
+                else:
+                    rationale_refs.append(
+                        {"kind": rationale_ref.kind, "key": rationale_ref.key}
+                    )
+            if rationale_refs:
+                entry["rationale_refs"] = rationale_refs
+        items.append(entry)
+
+    payload: dict[str, Any] = {"results": items}
+    if warnings:
+        payload["warnings"] = sorted(set(warnings))
+
+    def cut_page(payload: dict) -> bool:
+        candidates = [item for item in payload["results"] if len(item.get("content", "")) > 1]
+        if not candidates:
+            return _search_cut_once(payload)
+        item = max(candidates, key=lambda item: len(item["content"]))
+        content = item["content"]
+        stop = len(content) // 2
+        # Prefere uma quebra de linha; linhas gigantes continuam por caracteres Unicode.
+        newline = content.rfind("\n", 0, stop)
+        if newline >= stop // 2:
+            stop = newline + 1
+        item["content"] = content[:stop]
+        item["content_range"][1] = item["content_range"][0] + stop
+        item["content_complete"] = False
+        decoded = decode_expand_ref(item["ref"])
+        assert decoded is not None
+        file_hash = manifest.files[item["file_path"]]
+        item["next_ref"] = f'{decoded["chunk_id"]}:{file_hash}:{item["content_range"][1]}'
+        payload["warnings"] = sorted(set(payload.get("warnings", [])) | {"expand_more_available"})
+        return True
+
+    text, _measurement = response_budget.finalize_response(
+        payload,
+        budget,
+        cut_once=cut_page,
+        minimal_envelope=_search_minimal_envelope,
+        budget_block="on_cut",
+    )
+    return text, _measurement
+
+
+def _atlas_expand_impl(
+    refs: list[str],
+    include_content: bool,
+    ctx: "Context | None",
+    _obs_start: float,
+) -> str:
+    _resolve_index_dir_via_roots(ctx)
+    storage = StorageBackend(index_dir=INDEX_DIR_PATH)
+    if not storage.exists():
+        raise _index_not_found_error(storage)
+    text, _measurement = prepare_expand_delivery(
+        storage, _index_workspace_root(), refs, include_content=include_content,
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_expand",
+        _obs_start,
+        text,
+        extra={
+            "refs_count": len(refs),
+            "include_content": include_content,
+            "results_returned": len(final.get("results") or []),
+            "continuations_returned": sum(bool(item.get("next_ref")) for item in final.get("results", [])),
+            "content_complete_results": sum(item.get("content_complete") is True for item in final.get("results", [])),
+            "warnings": final.get("warnings") or [],
+        },
+    )
 
 
 @app.tool()
@@ -752,6 +1688,15 @@ def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
         JSON string with `identity`, `layers`, `entrypoints`, `hubs`, `warnings`,
         `is_stale` and `next` (suggested follow-up calls).
     """
+    _obs_start = time.monotonic()
+    try:
+        return _atlas_brief_impl(level, ctx, _obs_start)
+    except Exception as e:
+        _finish_observed_error("atlas_brief", _obs_start, e, extra={"level": level})
+        raise
+
+
+def _atlas_brief_impl(level: int, ctx: "Context | None", _obs_start: float) -> str:
     if level not in (0, 1):
         raise ValueError("O parâmetro 'level' deve ser 0 ou 1.")
 
@@ -769,13 +1714,43 @@ def atlas_brief(level: int = 1, ctx: "Context | None" = None) -> str:
             storage.get_manifest(), INDEX_DIR_PATH, _index_workspace_root()
         )
 
+    try:
+        brief_manifest = storage.get_manifest()
+    except Exception:
+        brief_manifest = None
     payload = render_brief(
         brief,
         level,
         current_git_sha=get_git_head_sha(_index_workspace_root()),
         computed_at_query_time=computed_at_query_time,
+        semantic_enabled=semantic_enabled(),
+        semantic_sidecar=load_semantic_sidecar(INDEX_DIR_PATH),
+        semantic_ready=bool(
+            brief_manifest
+            and semantic_index_state(INDEX_DIR_PATH, brief_manifest)[0] == "ready"
+        ),
     )
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    budget = response_budget.ResponseBudget(
+        "brief",
+        BRIEF_LEVEL0_MAX_CHARS if level == 0 else BRIEF_LEVEL1_MAX_CHARS,
+        BRIEF_LEVEL0_MAX_CHARS if level == 0 else BRIEF_LEVEL1_MAX_CHARS,
+        RESPONSE_BUDGET_BRIEF0_MAX_TOKENS if level == 0 else RESPONSE_BUDGET_BRIEF1_MAX_TOKENS,
+    )
+    text, _measurement = response_budget.finalize_response(
+        payload, budget, cut_once=brief_cut_once, minimal_envelope=brief_minimal_envelope
+    )
+    final = json.loads(text)
+    return _finish_observed(
+        "atlas_brief",
+        _obs_start,
+        text,
+        extra={
+            "level": level,
+            "warnings": final.get("warnings") or [],
+            "truncated": bool(final.get("truncated")),
+        },
+    )
 
 
 @app.tool()
@@ -800,9 +1775,23 @@ def atlas_status(ctx: "Context | None" = None) -> str:
         `git_head_sha`, `is_stale` (true when the indexed git HEAD differs from the
         workspace's current HEAD), and `reindexing` (true when another process
         currently holds the reindex lock for this index).
+
+        Also `resolution_coverage`: which languages had their imports resolved and
+        how. Either `{scip: [...], treesitter: [...], none: [...], files_unresolved: N}`
+        — each language in exactly one tier, `none` meaning "indexed and searchable,
+        but mute about how it connects" — or `{status: "unknown", reason:
+        "index_version_below_2_2_0"}` for an index built before 2.2.0. Never trust an
+        absent tier as "nothing to resolve".
+
+        And `watch`: whether this server is watching the workspace for changes —
+        "active" (watching; edits trigger an incremental reindex after a debounce),
+        "disabled" (ATLAS_WATCH not set — the default), "unavailable" (ATLAS_WATCH
+        set but the optional `watchdog` dependency is not installed) or "failed"
+        (the observer could not start; see stderr). Only "active" means the index
+        keeps itself current while the server runs.
     """
     _resolve_index_dir_via_roots(ctx)
-    data = get_status_data()
+    data = get_status_data(ctx)
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -851,7 +1840,9 @@ def atlas_index(
         `pid`/`reason`/`error`, and `message`.
         sync ('paths' set, full=false): JSON with `workspace`, `indexed_paths`,
         `files_processed`, `files_skipped_unchanged`, `files_removed`,
-        `chunks_persisted`, `duration_s`, `git_head_sha`, and optional
+        `chunks_persisted`, `duration_s`, `git_head_sha`, `scip_status`
+        ("disabled" unless ATLAS_SCIP is set; also "toolchain_missing"|"timeout"|
+        "parse_failed"|"ok") with `scip_edges`, and optional
         `skipped_reason`/`message` if another process holds the reindex lock.
     """
     # Resolve o índice via MCP roots quando a resolução de startup caiu em fallback,
@@ -971,7 +1962,7 @@ def atlas_index(
 
         return json.dumps(response, separators=(",", ":"), ensure_ascii=False)
 
-    stats = index_workspace(workspace_path, INDEX_DIR_PATH, paths=paths, full=full)
+    stats = index_workspace(workspace_path, INDEX_DIR_PATH, paths=paths, full=full, ctx=ctx)
 
     response = {
         "workspace": str(workspace_path),
@@ -992,10 +1983,30 @@ def atlas_index(
         "graph_edges": stats.graph_edges,
         "graph_bytes": stats.graph_bytes,
         "graph_html_bytes": stats.graph_html_bytes,
+        # Princípio VI: a fase SCIP degrada (toolchain_missing/timeout/parse_failed)
+        # sem interromper a indexação — omiti-la aqui seria degradação silenciosa.
+        "scip_status": stats.scip_status,
+        "scip_edges": stats.scip_edges,
+        # Princípio VI: a fase histórica degrada (unavailable/partial/empty) sem
+        # interromper a indexação estrutural
+        "git_history_status": stats.git_history_status,
+        "git_history_commits": stats.git_history_commits,
+        "git_history_touches": stats.git_history_touches,
         "brief_status": stats.brief_status,
         "brief_bytes": stats.brief_bytes,
         "brief_layers": stats.brief_layers,
         "brief_entrypoints": stats.brief_entrypoints,
+        "semantic_status": stats.semantic_status,
+        "semantic_generated": stats.semantic_generated,
+        "semantic_reused": stats.semantic_reused,
+        "semantic_file_generated": stats.semantic_file_generated,
+        "semantic_file_reused": stats.semantic_file_reused,
+        "semantic_layer_generated": stats.semantic_layer_generated,
+        "semantic_layer_reused": stats.semantic_layer_reused,
+        "semantic_origin": stats.semantic_origin,
+        "semantic_egress": stats.semantic_egress,
+        "semantic_origins": getattr(stats, "semantic_origins", []),
+        "semantic_egresses": getattr(stats, "semantic_egresses", []),
     }
     if stats.files_failed:
         response["warning"] = (
@@ -1025,6 +2036,30 @@ def get_status_resource() -> str:
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
 
+def _trim_background_reindex_log(log_path: Path) -> None:
+    """Recorta o tail de `background_reindex.log` se passar do teto.
+
+    O corte é em bytes; o prefixo até o primeiro ``\\n`` do tail é
+    descartado para não deixar um codepoint UTF-8 partido no início.
+    ``OSError`` é engolido — o spawn não depende do recorte.
+    """
+    try:
+        if not log_path.is_file():
+            return
+        size = log_path.stat().st_size
+        if size <= BACKGROUND_REINDEX_LOG_MAX_BYTES:
+            return
+        with open(log_path, "rb") as handle:
+            handle.seek(-BACKGROUND_REINDEX_LOG_MAX_BYTES, os.SEEK_END)
+            data = handle.read()
+        newline = data.find(b"\n")
+        if newline != -1:
+            data = data[newline + 1 :]
+        log_path.write_bytes(data)
+    except OSError:
+        return
+
+
 def _spawn_index_subprocess(
     workspace_path: Path, paths: Optional[list[str]], full: bool
 ) -> dict:
@@ -1048,6 +2083,8 @@ def _spawn_index_subprocess(
             "reason": "reindex_in_progress",
             "log_path": str(log_path),
         }
+
+    _trim_background_reindex_log(log_path)
 
     cmd = [
         sys.executable,
@@ -1100,6 +2137,15 @@ def _spawn_index_subprocess(
     return {"status": "started", "pid": process.pid, "log_path": str(log_path)}
 
 
+def _index_needs_full_conversion() -> bool:
+    """Índice anterior a 2.3.0 só converte com full integral, sem paths."""
+    try:
+        manifest = StorageBackend(index_dir=INDEX_DIR_PATH).get_manifest()
+    except Exception:
+        return False
+    return _version_tuple(manifest.index_version) < _version_tuple(CURRENT_INDEX_VERSION)
+
+
 def _spawn_background_reindex() -> None:
     """
     Dispara uma reindexação incremental (full=False) em um processo separado no
@@ -1132,37 +2178,45 @@ def _spawn_background_reindex() -> None:
         )
         return
 
-    try:
-        manifest = storage.get_manifest()
-        indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
-        if indexed_at.tzinfo is None:
-            indexed_at = indexed_at.replace(tzinfo=timezone.utc)
-        age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
-        current_git_sha = get_git_head_sha(workspace_path)
-        if (
-            age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
-            and manifest.git_head_sha is not None
-            and current_git_sha is not None
-            and manifest.git_head_sha == current_git_sha
-        ):
-            print(
-                "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
-                file=sys.stderr,
-            )
-            return
-    except Exception:
-        # Falha em heurística de debounce nunca deve impedir o fallback seguro:
-        # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
-        pass
+    needs_full = _index_needs_full_conversion()
+    if not needs_full:
+        try:
+            manifest = storage.get_manifest()
+            indexed_at = datetime.fromisoformat(manifest.last_indexed_at)
+            if indexed_at.tzinfo is None:
+                indexed_at = indexed_at.replace(tzinfo=timezone.utc)
+            age_s = (datetime.now(timezone.utc) - indexed_at).total_seconds()
+            current_git_sha = get_git_head_sha(workspace_path)
+            if (
+                age_s < BACKGROUND_REINDEX_MIN_INTERVAL_S
+                and manifest.git_head_sha is not None
+                and current_git_sha is not None
+                and manifest.git_head_sha == current_git_sha
+            ):
+                print(
+                    "[atlas] Reindex automático pulado — índice recente e HEAD do Git inalterado.",
+                    file=sys.stderr,
+                )
+                return
+        except Exception:
+            # Falha em heurística de debounce nunca deve impedir o fallback seguro:
+            # se não conseguirmos ler o manifest/timestamp, seguimos com o spawn normal.
+            pass
 
     log_path = INDEX_DIR_PATH / "background_reindex.log"
+    if needs_full:
+        print(
+            "[atlas] Índice legado não aceita atualização incremental; "
+            "reindex automático será integral (--full).",
+            file=sys.stderr,
+        )
     print(
         f"[atlas] Reindex automático em background iniciado em processo separado "
         f"(workspace={workspace_path}, log={log_path})...",
         file=sys.stderr,
     )
 
-    result = _spawn_index_subprocess(workspace_path, paths=None, full=False)
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=needs_full)
 
     if result["status"] == "error":
         print(
@@ -1175,6 +2229,41 @@ def _spawn_background_reindex() -> None:
             "reindexando este índice.",
             file=sys.stderr,
         )
+
+
+def _watch_spawn_reindex(workspace_path: Path) -> None:
+    """
+    Callback do watcher: só delega ao subprocesso (DECISÃO-004).
+
+    @MindWhy: nunca chama `index_workspace` — indexar na thread do servidor é o
+    bug documentado em `_spawn_background_reindex` (o GIL retido pelas libs
+    nativas deixaria o event loop do FastMCP sem CPU).
+    """
+    full = _index_needs_full_conversion()
+    if full:
+        print(
+            "[atlas] Watcher: índice legado; reindexação integral (--full).",
+            file=sys.stderr,
+        )
+    result = _spawn_index_subprocess(workspace_path, paths=None, full=full)
+    if result["status"] == "error":
+        print(
+            f"[atlas] Watcher: erro ao iniciar a reindexação: {result['error']}",
+            file=sys.stderr,
+        )
+
+
+def _start_watcher() -> None:
+    """Ativa o watcher de workspace (§3.1) e registra o estado para `atlas_status`."""
+    global WATCH_STATE
+    workspace_path = _index_workspace_root()
+    # @MindWhy: o index dir resolvido vai junto — com --index-dir/ATLAS_INDEX_DIR
+    # o diretório do índice não se chama `.code-index` e `IGNORE_DIRS` não o cobre.
+    WATCH_STATE = start_watcher_if_enabled(
+        workspace_path,
+        lambda: _watch_spawn_reindex(workspace_path),
+        index_dir=INDEX_DIR_PATH,
+    )
 
 
 def main():
@@ -1200,6 +2289,9 @@ def main():
     # Dispara reindex incremental em background (processo separado), sem bloquear
     # o startup do MCP nem competir pelo GIL com o event loop [GA-XX]
     _spawn_background_reindex()
+
+    # Watcher de workspace (§3.1): no-op sem ATLAS_WATCH=1
+    _start_watcher()
 
     # Roda o servidor MCP stdio de forma síncrona
     app.run()

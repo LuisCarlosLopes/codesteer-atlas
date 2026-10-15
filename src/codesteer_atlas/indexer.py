@@ -1,9 +1,13 @@
+import calendar
 import hashlib
+import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 import pathspec
@@ -13,15 +17,32 @@ from codesteer_atlas.chunker import ASTChunker, IncompatibleParserError
 from codesteer_atlas.config import (
     ATLASIGNORE_FILENAME,
     DEFAULT_INDEX_DIR,
+    GIT_HISTORY_TIMEOUT_S,
     GRAPH_FILENAME,
     IGNORE_DIRS,
     MAX_FILE_SIZE,
+    SCIP_ENV_FLAG,
     SUPPORTED_EXTENSIONS,
+    resolve_git_history_window,
 )
 from codesteer_atlas.embeddings import EmbeddingEngine
-from codesteer_atlas.graph import build_and_write, build_and_write_incremental, load_graph
+from codesteer_atlas.graph import (
+    apply_history,
+    apply_scip_result,
+    build_and_write,
+    build_and_write_incremental,
+    load_graph,
+)
 from codesteer_atlas.locking import reindex_lock
 from codesteer_atlas.models import IndexStats
+from codesteer_atlas.origin import OriginResolver
+from codesteer_atlas.semantic import (
+    ProseGenerator,
+    SemanticGeneration,
+    build_sidecar,
+    load_semantic_sidecar,
+    semantic_enabled,
+)
 from codesteer_atlas.storage import StorageBackend
 
 _PHASE_WEIGHTS = {
@@ -117,6 +138,273 @@ def get_git_head_sha(workspace_path: Path) -> Optional[str]:
             file=sys.stderr,
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Fase 5.1 — leitura bounded da história local de Git
+# @MindContext: mensagens de commit alcançáveis pelo HEAD, ancoradas nos símbolos atuais
+# @MindDecision: Git só por subprocesso (padrão de `get_git_head_sha`); nada de SDK,
+# rede ou persistência de diff/blob/PR/blame — o hunk é evidência, não dado guardado
+# @MindTest: tests/test_indexer.py
+# ---------------------------------------------------------------------------
+
+_HISTORY_RECORD_SEP = "\x1e"
+_HISTORY_UNIT_SEP = "\x1f"
+_HISTORY_LOG_FORMAT = "%x1e%H%x1f%aI%x1f%cI%x1f%s%x1f%b%x1f"
+_REVERT_SUBJECT_PREFIX = 'Revert "'
+_REVERT_BODY_RE = re.compile(r"This reverts commit ([0-9a-fA-F]{7,40})\.")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _run_git(args: List[str], workspace_path: Path) -> Optional[str]:
+    """Executa `git` em subprocesso no mesmo padrão seguro de `get_git_head_sha`."""
+    import subprocess
+
+    creationflags = (
+        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # type: ignore[attr-defined]
+    )
+    try:
+        result = subprocess.run(
+            # `core.quotePath=false` é local à invocação: sem ele o git escapa caminho
+            # não-ASCII em octal e o literal nunca casa `manifest_files`/`symbols_by_file`,
+            # perdendo o commit em silêncio. `encoding` fixo evita mojibake no locale ANSI.
+            ["git", "-c", "core.quotePath=false", *args],
+            cwd=str(workspace_path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            timeout=GIT_HISTORY_TIMEOUT_S,
+            creationflags=creationflags,
+        )
+        return result.stdout
+    except Exception as error:
+        print(
+            f"[atlas] Leitura de histórico Git indisponível ({type(error).__name__}).",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _history_cutoff(now: datetime, months: int) -> datetime:
+    """Instante-limite da janela temporal; a comparação é inclusiva neste instante."""
+    month_index = now.month - 1 - months
+    year = now.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(now.day, calendar.monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day)
+
+
+def _parse_history_log(raw: str) -> List[dict]:
+    """Converte a saída de `git log --name-only` em registros ordenados por data desc."""
+    entries: List[dict] = []
+    for block in raw.split(_HISTORY_RECORD_SEP):
+        if not block.strip():
+            continue
+        parts = block.split(_HISTORY_UNIT_SEP)
+        if len(parts) < 6:
+            continue
+        sha = parts[0].strip()
+        if not sha:
+            continue
+        try:
+            committed_dt = datetime.fromisoformat(parts[2].strip())
+        except ValueError:
+            continue
+        files = sorted({line.strip() for line in parts[5].splitlines() if line.strip()})
+        entries.append(
+            {
+                "sha": sha,
+                "authored_at": parts[1].strip(),
+                "committed_at": parts[2].strip(),
+                "committed_dt": committed_dt,
+                "subject": parts[3],
+                "body": parts[4].strip("\n"),
+                "files": files,
+            }
+        )
+    return entries
+
+
+def _revert_marks(subject: str, body: str) -> tuple[bool, Optional[str]]:
+    """Marcação determinística de revert; SHA só quando a mensagem o declara [RF07]."""
+    match = _REVERT_BODY_RE.search(body or "")
+    is_revert = subject.startswith(_REVERT_SUBJECT_PREFIX) or match is not None
+    if not is_revert:
+        return False, None
+    return True, match.group(1) if match else None
+
+
+def _select_history_window(
+    entries: List[dict], manifest_files: set, cutoff: datetime, max_commits: int
+) -> List[dict]:
+    """
+    Aplica a janela aprovada: por arquivo indexado, os `max_commits` mais recentes
+    que também estejam dentro do limite temporal (inclusivo no instante-limite).
+    """
+    counts: Dict[str, int] = {}
+    selected: List[dict] = []
+    for entry in entries:
+        if entry["committed_dt"] < cutoff:
+            continue
+        kept = []
+        for path in entry["files"]:
+            if path not in manifest_files:
+                continue
+            if counts.get(path, 0) >= max_commits:
+                continue
+            counts[path] = counts.get(path, 0) + 1
+            kept.append(path)
+        if kept:
+            selected.append({**entry, "indexed_files": kept})
+    return selected
+
+
+def _symbols_by_file(storage) -> Dict[str, List[tuple]]:
+    """Intervalos atuais de símbolo (não-markdown) usados na interseção de hunks."""
+    symbols: Dict[str, List[tuple]] = {}
+    for row in storage.get_graph_projection():
+        if row.get("language") == "markdown":
+            continue
+        symbols.setdefault(row["file_path"], []).append(
+            (row["scope_name"], int(row["start_line"]), int(row["end_line"]))
+        )
+    return symbols
+
+
+def _parse_touched_ranges(raw: str) -> Dict[str, List[tuple]]:
+    """Extrai (arquivo → intervalos pós-imagem) dos cabeçalhos de hunk, sem guardar diff."""
+    ranges: Dict[str, List[tuple]] = {}
+    current: Optional[str] = None
+    for line in raw.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            current = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
+            continue
+        if current is None or not line.startswith("@@"):
+            continue
+        match = _HUNK_RE.match(line)
+        if not match:
+            continue
+        start = int(match.group(1))
+        count = int(match.group(2)) if match.group(2) is not None else 1
+        ranges.setdefault(current, []).append((start, start + max(count, 1) - 1))
+    return ranges
+
+
+def _commit_touches(
+    workspace_path: Path, sha: str, files: List[str], symbols_by_file: Dict[str, List[tuple]]
+) -> tuple[List[dict], bool]:
+    """
+    Ancoragem do commit: interseção entre os hunks atribuíveis e o intervalo ATUAL
+    de cada símbolo. Devolve `(touches, confirmado)`; `confirmado=False` quando a
+    leitura do commit falhou e a evidência anterior deve ser preservada [GA-010-06].
+    """
+    raw = _run_git(
+        ["show", "--no-color", "--unified=0", "--no-renames", "--format=%x1e", sha, "--", *files],
+        workspace_path,
+    )
+    if raw is None:
+        return [], False
+
+    touches = set()
+    for path, ranges in _parse_touched_ranges(raw).items():
+        for scope_name, start, end in symbols_by_file.get(path, []):
+            if any(not (end < hunk_start or start > hunk_end) for hunk_start, hunk_end in ranges):
+                touches.add((path, scope_name))
+    return [{"file_path": path, "scope_name": scope} for path, scope in sorted(touches)], True
+
+
+def collect_git_history(
+    workspace_path: Path,
+    repo_name: str,
+    manifest,
+    storage,
+    now: Optional[datetime] = None,
+) -> dict:
+    """
+    Lê a janela aprovada do histórico alcançável pelo HEAD e devolve
+    `{"status", "records"}`. `status="unavailable"` significa que nada foi lido e
+    o snapshot ativo deve ser preservado — a indexação estrutural não é afetada [RF09].
+    """
+    max_commits, max_months = resolve_git_history_window()
+    now = now or datetime.now(timezone.utc)
+    cutoff = _history_cutoff(now, max_months)
+
+    raw = _run_git(
+        [
+            "log",
+            "--no-color",
+            f"--since={(cutoff - timedelta(seconds=1)).isoformat()}",
+            f"--format={_HISTORY_LOG_FORMAT}",
+            "--name-only",
+        ],
+        workspace_path,
+    )
+    if raw is None:
+        return {"status": "unavailable", "records": []}
+
+    manifest_files = set(manifest.files.keys())
+    selected = _select_history_window(_parse_history_log(raw), manifest_files, cutoff, max_commits)
+    symbols_by_file = _symbols_by_file(storage)
+    previous = {
+        row["id"]: row
+        for row in storage.get_history_projection()
+        if row.get("repo") == repo_name
+    }
+
+    records: List[dict] = []
+    partial = False
+    for entry in selected:
+        touches, confirmed = _commit_touches(
+            workspace_path, entry["sha"], entry["indexed_files"], symbols_by_file
+        )
+        stale = False
+        if not confirmed:
+            partial = True
+            stale = True
+            preserved = previous.get(entry["sha"])
+            if preserved:
+                touches = json.loads(preserved.get("touches_json") or "[]")
+        is_revert, reverted = _revert_marks(entry["subject"], entry["body"])
+        records.append(
+            {
+                "id": entry["sha"],
+                "repo": repo_name,
+                "subject": entry["subject"],
+                "body": entry["body"],
+                "authored_at": entry["authored_at"],
+                "committed_at": entry["committed_at"],
+                "files_touched": entry["indexed_files"],
+                "touches": touches,
+                "is_revert": is_revert,
+                "reverted_commit_id": reverted,
+                "stale": stale,
+            }
+        )
+
+    if partial:
+        status = "partial"
+    elif records:
+        status = "ok"
+    else:
+        status = "empty"
+    return {"status": status, "records": records}
+
+
+def stage_git_history(storage, records: List[dict]) -> Optional[str]:
+    """Embute as mensagens e materializa a geração candidata (ainda não ativa)."""
+    if records:
+        vectors = EmbeddingEngine().encode(
+            [f"{record['subject']}\n{record['body']}".strip() for record in records],
+            batch_size=32,
+        )
+        for record, vector in zip(records, vectors, strict=True):
+            record["vector"] = vector
+    return storage.stage_history(records)
 
 
 def load_atlasignore_spec(workspace_path: Path) -> Optional[pathspec.PathSpec]:
@@ -270,6 +558,8 @@ def index_workspace(
     paths: Optional[List[str]] = None,
     full: bool = False,
     report_progress: bool = True,
+    *,
+    ctx=None,
 ) -> IndexStats:
     """
     Núcleo reutilizável de indexação (DECISAO-005): varre o workspace (ou as
@@ -315,7 +605,44 @@ def index_workspace(
                 skipped_reason="reindex_in_progress",
             )
 
-        return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress)
+        return _index_workspace_locked(workspace_path, index_path, paths, full, report_progress, ctx=ctx)
+
+
+def _run_scip_phase(
+    workspace_path: Path,
+    index_path: Path,
+    manifest,
+    graph_strategy: str,
+    git_sha: Optional[str],
+) -> tuple[str, int, Optional[dict]]:
+    """
+    Fase `scip` (§3.2 · DECISÃO-002). Devolve `(status, arestas, métricas do grafo)`.
+
+    @MindWhy: o import é preguiçoso porque `server.py` importa este módulo — pôr
+    `scip_ingest` no topo o arrastaria para o caminho de import do servidor (Princípio V).
+    @MindDecision: indexador SCIP é whole-project e leva de dezenas de segundos a
+    minutos; roda só em rebuild completo do grafo ou quando o HEAD mudou desde a
+    ingestão anterior, senão as arestas `calls` já gravadas são preservadas.
+    """
+    from codesteer_atlas import scip_ingest
+
+    graph = load_graph(index_path)
+    previous = graph.get("scip") or {}
+    if graph_strategy != "full" and previous and previous.get("head_sha") == git_sha:
+        preserved_status = str(previous.get("status", scip_ingest.SCIP_STATUS_OK))
+        return preserved_status, int(previous.get("edges", 0)), None
+
+    result = scip_ingest.ingest_workspace(
+        workspace_path, manifest.languages_indexed, graph.get("nodes", [])
+    )
+    _graph_path, metrics = apply_scip_result(
+        index_path=index_path,
+        call_edges=result.edges,
+        status=result.status,
+        head_sha=git_sha,
+        languages=result.languages,
+    )
+    return result.status, len(result.edges), metrics
 
 
 def _index_workspace_locked(
@@ -324,6 +651,8 @@ def _index_workspace_locked(
     paths: Optional[List[str]],
     full: bool,
     report_progress: bool,
+    *,
+    ctx=None,
 ) -> IndexStats:
     """
     Corpo da indexação executado sob `reindex_lock` (DECISAO-001). Mesma lógica
@@ -346,6 +675,7 @@ def _index_workspace_locked(
     existing_files: dict[str, str] = {}
     existing_files_meta: dict[str, list] = {}
     existing_files_imports: dict[str, list] = {}
+    existing_files_declares: dict[str, str] = {}
     existing_manifest = None
     if storage.exists():
         try:
@@ -353,12 +683,23 @@ def _index_workspace_locked(
             existing_files = dict(existing_manifest.files)
             existing_files_meta = dict(existing_manifest.files_meta)
             existing_files_imports = dict(existing_manifest.files_imports)
+            existing_files_declares = dict(existing_manifest.files_declares)
         except Exception:
             # Manifest incompatível/corrompido: trata como índice vazio (full rebuild)
             existing_files = {}
             existing_files_meta = {}
             existing_files_imports = {}
+            existing_files_declares = {}
             existing_manifest = None
+
+    # @MindRisk: um recorte legado não pode misturar rows antigas com schema 2.3.0.
+    if existing_manifest is not None:
+        version = tuple(int(part) if part.isdigit() else 0 for part in existing_manifest.index_version.split("."))
+        if version < (2, 3, 0) and not (full and not paths):
+            raise RuntimeError(
+                f"O índice legado {existing_manifest.index_version} só pode ser convertido "
+                "com full=true sem paths; nenhum delete, append ou manifest foi executado."
+            )
 
     # Varre as subárvores selecionadas
     progress.tick("scan", 0, 1)
@@ -452,11 +793,24 @@ def _index_workspace_locked(
         set(files_to_process.keys()) & set(files_in_scope_from_manifest.keys())
     )
 
+    if existing_manifest is not None and not (full and not paths):
+        # Valida antes de chunking/geração e, principalmente, antes do delete.
+        storage.validate_incremental_schema()
+
+    # O cache é proporcional ao recorte que será substituído; arquivos inalterados
+    # permanecem persistidos e não precisam materializar vetores semânticos.
+    semantic_cache = (
+        storage.get_semantic_cache(sorted(files_to_delete_from_index))
+        if existing_manifest is not None and files_to_delete_from_index
+        else {}
+    )
+
     # Processa (chunking) os arquivos novos/alterados
     all_new_chunks = []
     files_processed = 0
     files_failed = 0
     processed_imports: dict[str, list] = {}
+    processed_declares: dict[str, str] = {}
 
     chunk_total = len(files_to_process)
     phase_started_at = time.perf_counter()
@@ -470,6 +824,11 @@ def _index_workspace_locked(
                 chunk._file_hash = new_hashes[rel_posix]
             all_new_chunks.extend(file_chunks)
             processed_imports[rel_posix] = chunker.extract_imports(file_path)
+            # Só as 4 linguagens de namespace devolvem valor; as demais retornam None
+            # e não entram no mapa (DECISÃO-003)
+            declared = chunker.extract_package_declaration(file_path)
+            if declared:
+                processed_declares[rel_posix] = declared
             files_processed += 1
         except IncompatibleParserError:
             # Falha de ambiente, não do arquivo: continuar produziria um índice vazio
@@ -510,6 +869,19 @@ def _index_workspace_locked(
     progress.phase_done("embed")
     phase_durations_s["embed"] = round(time.perf_counter() - phase_started_at, 4)
 
+    semantic_generation = SemanticGeneration(status="disabled")
+    semantic_resolver = OriginResolver(ctx=ctx)
+    if semantic_enabled():
+        semantic_generation = ProseGenerator(semantic_resolver).generate_purposes(
+            all_new_chunks, semantic_cache
+        )
+        unchanged_paths = set(current_files) - set(files_to_process)
+        semantic_generation.reused += sum(
+            1 for key in semantic_cache if key[0] in unchanged_paths
+        )
+        if semantic_generation.reused and semantic_generation.status == "no_origin":
+            semantic_generation.status = "ok"
+
     git_sha = get_git_head_sha(workspace_path)
 
     # Decide a estratégia de persistência:
@@ -520,12 +892,18 @@ def _index_workspace_locked(
     progress.tick("persist", 0, 1)
     phase_started_at = time.perf_counter()
     if existing_manifest is None or (full and not paths):
-        storage.store_chunks(all_new_chunks, git_head_sha=git_sha, files_meta=current_meta)
+        storage.store_chunks(
+            all_new_chunks,
+            git_head_sha=git_sha,
+            files_meta=current_meta,
+            files_declares=processed_declares,
+        )
         chunks_persisted = storage.update_manifest_after_incremental(
             files=new_hashes,
             git_head_sha=git_sha,
             files_meta=current_meta,
             files_imports=processed_imports,
+            files_declares=processed_declares,
         )
         manifest = storage.get_manifest()
     else:
@@ -544,14 +922,20 @@ def _index_workspace_locked(
         updated_files = dict(existing_manifest.files)
         updated_files_meta = dict(existing_manifest.files_meta)
         updated_files_imports = dict(existing_files_imports)
+        updated_files_declares = dict(existing_files_declares)
         for rel in files_to_delete_from_index:
             updated_files.pop(rel, None)
             updated_files_meta.pop(rel, None)
             updated_files_imports.pop(rel, None)
+            updated_files_declares.pop(rel, None)
         for rel, file_hash in new_hashes.items():
             if rel in files_to_process:
                 updated_files[rel] = file_hash
                 updated_files_imports[rel] = processed_imports.get(rel, [])
+                # Ausência = arquivo deixou de declarar namespace; a chave some
+                updated_files_declares.pop(rel, None)
+                if rel in processed_declares:
+                    updated_files_declares[rel] = processed_declares[rel]
         # [mtime, size] de todos os arquivos atuais é sempre atualizado, mesmo
         # para arquivos pulados via fast path [P01]
         updated_files_meta.update(current_meta)
@@ -561,8 +945,24 @@ def _index_workspace_locked(
             git_head_sha=git_sha,
             files_meta=updated_files_meta,
             files_imports=updated_files_imports,
+            files_declares=updated_files_declares,
         )
         manifest = storage.get_manifest()
+
+    # 4.2 e observabilidade são gravados depois da tabela, para que o snapshot
+    # reflita exatamente os propósitos que restaram no índice.
+    previous_sidecar = load_semantic_sidecar(index_path)
+    try:
+        semantic_payload = build_sidecar(
+            index_path,
+            storage.get_semantic_projection(),
+            semantic_generation,
+            semantic_resolver,
+            previous_sidecar,
+        )
+    except Exception as error:
+        print(f"[atlas] Falha ao gerar semantic.json: {error}", file=sys.stderr)
+        semantic_payload = previous_sidecar or {}
 
     progress.tick("persist", 1, 1)
     progress.phase_done("persist")
@@ -595,17 +995,87 @@ def _index_workspace_locked(
                 manifest=manifest,
                 updated_chunks=all_new_chunks,
                 updated_file_paths=changed_file_paths,
+                workspace_root=workspace_path,
             )
             graph_strategy = "incremental-code"
         else:
             _graph_path, graph_metrics = build_and_write(
-                storage, manifest, index_path, return_metadata=True
+                storage, manifest, index_path, return_metadata=True,
+                workspace_root=workspace_path,
             )
     except Exception as e:
         print(f"[atlas] Falha ao reconstruir graph.json: {e}", file=sys.stderr)
     progress.tick("graph", 1, 1)
     progress.phase_done("graph")
     phase_durations_s["graph"] = round(time.perf_counter() - phase_started_at, 4)
+
+    # Fase `scip`: depois do grafo, porque reescreve as arestas `calls` dele. Fica
+    # fora de `_PHASE_WEIGHTS` de propósito — os pesos existentes somam 1.0 (há teste
+    # de invariante) e a fase é opcional; incluí-la mudaria o progresso de quem não a usa.
+    scip_status = "disabled"
+    scip_edges = 0
+    if os.environ.get(SCIP_ENV_FLAG) == "1":
+        phase_started_at = time.perf_counter()
+        try:
+            scip_status, scip_edges, scip_metrics = _run_scip_phase(
+                workspace_path=workspace_path,
+                index_path=index_path,
+                manifest=manifest,
+                graph_strategy=graph_strategy,
+                git_sha=git_sha,
+            )
+            if scip_metrics is not None:
+                graph_metrics = scip_metrics
+        except Exception as e:
+            print(f"[atlas] Falha na fase SCIP: {e}", file=sys.stderr)
+            scip_status = "parse_failed"
+        phase_durations_s["scip"] = round(time.perf_counter() - phase_started_at, 4)
+        print(
+            f"[atlas] Fase SCIP: {scip_status} ({scip_edges} arestas 'calls').",
+            file=sys.stderr,
+        )
+
+    # Fase `history` (F5.1): roda DEPOIS do grafo e, como a fase SCIP, fica fora de
+    # `_PHASE_WEIGHTS` — os pesos existentes somam 1.0 e a camada é opcional.
+    # @MindRisk: falha aqui não pode derrubar o estrutural nem apagar o snapshot ativo
+    phase_started_at = time.perf_counter()
+    git_history: dict = {"status": "unavailable", "records": []}
+    try:
+        git_history = collect_git_history(workspace_path, repo_name, manifest, storage)
+        snapshot_id = None
+        if git_history["status"] == "unavailable":
+            storage.mark_history_state("unavailable")
+            # Sem leitura nova, o grafo reprojeta o snapshot ATIVO: nada é fabricado
+            # e a camada anterior não se perde no rebuild [GA-010-05].
+            history_rows = storage.get_history_projection()
+        else:
+            snapshot_id = stage_git_history(storage, git_history["records"])
+            history_rows = git_history["records"]
+        # Curto-circuito: sem projeção nova E sem snapshot ativo, `apply_history`
+        # seria uma reescrita byte-idêntica de graph.json + graph.html (~1,7 MB
+        # neste repo) — custo que anulava parte do ganho do caminho incremental
+        # para quem não usa a camada. `read_history_pointer()` é a guarda barata:
+        # ponteiro presente significa camada a substituir ou a remover do grafo.
+        if history_rows or storage.read_history_pointer() is not None:
+            _graph_path, graph_metrics = apply_history(index_path, history_rows)
+        # Ponteiro só depois do grafo: as duas superfícies referem o mesmo snapshot
+        if snapshot_id is not None:
+            storage.publish_history(
+                snapshot_id,
+                state="partial" if git_history["status"] == "partial" else "ok",
+            )
+            storage.gc_history()
+    except Exception as error:
+        print(f"[atlas] Falha na fase de histórico Git: {error}", file=sys.stderr)
+        git_history = {"status": "unavailable", "records": []}
+        storage.mark_history_state("unavailable")
+    phase_durations_s["history"] = round(time.perf_counter() - phase_started_at, 4)
+    history_state = storage.get_history_state()
+    print(
+        f"[atlas] Fase de histórico Git: {git_history['status']} "
+        f"({history_state.get('commits', 0)} commits, {history_state.get('touches', 0)} touches).",
+        file=sys.stderr,
+    )
 
     # O brief é sempre reconstruído por inteiro: seu valor está no ranking GLOBAL
     # (top-N camadas/hubs/entrypoints), que uma atualização parcial não preservaria
@@ -652,10 +1122,26 @@ def _index_workspace_locked(
         graph_edges=graph_metrics["graph_edges"],
         graph_bytes=graph_metrics["graph_bytes"],
         graph_html_bytes=graph_metrics["graph_html_bytes"],
+        scip_status=scip_status,
+        scip_edges=scip_edges,
+        git_history_status=git_history["status"],
+        git_history_commits=int(history_state.get("commits", 0)),
+        git_history_touches=int(history_state.get("touches", 0)),
         brief_status=brief_status,
         brief_bytes=brief_metrics["brief_bytes"],
         brief_layers=brief_metrics["brief_layers"],
         brief_entrypoints=brief_metrics["brief_entrypoints"],
+        semantic_status=semantic_generation.status,
+        semantic_generated=semantic_generation.generated,
+        semantic_reused=semantic_generation.reused,
+        semantic_file_generated=int((semantic_payload.get("last_generation") or {}).get("semantic_file_generated", 0)),
+        semantic_file_reused=int((semantic_payload.get("last_generation") or {}).get("semantic_file_reused", 0)),
+        semantic_layer_generated=int((semantic_payload.get("last_generation") or {}).get("semantic_layer_generated", 0)),
+        semantic_layer_reused=int((semantic_payload.get("last_generation") or {}).get("semantic_layer_reused", 0)),
+        semantic_origin=semantic_payload.get("origin") or semantic_generation.origin,
+        semantic_egress=semantic_payload.get("egress") or semantic_generation.egress,
+        semantic_origins=list(semantic_payload.get("origins") or semantic_generation.origins),
+        semantic_egresses=list(semantic_payload.get("egresses") or semantic_generation.egresses),
     )
 
 

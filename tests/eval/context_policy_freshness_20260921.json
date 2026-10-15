@@ -1,0 +1,370 @@
+{
+  "method": "one retrieval and one Jev evaluation per query; gate cost is counterfactual",
+  "total_chunks": 2508,
+  "actual_relevance": {
+    "model": "typesafe/jev-1.13-20260917",
+    "rubric": "jev-relevance-score-v1",
+    "requests": 2,
+    "valid_evaluations": 1,
+    "fallbacks": 0,
+    "cost_usd_known": 0.000455,
+    "cost_unknown_count": 0,
+    "complete": true,
+    "stop_reason": null,
+    "experimental_success": true,
+    "stage_ms_p50": 1419.019,
+    "stage_ms_p95": 1419.019
+  },
+  "counterfactual_avoided": {
+    "queries": 0,
+    "requests": 0,
+    "cost_usd": 0,
+    "jev_ms": 0
+  },
+  "by_class": [],
+  "ranking": [],
+  "tasks": [
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 2,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 5,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 4407,
+      "estimated_tokens_total": 0,
+      "total_bytes": 11623,
+      "delivery_and_expansion_ms": 79.1246669832617,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 5,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 9.172874997602776,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 5,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 2,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 4749,
+      "estimated_tokens_total": 0,
+      "total_bytes": 12244,
+      "delivery_and_expansion_ms": 39.845499995863065,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 2,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 9.251125011360273,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 10,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 1,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 5315,
+      "estimated_tokens_total": 0,
+      "total_bytes": 13275,
+      "delivery_and_expansion_ms": 42.76549999485724,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 1,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 8.942707994719967,
+      "policy": "always"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 2,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 5,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 4407,
+      "estimated_tokens_total": 0,
+      "total_bytes": 11623,
+      "delivery_and_expansion_ms": 35.23308300646022,
+      "policy": "exact_gate"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 5,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 8.433333016000688,
+      "policy": "exact_gate"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 5,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 2,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 4749,
+      "estimated_tokens_total": 0,
+      "total_bytes": 12244,
+      "delivery_and_expansion_ms": 37.28287501144223,
+      "policy": "exact_gate"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 2,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 8.247124991612509,
+      "policy": "exact_gate"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "metadata",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 10,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 1,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 885,
+      "total_tokens": 5315,
+      "estimated_tokens_total": 0,
+      "total_bytes": 13275,
+      "delivery_and_expansion_ms": 48.10450001969002,
+      "policy": "exact_gate"
+    },
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "intent": "debug",
+      "profile": "compact",
+      "mode": "content",
+      "optimization_stage": "selection",
+      "evidence_complete": false,
+      "complete": false,
+      "missing_evidence": [
+        {
+          "file_path": "src/codesteer_atlas/storage.py",
+          "scope_name": "StorageBackend.search_hybrid"
+        }
+      ],
+      "unverified_relations": [],
+      "expansion_calls": 1,
+      "obsolete_refs": 0,
+      "expansion_batch_size": 1,
+      "continuations": 0,
+      "expansion_limit_reached": false,
+      "search_tokens": 2788,
+      "total_tokens": 3542,
+      "estimated_tokens_total": 0,
+      "total_bytes": 9634,
+      "delivery_and_expansion_ms": 10.65291601116769,
+      "policy": "exact_gate"
+    }
+  ],
+  "usage": [
+    {
+      "scenario_id": "debug-fts-unavailable",
+      "kind": "task",
+      "query": "fts_unavailable",
+      "gate_reason": null,
+      "request_count": 2,
+      "cost_usd": 0.000455028,
+      "cost_status": "reported",
+      "status": "success",
+      "model": "typesafe/jev-1.13-20260917",
+      "retrieval_ms": 1664.1199580044486,
+      "jev_ms": 1419.019,
+      "warnings": [
+        "relevance_low_confidence"
+      ]
+    }
+  ]
+}

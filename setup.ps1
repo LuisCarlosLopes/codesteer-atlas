@@ -23,9 +23,9 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 Write-Host "uv encontrado: $(uv --version)"
 
-# 2. Sincroniza dependências (produção + dev)
+# 2. Sincroniza dependências (produção + dev + extra watch para ATLAS_WATCH=1)
 Write-Host "Sincronizando dependências..."
-uv sync --group dev
+uv sync --group dev --extra watch
 
 # 3. Valida imports críticos via deploy_mcp.py --check
 Write-Host "Validando imports críticos..."
@@ -34,5 +34,5 @@ uv run python deploy_mcp.py --check
 Write-Host ""
 Write-Host "Setup concluído. Próximos passos:"
 Write-Host "  1. Indexar workspace: uv run atlas-index --workspace ."
-Write-Host "  2. Iniciar servidor:  uv run atlas-serve"
+Write-Host "  2. Iniciar servidor:  uv run --extra watch atlas-serve"
 Write-Host "  3. Rodar testes:      uv run pytest -v"
