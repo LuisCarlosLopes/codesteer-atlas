@@ -9,6 +9,9 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Fixed
 
+- Selos de categoria das release notes deixam de herdar o estilo dos cards
+  de funcionalidades, evitando blocos verticais que pareciam barras de gráfico.
+
 - Release notes consolidam as novidades já implementadas na branch v3.0,
   incluindo Jev com rubrica v2, contexto compacto e expansão seletiva, sem
   apresentá-las como funcionalidades futuras em uma versão separada.
