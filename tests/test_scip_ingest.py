@@ -1,9 +1,9 @@
 """
 Testes da ingestão SCIP (§3.2).
 
-Nenhum toolchain SCIP está instalado nesta máquina, então a fixture `index.scip` é
-construída por um encoder mínimo simétrico ao leitor e a invocação do subprocesso é
-mockada. Nenhum teste depende de binário externo.
+A fixture `index.scip` é construída por um encoder mínimo simétrico ao leitor;
+a detecção de toolchains e a invocação do subprocesso são mockadas.
+Nenhum teste depende de binário externo.
 """
 
 import os
@@ -365,9 +365,9 @@ def test_referencias_repetidas_geram_uma_unica_aresta():
 # ---------------------------------------------------------------------------
 
 
-def test_detect_toolchains_vazio_nesta_maquina():
-    """Nenhum indexador SCIP está instalado — verificado; o chamador vira toolchain_missing."""
-    assert detect_toolchains(["python", "go", "rust", "typescript"]) == {}
+def test_detect_toolchains_vazio_sem_binarios_no_path():
+    with patch("codesteer_atlas.scip_ingest.shutil.which", return_value=None):
+        assert detect_toolchains(["python", "go", "rust", "typescript"]) == {}
 
 
 def test_detect_toolchains_encontra_binario_no_path():
@@ -467,7 +467,10 @@ def _fake_indexer(payload: bytes):
 
 
 def test_ingest_sem_toolchain_reporta_toolchain_missing_e_nenhuma_aresta(tmp_path):
-    with patch("codesteer_atlas.scip_ingest.subprocess.run") as run_mock:
+    with (
+        patch("codesteer_atlas.scip_ingest.shutil.which", return_value=None),
+        patch("codesteer_atlas.scip_ingest.subprocess.run") as run_mock,
+    ):
         result = ingest_workspace(tmp_path, ["python"], _nodes_do_fixture())
 
     assert result.status == SCIP_STATUS_TOOLCHAIN_MISSING

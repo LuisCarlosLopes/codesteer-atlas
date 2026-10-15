@@ -396,8 +396,9 @@ def test_indexer_incremental_reusa_irmao_pre_delete_e_atualiza_contadores(
     ("mode", "expected_status", "expected_origin"),
     [("v05", "failed", "local"), ("offline", "no_origin", None)],
 )
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_indexer_v05_e_offline_degradam_sem_host_api(
-    tmp_path, monkeypatch, mode, expected_status, expected_origin
+    tmp_path, monkeypatch, mode, expected_status, expected_origin, newline
 ):
     """V05 e ausência de origem mantêm T8 e não tentam host/API implícitos."""
     import lancedb
@@ -405,7 +406,7 @@ def test_indexer_v05_e_offline_degradam_sem_host_api(
     workspace = tmp_path / mode / "workspace"
     workspace.mkdir(parents=True)
     source = "def run():\n    return 1\n"
-    (workspace / "app.py").write_text(source, encoding="utf-8")
+    (workspace / "app.py").write_text(source, encoding="utf-8", newline=newline)
     index_dir = tmp_path / mode / "index"
     monkeypatch.setenv("ATLAS_SEMANTIC", "1")
     monkeypatch.delenv("ATLAS_SEMANTIC_LOCAL_URL", raising=False)
@@ -462,10 +463,10 @@ def test_indexer_v05_e_offline_degradam_sem_host_api(
     assert manifest.storage_backend == "lancedb"
     assert manifest.git_head_sha == "sha"
     assert manifest.files == {
-        "app.py": hashlib.sha256(source.encode("utf-8")).hexdigest()
+        "app.py": hashlib.sha256((workspace / "app.py").read_bytes()).hexdigest()
     }
     assert set(manifest.files_meta) == {"app.py"}
-    assert manifest.files_meta["app.py"][1] == len(source.encode("utf-8"))
+    assert manifest.files_meta["app.py"][1] == (workspace / "app.py").stat().st_size
     assert (index_dir / "graph.json").exists()
     assert (index_dir / "graph.html").exists()
     assert (index_dir / "brief.json").exists()

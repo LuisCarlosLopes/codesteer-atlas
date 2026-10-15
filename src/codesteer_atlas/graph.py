@@ -13,13 +13,13 @@ from codesteer_atlas.config import (
     GRAPH_AFFECTED_MAX_RESULTS,
     GRAPH_EXPLAIN_MAX_NEIGHBORS_PER_KIND,
     GRAPH_FILENAME,
-    GRAPH_NOISE_HUB_LABELS,
     GRAPH_PATH_MAX_HOPS,
     GRAPH_RESPONSE_MAX_CHARS,
     GRAPH_TOP_HUBS_LIMIT,
     IGNORE_DIRS,
     IMPORT_RESOLUTION_TIERS,
 )
+from codesteer_atlas.hub_noise import is_noise_hub as is_noise_hub
 from codesteer_atlas.markdown_links import (
     extract_markdown_link_targets,
     resolve_heading_section,
@@ -530,15 +530,6 @@ def _node_summary(node: dict) -> dict:
         "lines": node.get("lines"),
         "degree": node.get("degree", 0),
     }
-
-
-def is_noise_hub(node: dict) -> bool:
-    # @MindWhy: denylist só no ranking/expansão; o nó permanece no grafo e no explain direto
-    kind = node.get("kind")
-    if kind in {"section", "rationale"}:
-        return True
-    label = str(node.get("label") or "").casefold()
-    return label in GRAPH_NOISE_HUB_LABELS
 
 
 def _build_adjacency(graph: dict) -> Dict[str, List[Tuple[str, str]]]:

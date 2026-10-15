@@ -7,6 +7,13 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Fixed
+
+- O tokenizer embarcado preserva seus bytes no checkout Windows, evitando que
+  a conversão de finais de linha invalide o checksum e degrade a contagem exata.
+- O visualizador do grafo volta a reconhecer hubs de ruído pelo mesmo predicado
+  do grafo, preservando marcações explícitas sem criar ciclo de imports.
+
 ## [3.0.0] - 2026-10-15
 
 Contexto por tarefa, histórico Git local, camada semântica opcional e entrega

@@ -4,6 +4,7 @@ Testes do contador de tokens, contrato de evento e sink local de observabilidade
 (privacidade, concorrência, retenção) do plano observabilidade-tokens-consultas.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -56,6 +57,31 @@ def _write_tiny_tokenizer(path: Path, *, with_padding_truncation: bool = False) 
 # ---------------------------------------------------------------------------
 # Tokenizer embarcado: padrão local, identidade fixa, carregamento lazy
 # ---------------------------------------------------------------------------
+
+
+def test_bundled_tokenizer_preserva_bytes_em_checkout_windows(tmp_path):
+    """Checkout com autocrlf não pode invalidar a identidade do recurso embarcado."""
+    root = Path(__file__).resolve().parents[1]
+    relative = Path("src/codesteer_atlas/assets/tokenizer.json")
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes((root / relative).read_bytes())
+    attributes = root / ".gitattributes"
+    if attributes.exists():
+        (tmp_path / ".gitattributes").write_bytes(attributes.read_bytes())
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True, capture_output=True,
+        )
+
+    git("init", "--quiet")
+    git("-c", "core.autocrlf=false", "add", ".")
+    target.unlink()
+    git("-c", "core.autocrlf=true", "-c", "core.eol=crlf", "checkout", "--", relative.as_posix())
+
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == BUNDLED_TOKENIZER_SHA256
 
 
 @pytest.mark.parametrize("enabled", ["0", "1"])

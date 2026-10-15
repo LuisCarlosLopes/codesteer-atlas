@@ -1,0 +1,2 @@
+# O checksum do tokenizer exige bytes idênticos em todos os checkouts.
+src/codesteer_atlas/assets/tokenizer.json -text

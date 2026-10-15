@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from codesteer_atlas.config import GRAPH_HTML_FILENAME, GRAPH_VIEWER_MAX_FULL_NODES
+from codesteer_atlas.hub_noise import is_noise_hub
 
 # Bundle UMD do force-graph (d3-force embutido) vendorizado localmente para
 # manter o graph.html 100% autocontido/offline (abre via file://, sem CDN).
@@ -20,7 +21,9 @@ def _load_force_graph_lib() -> str:
 
 
 def _is_noise_hub(node: dict) -> bool:
-    """Retorna True quando o nó está marcado como hub de ruído nos metadados."""
+    """Aplica o predicado do grafo e aceita marcações explícitas de ruído."""
+    if is_noise_hub(node):
+        return True
     metrics = node.get("metrics") or {}
     if metrics.get("noise_hub") is True:
         return True

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -132,7 +133,7 @@ def test_unresolved_cite_does_not_create_ghost_node(temp_storage):
         update={"files": {"pkg/a.py": "sha-a"}, "files_imports": {}}
     )
 
-    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(encoding="utf-8"))
 
     assert all(node["id"] != "file:dec-999" for node in graph["nodes"])
     assert not any(edge["kind"] == "cites" for edge in graph["edges"])
@@ -196,7 +197,7 @@ def test_wikilink_vault_path_creates_links_to_from_nested_notes(temp_storage):
         },
     )
 
-    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(encoding="utf-8"))
     incoming = [
         edge
         for edge in graph["edges"]
@@ -220,8 +221,17 @@ def test_wikilink_vault_path_creates_links_to_from_nested_notes(temp_storage):
     )
 
 
-def test_wikilink_heading_links_to_section_not_only_file(temp_storage):
+@pytest.mark.parametrize("default_encoding", ["utf-8", "cp1252"])
+def test_wikilink_heading_links_to_section_not_only_file(
+    temp_storage, monkeypatch, default_encoding
+):
     """[[nota#heading]] cria links_to na seção; heading ausente cai no doc."""
+    original_read_text = Path.read_text
+
+    def read_text(path, encoding=None, errors=None):
+        return original_read_text(path, encoding=encoding or default_encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
     target = "docs/gd-037-arquitetura.md"
     manifest = _store_markdown_graph(
         temp_storage,
@@ -244,7 +254,7 @@ def test_wikilink_heading_links_to_section_not_only_file(temp_storage):
         },
     )
 
-    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(encoding="utf-8"))
     links = [
         edge
         for edge in graph["edges"]
@@ -272,7 +282,7 @@ def test_self_wikilink_vault_path_from_glossary_resolves(temp_storage):
         },
     )
 
-    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text())
+    graph = json.loads(build_and_write(temp_storage, manifest, temp_storage.index_dir).read_text(encoding="utf-8"))
 
     assert not any(
         "meta/meta/glossary" in (edge["source"] + edge["target"]) for edge in graph["edges"]
@@ -314,7 +324,7 @@ def test_incremental_keeps_incoming_links_to_rebuilt_section(temp_storage):
             manifest=manifest,
             updated_chunks=[updated],
             updated_file_paths={glossary},
-        )[0].read_text()
+        )[0].read_text(encoding="utf-8")
     )
 
     assert any(

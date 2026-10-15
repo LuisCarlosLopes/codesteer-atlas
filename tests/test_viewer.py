@@ -1,6 +1,8 @@
 import json
 import re
 
+import pytest
+
 from codesteer_atlas.config import GRAPH_VIEWER_MAX_FULL_NODES
 from codesteer_atlas.viewer import write_graph_html
 
@@ -137,12 +139,24 @@ def test_large_graph_marks_hubs_only_flag_in_embed(tmp_path):
     assert embedded["viewer"]["notice"] == "Grafo grande: exibindo hubs e vizinhanca 1-hop por padrao."
 
 
-def test_write_graph_html_embeds_noise_hub_ids(tmp_path):
+@pytest.mark.parametrize(
+    "noise_node",
+    [
+        {"kind": "symbol", "label": "json", "degree": 40},
+        {"kind": "symbol", "label": "Path", "degree": 2},
+        {"kind": "section", "label": "Introdução", "degree": 2},
+        {"kind": "rationale", "label": "Decisão", "degree": 2},
+        {"kind": "symbol", "label": "custom", "metrics": {"noise_hub": True}},
+        {"kind": "symbol", "label": "custom", "metrics": {"is_noise_hub": True}},
+        {"kind": "symbol", "label": "custom", "tags": ["noise_hub"]},
+    ],
+)
+def test_write_graph_html_embeds_noise_hub_ids(tmp_path, noise_node):
     graph = {
         "workspace_repo": "repo",
         "generated_at": "2026-06-05T12:00:00Z",
         "nodes": [
-            {"id": "sym:lib/json.py#json", "kind": "symbol", "label": "json", "degree": 40},
+            {"id": "sym:lib/json.py#json", **noise_node},
             {"id": "file:src/app.py", "kind": "file", "label": "app.py", "degree": 3},
         ],
         "edges": [],
