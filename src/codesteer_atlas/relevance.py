@@ -70,7 +70,7 @@ SCORE_LEVELS_V2 = (
     {"what": "Direct evidence: defines or implements the queried behavior or symbol, or is the "
              "documentation section that directly explains it. For an identifier query, the "
              "definition of the matching symbol.",
-     "examples": ["query 'retry with exponential backoff' -> the function that computes the "
+     "examples": ["query 'retry with exponential backoff' -> the function that computes the " +
                   "delay and retries", "query 'load_conf' -> the definition of load_config"]},
 )
 SCORE_QUESTION_V2 = (
