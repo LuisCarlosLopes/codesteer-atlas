@@ -8,6 +8,7 @@ Na configuração padrão, indexação e busca acontecem no seu computador. O c�
 | Recurso | Para quê |
 | --- | --- |
 | [Documentação visual](https://luiscarloslopes.github.io/codesteer-atlas/) | Conceitos, busca e indexação |
+| [Release notes](https://luiscarloslopes.github.io/codesteer-atlas/release-notes.html) | Histórico de versões, novidades e guias de migração |
 | [Guia de indexação, grafo e MCP](docs/guia-indexacao-grafo-mcp.md) | Pipeline, diagramas e o mapa `graph.html` |
 
 ## O que você ganha
