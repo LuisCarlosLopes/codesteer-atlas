@@ -163,7 +163,6 @@ def _enforce_context_budget(payload: dict, max_chars: int) -> None:
                 elif isinstance(value, dict):
                     trimmed, omitted = _trim_value(value, max(0, max_chars // 4))
                     sections[name] = trimmed
-                    value = trimmed
                     _mark(name, max(omitted, 1))
                     break
                 else:
