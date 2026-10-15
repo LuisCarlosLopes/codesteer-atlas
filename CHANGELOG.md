@@ -7,16 +7,38 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-### Fixed
+## [3.0.0] - 2026-10-15
 
-- Selos de categoria das release notes deixam de herdar o estilo dos cards
-  de funcionalidades, evitando blocos verticais que pareciam barras de gráfico.
-
-- Release notes consolidam as novidades já implementadas na branch v3.0,
-  incluindo Jev com rubrica v2, contexto compacto e expansão seletiva, sem
-  apresentá-las como funcionalidades futuras em uma versão separada.
+Contexto por tarefa, histórico Git local, camada semântica opcional e entrega
+compacta com expansão seletiva. Inclui o avaliador Jev com rubrica v2 por padrão
+quando habilitado, gates opcionais, corte de relevância e observabilidade.
+O pacote é 3.0.0; o formato do índice é 2.3.0. Converter índices legados exige
+reindexação completa sem recorte de paths. Recursos opcionais seguem desligados
+por padrão; o processamento local permanece disponível.
 
 ### Added
+
+- **`atlas_context`** — pacote da tarefa em uma chamada (`target` + `intent`
+  ∈ `edit`/`debug`/`review`/`understand`), com teto `CONTEXT_RESPONSE_MAX_CHARS`.
+  Substitui encadear `atlas_graph` + `atlas_brief` quando o símbolo já é conhecido.
+- **`atlas_graph(mode="affected")`** — raio de impacto por BFS reversa. Um commit
+  é história, não dependência: `affected` e `hubs` ignoram nós `commit` e arestas
+  `touches` (não entram no grau).
+- **Camada semântica opt-in** (`semantic.py`), ligada só com `ATLAS_SEMANTIC=1`.
+  Cadeia de origem: sampling MCP síncrono → `ATLAS_SEMANTIC_LOCAL_URL` →
+  `ATLAS_SEMANTIC_API_URL`. `ATLAS_SEMANTIC_API_KEY` vai só no header;
+  `ATLAS_SEMANTIC_MODEL` troca o payload para `model` + `messages` (OpenAI-compatible /
+  OpenRouter). Sem origem, o índice estrutural permanece completo.
+  `atlas_status.semantic` declara `enabled`, `origin`, `egress`, `index` e
+  `last_generation`. Warnings de busca: `semantic_layer_unavailable` e
+  `semantic_arm_unavailable` (vector+FTS seguem disponíveis).
+- **Arqueologia de Git** (local, sem env). A indexação lê a janela do repositório
+  e publica `.code-index/history.json` + tabela `commits_*`. `atlas_search` pode
+  devolver hits `type="commit"` / `language="git"`. `atlas_context(intent="debug")`
+  projeta `sections.recent_history` (commits ligados por `touches`). Degradação
+  declarada: `git_history_unavailable`, `git_history_partial`, `git_history_stale`,
+  `git_history_empty`. `atlas_index` reporta `git_history_status`,
+  `git_history_commits` e `git_history_touches`.
 
 - Central de release notes com histórico por versão e filtros por tipo
   de mudança em `docs/release-notes.html`. Os detalhes da branch 3.0, migração
@@ -28,7 +50,76 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   subiu os tokens de metadados em 32%, porque essas consultas perdem o corte e a
   rubrica v2.
 
+- `ATLAS_RELEVANCE_GATE` opt-in (default off) evita Jev para função, método ou
+  classe de nome exato único no pool, mantendo promoção determinística do alvo.
+  Configuração aparece no status e motivo de dispensa no ledger sem custo remoto.
+- Orientação de expansão seletiva (um ou dois símbolos por necessidade) e harness
+  pareado de gate/expansão em lotes de 5, 2 e 1. Uma avaliação remota por consulta;
+  custos contrafactuais separados dos reais, com parada em custo desconhecido.
+  [Avaliação pareada](tests/eval/context_policy_20260921.md): 7,63% menos tokens
+  em metadados com gate e lote dois, com mais chamadas de expansão; métricas
+  de qualidade iguais entre variantes, com lacunas explicitadas por classe.
+
+- **Perfil compacto de contexto** (`ATLAS_CONTEXT_OPTIMIZATION`, default False):
+  `atlas_search` e `atlas_context` aceitam `response_profile`
+  (`default`|`compact`|`full`). No compacto: projeção enxuta com `ref` de
+  expansão, deduplicação conservadora por cobertura de conteúdo, orçamento a
+  70% do teto vigente e, com Jev ligado, corte padrão abaixo da metade da escala
+  sem reposição; `ATLAS_RELEVANCE_CUT=0` usa seleção conservadora. Nova tool `atlas_expand` resolve até 5 refs
+  por id no índice (sem embedding/Jev), valida hash do arquivo e path no
+  workspace. Independente de `ATLAS_RELEVANCE`. Exemplo MCP default OFF.
+- **Avaliador opcional de relevância Jev** (`ATLAS_RELEVANCE`, default False):
+  quando ligado, `atlas_search` envia a consulta e os candidatos do pool
+  pós-RRF à API System One do OpenRouter e reordena por evidência antes do
+  `top_k` e do orçamento existentes. Lotes de até 192 KB (máx. 2 chamadas,
+  timeout compartilhado de 3 s); baixa confiança isola o candidato sem
+  invalidar o lote. Falha de contrato ou timeout volta ao reranker local
+  para o lote afetado. Cada busca emite uma linha JSON de custo em stderr
+  (conhecido, parcialmente conhecido, zero sem chamada, ou desconhecido);
+  `atlas_status.relevance` declara configuração sem rede.
+  `ATLAS_RERANK=0` continua desligando toda reordenação.
+  Modelo via `ATLAS_RELEVANCE_MODEL` (default `~typesafe/jev-latest`; pin
+  versionado `typesafe/jev-1.13` permanece aceito). `probabilities` de Score
+  segue o contrato TypeSafe (chaves `"0"`..`"n-1"` + `legend`).
+- Guia de primeiros passos em português, com configuração por editor, primeira
+  busca e ajuda com erros comuns, acessível pelo README e pela documentação visual.
+- **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):
+  mede a string JSON final devolvida por `atlas_search`, `atlas_context`,
+  `atlas_brief` e `atlas_graph` — caracteres/bytes exatos e tokens (exatos via
+  tokenizer local embarcado ou `ATLAS_TOKENIZER_PATH`, com estimativa
+  `ceil(chars/4)` apenas se indisponível, identificada como tal). Evento v1 em memória (último
+  por tool) e JSONL local com retenção limitada
+  (`.code-index/observability/events.jsonl`, ≤3 MiB com rotação). Bloco
+  `atlas_status.observability` só aparece quando o flag está ligado.
+- **Teto global de resposta em `atlas_search`** (24.000 caracteres/bytes,
+  6.000 tokens exatos com tokenizer configurado): corte determinístico de
+  resultados inteiros pela cauda, preservando ordem/identidade dos
+  sobreviventes; `truncated.results` declara quantos foram removidos.
+  `atlas_context`/`atlas_brief`/`atlas_graph` reaproveitam seus tetos de
+  caracteres existentes e ganham o mesmo bloco `budget` (`mode`, `max_chars`,
+  `max_bytes`, `max_tokens`, `tokenizer_sha256`, `used_chars`) na resposta.
+- `scripts/eval_search.py --delivery`: mede MRR/recall@5 da resposta
+  REALMENTE ENTREGUE (pós-montagem e pós-orçamento) nos modos
+  metadata/content, sobre os mesmos candidatos do ranking pré-budget — nunca
+  altera a medição histórica. `--benchmark` mede o overhead de observabilidade
+  (desligada / estimativa / tokenizer local) sobre payloads sintéticos fixos.
+- Dependência direta `tokenizers>=0.22.2,<0.23` (já transitiva via fastembed).
+- **Tokenizer padrão embarcado**: SmolLM2-135M (Apache-2.0, revisão e SHA-256
+  fixos) incluído no pacote, carregado de forma preguiçosa, sem download em
+  runtime. `ATLAS_OBSERVABILITY=1` basta para registrar contagem exata segundo
+  essa referência; `ATLAS_TOKENIZER_PATH` substitui o padrão. Eventos identificam
+  origem (`bundled`/`custom`), nome, revisão e hash, sem registrar paths.
+  Os limites de tokens das respostas passam a valer por padrão mesmo com o
+  registro desligado; falha no recurso/override degrada para estimativa e
+  limite por bytes. A contagem não representa faturamento do modelo cliente.
+
 ### Changed
+
+- `CURRENT_INDEX_VERSION` passa de `2.2.0` para **`2.3.0`** (campos `purpose` /
+  `purpose_hash` / `purpose_vector` e sidecar `semantic.json`).
+  **`MIN_INDEX_VERSION` continua `2.0.0`**: índices 2.0.x–2.2.x seguem buscáveis.
+  Converter para 2.3.0 exige `atlas-index --full` sem `--paths` — recorte
+  incremental não mistura schemas.
 
 - Site do Atlas recriado com a identidade visual, tipografia e logos do CodeSteer,
   narrativa sobre contexto do repositório e navegação responsiva. A documentação
@@ -77,6 +168,13 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Fixed
 
+- Selos de categoria das release notes deixam de herdar o estilo dos cards
+  de funcionalidades, evitando blocos verticais que pareciam barras de gráfico.
+
+- Release notes consolidam as novidades já implementadas na branch v3.0,
+  incluindo Jev com rubrica v2, contexto compacto e expansão seletiva, sem
+  apresentá-las como funcionalidades futuras em uma versão separada.
+
 - Explicação do Jev no site sincronizada com a rubrica v2, lotes de 192 KB,
   corte padrão do perfil compacto sem reposição e gates opcionais. O guia
   passa a mostrar a ativação com a fronteira de dados e o custo de API explícitos.
@@ -114,73 +212,6 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   compacto final reduziu 31,66% dos tokens de metadados e 12,21% com conteúdo,
   mantendo MRR/recall por classe sobre os mesmos candidatos (Jev desligado).
 
-### Added
-
-- `ATLAS_RELEVANCE_GATE` opt-in (default off) evita Jev para função, método ou
-  classe de nome exato único no pool, mantendo promoção determinística do alvo.
-  Configuração aparece no status e motivo de dispensa no ledger sem custo remoto.
-- Orientação de expansão seletiva (um ou dois símbolos por necessidade) e harness
-  pareado de gate/expansão em lotes de 5, 2 e 1. Uma avaliação remota por consulta;
-  custos contrafactuais separados dos reais, com parada em custo desconhecido.
-  [Avaliação pareada](tests/eval/context_policy_20260921.md): 7,63% menos tokens
-  em metadados com gate e lote dois, com mais chamadas de expansão; métricas
-  de qualidade iguais entre variantes, com lacunas explicitadas por classe.
-
-- **Perfil compacto de contexto** (`ATLAS_CONTEXT_OPTIMIZATION`, default False):
-  `atlas_search` e `atlas_context` aceitam `response_profile`
-  (`default`|`compact`|`full`). No compacto: projeção enxuta com `ref` de
-  expansão, deduplicação conservadora por cobertura de conteúdo, orçamento a
-  70% do teto vigente e, com Jev ligado, seleção que só remove candidatos com
-  score ≤ 0,25 e confiança ≥ 0,90. Nova tool `atlas_expand` resolve até 5 refs
-  por id no índice (sem embedding/Jev), valida hash do arquivo e path no
-  workspace. Independente de `ATLAS_RELEVANCE`. Exemplo MCP default OFF.
-- **Avaliador opcional de relevância Jev** (`ATLAS_RELEVANCE`, default False):
-  quando ligado, `atlas_search` envia a consulta e os candidatos do pool
-  pós-RRF à API System One do OpenRouter e reordena por evidência antes do
-  `top_k` e do orçamento existentes. Lotes de até 24 KB (máx. 2 chamadas,
-  timeout compartilhado de 3 s); baixa confiança isola o candidato sem
-  invalidar o lote. Falha de contrato ou timeout volta ao reranker local
-  para o lote afetado. Cada busca emite uma linha JSON de custo em stderr
-  (conhecido, parcialmente conhecido, zero sem chamada, ou desconhecido);
-  `atlas_status.relevance` declara configuração sem rede.
-  `ATLAS_RERANK=0` continua desligando toda reordenação.
-  Modelo via `ATLAS_RELEVANCE_MODEL` (default `~typesafe/jev-latest`; pin
-  versionado `typesafe/jev-1.13` permanece aceito). `probabilities` de Score
-  segue o contrato TypeSafe (chaves `"0"`..`"n-1"` + `legend`).
-- Guia de primeiros passos em português, com configuração por editor, primeira
-  busca e ajuda com erros comuns, acessível pelo README e pela documentação visual.
-- **Observabilidade de tokens por consulta** (`ATLAS_OBSERVABILITY=1`, opt-in):
-  mede a string JSON final devolvida por `atlas_search`, `atlas_context`,
-  `atlas_brief` e `atlas_graph` — caracteres/bytes exatos e tokens (exatos via
-  tokenizer local embarcado ou `ATLAS_TOKENIZER_PATH`, com estimativa
-  `ceil(chars/4)` apenas se indisponível, identificada como tal). Evento v1 em memória (último
-  por tool) e JSONL local com retenção limitada
-  (`.code-index/observability/events.jsonl`, ≤3 MiB com rotação). Bloco
-  `atlas_status.observability` só aparece quando o flag está ligado.
-- **Teto global de resposta em `atlas_search`** (24.000 caracteres/bytes,
-  6.000 tokens exatos com tokenizer configurado): corte determinístico de
-  resultados inteiros pela cauda, preservando ordem/identidade dos
-  sobreviventes; `truncated.results` declara quantos foram removidos.
-  `atlas_context`/`atlas_brief`/`atlas_graph` reaproveitam seus tetos de
-  caracteres existentes e ganham o mesmo bloco `budget` (`mode`, `max_chars`,
-  `max_bytes`, `max_tokens`, `tokenizer_sha256`, `used_chars`) na resposta.
-- `scripts/eval_search.py --delivery`: mede MRR/recall@5 da resposta
-  REALMENTE ENTREGUE (pós-montagem e pós-orçamento) nos modos
-  metadata/content, sobre os mesmos candidatos do ranking pré-budget — nunca
-  altera a medição histórica. `--benchmark` mede o overhead de observabilidade
-  (desligada / estimativa / tokenizer local) sobre payloads sintéticos fixos.
-- Dependência direta `tokenizers>=0.22.2,<0.23` (já transitiva via fastembed).
-- **Tokenizer padrão embarcado**: SmolLM2-135M (Apache-2.0, revisão e SHA-256
-  fixos) incluído no pacote, carregado de forma preguiçosa, sem download em
-  runtime. `ATLAS_OBSERVABILITY=1` basta para registrar contagem exata segundo
-  essa referência; `ATLAS_TOKENIZER_PATH` substitui o padrão. Eventos identificam
-  origem (`bundled`/`custom`), nome, revisão e hash, sem registrar paths.
-  Os limites de tokens das respostas passam a valer por padrão mesmo com o
-  registro desligado; falha no recurso/override degrada para estimativa e
-  limite por bytes. A contagem não representa faturamento do modelo cliente.
-
-### Fixed
-
 - Corrigidos os 13 erros de tipagem reportados pelo mypy nos contratos de
   links Markdown, grafo, histórico e status. O fallback de sampling fora de
   workers AnyIO agora aceita objetos awaitable além de corrotinas nativas.
@@ -199,45 +230,6 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - `background_reindex.log` passa a ter teto de 256 KiB: o spawn recorta o
   final do arquivo antes de appendar o run novo, para o log de reindex em
   background não crescer sem limite.
-
-## [3.0.0] - 2026-09-05
-
-Corte major: Fase 1 omitida do 2.2.0, mais as camadas 4 (semântica opt-in) e 5
-(arqueologia de Git). Sem flag nova para a história: a janela é constante
-(`GIT_HISTORY_MAX_COMMITS_PER_FILE` / `GIT_HISTORY_MAX_MONTHS`). Watcher, SCIP,
-rerank e o braço estrutural já estão em [2.2.0].
-
-### Added
-
-- **`atlas_context`** — pacote da tarefa em uma chamada (`target` + `intent`
-  ∈ `edit`/`debug`/`review`/`understand`), com teto `CONTEXT_RESPONSE_MAX_CHARS`.
-  Substitui encadear `atlas_graph` + `atlas_brief` quando o símbolo já é conhecido.
-- **`atlas_graph(mode="affected")`** — raio de impacto por BFS reversa. Um commit
-  é história, não dependência: `affected` e `hubs` ignoram nós `commit` e arestas
-  `touches` (não entram no grau).
-- **Camada semântica opt-in** (`semantic.py`), ligada só com `ATLAS_SEMANTIC=1`.
-  Cadeia de origem: sampling MCP síncrono → `ATLAS_SEMANTIC_LOCAL_URL` →
-  `ATLAS_SEMANTIC_API_URL`. `ATLAS_SEMANTIC_API_KEY` vai só no header;
-  `ATLAS_SEMANTIC_MODEL` troca o payload para `model` + `messages` (OpenAI-compatible /
-  OpenRouter). Sem origem, o índice estrutural permanece completo.
-  `atlas_status.semantic` declara `enabled`, `origin`, `egress`, `index` e
-  `last_generation`. Warnings de busca: `semantic_layer_unavailable` e
-  `semantic_arm_unavailable` (vector+FTS seguem disponíveis).
-- **Arqueologia de Git** (local, sem env). A indexação lê a janela do repositório
-  e publica `.code-index/history.json` + tabela `commits_*`. `atlas_search` pode
-  devolver hits `type="commit"` / `language="git"`. `atlas_context(intent="debug")`
-  projeta `sections.recent_history` (commits ligados por `touches`). Degradação
-  declarada: `git_history_unavailable`, `git_history_partial`, `git_history_stale`,
-  `git_history_empty`. `atlas_index` reporta `git_history_status`,
-  `git_history_commits` e `git_history_touches`.
-
-### Changed
-
-- `CURRENT_INDEX_VERSION` passa de `2.2.0` para **`2.3.0`** (campos `purpose` /
-  `purpose_hash` / `purpose_vector` e sidecar `semantic.json`).
-  **`MIN_INDEX_VERSION` continua `2.0.0`**: índices 2.0.x–2.2.x seguem buscáveis.
-  Converter para 2.3.0 exige `atlas-index --full` sem `--paths` — recorte
-  incremental não mistura schemas.
 
 ## [2.2.0] - 2026-08-30
 
