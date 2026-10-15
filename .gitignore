@@ -14,3 +14,4 @@ _codesteer/**
 .DS_Store
 cognitive-base/.obsidian/
 .impeccable/
+.playwright-mcp/

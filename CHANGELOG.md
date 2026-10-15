@@ -9,6 +9,10 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Added
 
+- Central de release notes com histórico por versão, busca e filtros por tipo
+  de mudança em `docs/release-notes.html`. Os detalhes da branch 3.0, migração
+  do índice e configuração do Jev estão em `docs/release-notes-v3.html`.
+
 - `ATLAS_RELEVANCE_GATE=identifier` dispensa o Jev para toda consulta que seja um
   identificador (`reason=identifier_query`). Opcional e desligado: no replay de
   24/09, cortou as chamadas de 28 para 13, mas baixou o MRR de 0,613 para 0,569 e
@@ -16,6 +20,13 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   rubrica v2.
 
 ### Changed
+
+- Site do Atlas recriado com a identidade visual, tipografia e logos do CodeSteer,
+  narrativa sobre contexto do repositório e navegação responsiva. A documentação
+  técnica completa permanece disponível em `docs/documentacao.html`.
+- Guia de primeiros passos e documentação técnica alinhados à mesma identidade
+  do site, com navegação compartilhada, diagramas na nova paleta e leitura
+  responsiva de exemplos e tabelas.
 
 - Respostas compactas (`atlas_search` e `atlas_context` no perfil compacto, e
   `atlas_expand`) só trazem o bloco `budget` quando algo foi cortado para caber;
@@ -56,6 +67,10 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   `CLAUDE.md` apenas importa esse arquivo.
 
 ### Fixed
+
+- Explicação do Jev no site sincronizada com a rubrica v2, lotes de 192 KB,
+  corte padrão do perfil compacto sem reposição e gates opcionais. O guia
+  passa a mostrar a ativação com a fronteira de dados e o custo de API explícitos.
 
 - Com o Jev ligado, o pool chega ao Jev já na ordem do rerank lexical, e o
   candidato que ele não avalia com confiança fica nessa ordem, não mais na
