@@ -18,7 +18,7 @@ projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Added
 
-- Central de release notes com histórico por versão, busca e filtros por tipo
+- Central de release notes com histórico por versão e filtros por tipo
   de mudança em `docs/release-notes.html`. Os detalhes da branch 3.0, migração
   do índice e configuração do Jev estão em `docs/release-notes-v3.html`.
 
