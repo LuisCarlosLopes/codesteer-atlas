@@ -19,6 +19,17 @@ def _load_force_graph_lib() -> str:
     return _FORCE_GRAPH_LIB_CACHE
 
 
+def _is_noise_hub(node: dict) -> bool:
+    """Retorna True quando o nó está marcado como hub de ruído nos metadados."""
+    metrics = node.get("metrics") or {}
+    if metrics.get("noise_hub") is True:
+        return True
+    if metrics.get("is_noise_hub") is True:
+        return True
+    tags = node.get("tags") or []
+    return "noise_hub" in tags
+
+
 _HTML_TEMPLATE = """<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -876,11 +887,9 @@ def write_graph_html(graph: dict, index_dir: Path) -> Path:
 
     existing_viewer = dict(graph_for_view.get("viewer") or {})
     existing_render_profile = dict(existing_viewer.get("render_profile") or {})
-    # Import tardio evita ciclo com graph.py
-    from codesteer_atlas.graph import is_noise_hub
 
     noise_hub_ids = [
-        node["id"] for node in graph_for_view.get("nodes", []) if is_noise_hub(node)
+        node["id"] for node in graph_for_view.get("nodes", []) if _is_noise_hub(node)
     ]
     graph_for_view["viewer"] = {
         **existing_viewer,
